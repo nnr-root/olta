@@ -30,6 +30,8 @@ type PhishingTemplateContext struct {
 	QRBase64    string
 	QRName      string
 	QR          string
+	QRCode      string
+	RIdQR       string
 	BaseRecipient
 }
 
@@ -104,6 +106,8 @@ func NewPhishingTemplateContext(ctx TemplateContext, r BaseRecipient, rid string
 		QRBase64:      qrBase64,
 		QRName:        qrName,
 		QR:            qr,
+		QRCode:        qr,
+		RIdQR:         qr,
 	}, nil
 }
 
@@ -159,6 +163,8 @@ func NewPhishingTemplateContextSms(ctx TemplateContext, r BaseRecipient, rid str
 		QRBase64:      qrBase64,
 		QRName:        qrName,
 		QR:            qr,
+		QRCode:        qr,
+		RIdQR:         qr,
 	}, nil
 }
 

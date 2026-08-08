@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"regexp"
+	"strings"
 
 	"github.com/gophish/gomail"
 	"github.com/jordan-wright/email"
@@ -94,6 +96,41 @@ func (s *ModelsSuite) TestEmailRequestGenerate(ch *check.C) {
 	ch.Assert(got.Subject, check.Equals, expected.Subject)
 	ch.Assert(string(got.Text), check.Equals, string(expected.Text))
 	ch.Assert(string(got.HTML), check.Equals, string(expected.HTML))
+}
+
+func (s *ModelsSuite) TestEmailRequestGenerateQRCodeInline(ch *check.C) {
+	req := &EmailRequest{
+		SMTP: SMTP{FromAddress: "from@example.com"},
+		Template: Template{
+			Name: "QR Template",
+			HTML: `<html><body>{{.QRCode}}</body></html>`,
+		},
+		URL:    "https://example.com/campaign",
+		QRSize: "256",
+		RId:    "recipient-qr-id",
+		BaseRecipient: BaseRecipient{
+			FirstName: "QR",
+			LastName:  "Recipient",
+			Email:     "qr@example.com",
+		},
+		FromAddress: "from@example.com",
+	}
+	msg := gomail.NewMessage()
+	err := req.Generate(msg)
+	ch.Assert(err, check.IsNil)
+	var raw bytes.Buffer
+	_, err = msg.WriteTo(&raw)
+	ch.Assert(err, check.IsNil)
+
+	parsed, err := email.NewEmailFromReader(bytes.NewReader(raw.Bytes()))
+	ch.Assert(err, check.IsNil)
+	match := regexp.MustCompile(`cid:(qr-[a-f0-9]+\.png)`).FindStringSubmatch(string(parsed.HTML))
+	ch.Assert(match, check.HasLen, 2)
+	qrName := match[1]
+
+	message := raw.String()
+	ch.Assert(strings.Contains(message, "Content-Disposition: inline"), check.Equals, true)
+	ch.Assert(strings.Contains(message, "Content-ID: <"+qrName+">"), check.Equals, true)
 }
 
 func (s *ModelsSuite) TestGetSmtpFrom(ch *check.C) {

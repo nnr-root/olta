@@ -25,6 +25,7 @@ type EmailRequest struct {
 	URL         string       `json:"url"`
 	Tracker     string       `json:"tracker" gorm:"-"`
 	TrackingURL string       `json:"tracking_url" gorm:"-"`
+	QRSize      string       `json:"qrsize" gorm:"-"`
 	UserId      int64        `json:"-"`
 	ErrorChan   chan (error) `json:"-" gorm:"-"`
 	RId         string       `json:"id"`
@@ -41,7 +42,7 @@ func (s *EmailRequest) getFromAddress() string {
 }
 
 func (s *EmailRequest) getQRSize() string {
-	return ""
+	return s.QRSize
 }
 
 // Validate ensures the SendTestEmailRequest structure
@@ -168,6 +169,14 @@ func (s *EmailRequest) Generate(msg *gomail.Message) error {
 	// Attach the files
 	for _, a := range s.Template.Attachments {
 		addAttachment(msg, a, ptx)
+	}
+	if ptx.QRBase64 != "" {
+		addAttachment(msg, Attachment{
+			Name:        ptx.QRName,
+			Content:     ptx.QRBase64,
+			Type:        "image/png",
+			vanillaFile: true,
+		}, ptx)
 	}
 
 	return nil

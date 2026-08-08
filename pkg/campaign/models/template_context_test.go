@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"strings"
 
 	check "gopkg.in/check.v1"
 )
@@ -47,6 +48,7 @@ func decodeOltaURL(rawURL string) (*url.URL, url.Values, error) {
 type mockTemplateContext struct {
 	URL         string
 	FromAddress string
+	QRSize      string
 }
 
 func (m mockTemplateContext) getFromAddress() string {
@@ -58,7 +60,7 @@ func (m mockTemplateContext) getBaseURL() string {
 }
 
 func (m mockTemplateContext) getQRSize() string {
-	return ""
+	return m.QRSize
 }
 
 func (s *ModelsSuite) TestNewTemplateContext(c *check.C) {
@@ -94,4 +96,28 @@ func (s *ModelsSuite) TestNewTemplateContext(c *check.C) {
 	c.Assert(trackerValues.Get("rid"), check.Equals, r.RId)
 	c.Assert(trackerValues.Get("o"), check.Equals, "track")
 	c.Assert(got.Tracker, check.Equals, "<img alt='' style='display: none' src='"+got.TrackingURL+"'/>")
+}
+
+func (s *ModelsSuite) TestQRTemplateAliases(c *check.C) {
+	recipient := BaseRecipient{
+		FirstName: "QR",
+		LastName:  "Recipient",
+		Email:     "qr@example.com",
+	}
+	ctx := mockTemplateContext{
+		URL:         "https://example.com/campaign",
+		FromAddress: "from@example.com",
+		QRSize:      "256",
+	}
+
+	got, err := NewPhishingTemplateContext(ctx, recipient, "recipient-qr-id")
+	c.Assert(err, check.IsNil)
+	c.Assert(got.QRBase64, check.Not(check.Equals), "")
+	c.Assert(got.QRName, check.Matches, `qr-[a-f0-9]+\.png`)
+	c.Assert(got.QRCode, check.Equals, got.QR)
+	c.Assert(got.RIdQR, check.Equals, got.QR)
+
+	rendered, err := ExecuteTemplate(`{{.QRCode}}|{{.RIdQR}}`, got)
+	c.Assert(err, check.IsNil)
+	c.Assert(strings.Count(rendered, "cid:"+got.QRName), check.Equals, 2)
 }

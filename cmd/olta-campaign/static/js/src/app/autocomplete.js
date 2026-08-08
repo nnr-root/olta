@@ -42,6 +42,16 @@ var TEMPLATE_TAGS = [{
         id: 9,
         name: 'BaseURL',
         description: 'The base URL with the path and rid parameter stripped. Useful for making links to static files.'
+    },
+    {
+        id: 10,
+        name: 'QRCode',
+        description: 'An inline QR code containing the recipient-specific campaign URL.'
+    },
+    {
+        id: 11,
+        name: 'RIdQR',
+        description: 'An alias for QRCode.'
     }
 ];
 

@@ -253,8 +253,8 @@ func (m *MailLog) Generate(msg *gomail.Message) error {
 	for _, a := range c.Template.Attachments {
 		addAttachment(msg, a, ptx)
 	}
-	// Attach QR code file if size was specified
-	if c.QRSize != "" {
+	// Attach the recipient-specific QR code when one was generated.
+	if ptx.QRBase64 != "" {
 		attachment := Attachment{
 			Name:        ptx.QRName,
 			Content:     ptx.QRBase64,
