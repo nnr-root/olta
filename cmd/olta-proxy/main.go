@@ -33,6 +33,7 @@ var feed_url = flag.String("feed-url", feedclient.Endpoint(""), "Olta Feed WebSo
 var turnstile = flag.String("turnstile", "", "Turnstile public/private key separated by \":\"")
 var rate_limit = flag.Int("rate-limit", 0, "Maximum requests per IP in each rate window (0 disables throttling)")
 var rate_window = flag.Duration("rate-window", time.Minute, "Per-IP request throttling window")
+var client_profile = flag.String("client-profile", "Chrome", "Outbound TLS client profile (Chrome, Firefox, Safari, or Random)")
 
 func joinPath(base_path string, rel_path string) string {
 	var ret string
@@ -234,14 +235,14 @@ func main() {
 			log.Fatal("turnstile server: %v", err)
 			return
 		}
-		hp, err = core.NewHttpProxy(cfg.GetServerBindIP(), cfg.GetHttpsPort(), cfg, crt_db, db, campaignEvents, bl, *developer_mode, true, *rate_limit, *rate_window)
+		hp, err = core.NewHttpProxy(cfg.GetServerBindIP(), cfg.GetHttpsPort(), cfg, crt_db, db, campaignEvents, bl, *developer_mode, true, *rate_limit, *rate_window, *client_profile)
 		if err != nil {
 			log.Fatal("proxy: %v", err)
 			return
 		}
 		hs.Start(hp)
 	} else {
-		hp, err = core.NewHttpProxy(cfg.GetServerBindIP(), cfg.GetHttpsPort(), cfg, crt_db, db, campaignEvents, bl, *developer_mode, false, *rate_limit, *rate_window)
+		hp, err = core.NewHttpProxy(cfg.GetServerBindIP(), cfg.GetHttpsPort(), cfg, crt_db, db, campaignEvents, bl, *developer_mode, false, *rate_limit, *rate_window, *client_profile)
 		if err != nil {
 			log.Fatal("proxy: %v", err)
 			return
