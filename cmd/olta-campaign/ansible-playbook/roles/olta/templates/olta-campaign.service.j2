@@ -1,0 +1,18 @@
+[Unit]
+Description=Olta Campaign Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={{ olta_user }}
+Group={{ olta_user }}
+WorkingDirectory={{ olta_campaign_dir }}
+ExecStart={{ olta_campaign_dir }}/olta-campaign --asset-dir {{ olta_campaign_dir }} --config {{ olta_campaign_dir }}/config.json
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

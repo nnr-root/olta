@@ -1,0 +1,238 @@
+---
+- name: Set the Olta host name
+  ansible.builtin.hostname:
+    name: "{{ olta_hostname }}"
+
+- name: Install Olta build and runtime packages
+  ansible.builtin.apt:
+    name: "{{ olta_packages }}"
+    state: present
+    update_cache: true
+
+- name: Configure Olta firewall ports
+  community.general.ufw:
+    rule: allow
+    port: "{{ item }}"
+    proto: tcp
+  loop:
+    - "22"
+    - "80"
+    - "443"
+
+- name: Allow Olta Proxy authoritative DNS traffic
+  community.general.ufw:
+    rule: allow
+    port: "53"
+    proto: "{{ item }}"
+  loop:
+    - tcp
+    - udp
+
+- name: Enable the firewall
+  community.general.ufw:
+    state: enabled
+    policy: deny
+  when: olta_enable_ufw_firewall | bool
+
+- name: Add the Olta service user to ssl-cert
+  ansible.builtin.user:
+    name: "{{ olta_user }}"
+    groups: ssl-cert
+    append: true
+
+- name: Download the supported Go toolchain
+  ansible.builtin.get_url:
+    url: "https://go.dev/dl/go{{ olta_go_version }}.linux-{{ olta_go_arch }}.tar.gz"
+    dest: "/tmp/olta-go-{{ olta_go_version }}.tar.gz"
+    mode: "0644"
+
+- name: Install the supported Go toolchain
+  ansible.builtin.unarchive:
+    src: "/tmp/olta-go-{{ olta_go_version }}.tar.gz"
+    dest: /usr/local
+    remote_src: true
+    creates: "{{ olta_go_binary }}"
+
+- name: Create Olta directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ olta_user }}"
+    group: "{{ olta_user }}"
+    mode: "0750"
+  loop:
+    - "{{ olta_source_dir }}"
+    - "{{ olta_install_dir }}"
+    - "{{ olta_campaign_dir }}"
+    - "{{ olta_proxy_dir }}"
+    - "{{ olta_proxy_state_dir }}"
+
+- name: Create Olta TLS directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: ssl-cert
+    mode: "0750"
+  loop:
+    - /etc/ssl/csr
+    - /etc/ssl/private
+    - /etc/ssl/crt
+
+- name: Generate the Olta Campaign TLS private key
+  community.crypto.openssl_privatekey:
+    path: "{{ olta_campaign_key_path }}"
+    owner: "{{ olta_user }}"
+    group: ssl-cert
+    mode: "0640"
+
+- name: Generate the Olta Campaign certificate request
+  community.crypto.openssl_csr:
+    path: "{{ olta_campaign_csr_path }}"
+    privatekey_path: "{{ olta_campaign_key_path }}"
+    common_name: "{{ olta_campaign_domain }}"
+
+- name: Generate the Olta Campaign self-signed certificate
+  community.crypto.x509_certificate:
+    path: "{{ olta_campaign_cert_path }}"
+    privatekey_path: "{{ olta_campaign_key_path }}"
+    csr_path: "{{ olta_campaign_csr_path }}"
+    provider: selfsigned
+    owner: "{{ olta_user }}"
+    group: ssl-cert
+    mode: "0644"
+
+- name: Check out the Olta source repository
+  ansible.builtin.git:
+    repo: "{{ olta_repository }}"
+    dest: "{{ olta_source_dir }}"
+    version: "{{ olta_version }}"
+    force: false
+  become_user: "{{ olta_user }}"
+  notify: Restart Olta services
+
+- name: Download Olta Go dependencies
+  ansible.builtin.command:
+    cmd: "{{ olta_go_binary }} mod download"
+    chdir: "{{ olta_source_dir }}"
+  become_user: "{{ olta_user }}"
+  changed_when: false
+
+- name: Copy Olta Campaign runtime assets
+  ansible.builtin.copy:
+    src: "{{ olta_source_dir }}/cmd/olta-campaign/"
+    dest: "{{ olta_campaign_dir }}/"
+    remote_src: true
+    owner: "{{ olta_user }}"
+    group: "{{ olta_user }}"
+    mode: preserve
+  notify: Restart Olta Campaign
+
+- name: Copy Olta Proxy runtime assets
+  ansible.builtin.copy:
+    src: "{{ olta_source_dir }}/cmd/olta-proxy/"
+    dest: "{{ olta_proxy_dir }}/"
+    remote_src: true
+    owner: "{{ olta_user }}"
+    group: "{{ olta_user }}"
+    mode: preserve
+  notify: Restart Olta Proxy
+
+- name: Install the Olta Campaign configuration
+  ansible.builtin.template:
+    src: config.json.j2
+    dest: "{{ olta_campaign_dir }}/config.json"
+    owner: "{{ olta_user }}"
+    group: "{{ olta_user }}"
+    mode: "0640"
+  notify: Restart Olta Campaign
+
+- name: Build olta-campaign
+  ansible.builtin.command:
+    cmd: "{{ olta_go_binary }} build -trimpath -o {{ olta_campaign_dir }}/olta-campaign ./cmd/olta-campaign"
+    chdir: "{{ olta_source_dir }}"
+  become_user: "{{ olta_user }}"
+  notify: Restart Olta Campaign
+
+- name: Build olta-proxy
+  ansible.builtin.command:
+    cmd: "{{ olta_go_binary }} build -trimpath -o {{ olta_proxy_dir }}/olta-proxy ./cmd/olta-proxy"
+    chdir: "{{ olta_source_dir }}"
+  become_user: "{{ olta_user }}"
+  notify: Restart Olta Proxy
+
+- name: Allow Olta binaries to bind privileged ports
+  community.general.capabilities:
+    path: "{{ item }}"
+    capability: cap_net_bind_service+eip
+    state: present
+  loop:
+    - "{{ olta_campaign_dir }}/olta-campaign"
+    - "{{ olta_proxy_dir }}/olta-proxy"
+
+- name: Configure Postfix for Olta
+  ansible.builtin.template:
+    src: main.cf.j2
+    dest: /etc/postfix/main.cf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart Postfix
+
+- name: Install the Olta Campaign systemd unit
+  ansible.builtin.template:
+    src: olta-campaign.service.j2
+    dest: /etc/systemd/system/olta-campaign.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - Reload systemd
+    - Restart Olta Campaign
+
+- name: Install the Olta Proxy systemd unit
+  ansible.builtin.template:
+    src: olta-proxy.service.j2
+    dest: /etc/systemd/system/olta-proxy.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - Reload systemd
+    - Restart Olta Proxy
+
+- name: Enable and start Olta Campaign
+  ansible.builtin.systemd:
+    name: olta-campaign.service
+    enabled: true
+    state: started
+    daemon_reload: true
+
+- name: Enable or disable Olta Proxy
+  ansible.builtin.systemd:
+    name: olta-proxy.service
+    enabled: "{{ olta_proxy_enabled | bool }}"
+    state: "{{ 'started' if olta_proxy_enabled else 'stopped' }}"
+    daemon_reload: true
+
+- name: Configure the Olta Campaign nginx virtual host
+  ansible.builtin.template:
+    src: nginx.conf.j2
+    dest: /etc/nginx/nginx.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload nginx
+  when: olta_nginx_enabled | bool
+
+- name: Ensure Postfix is enabled
+  ansible.builtin.service:
+    name: postfix
+    state: started
+    enabled: true
+
+- name: Enable or disable nginx
+  ansible.builtin.service:
+    name: nginx
+    state: "{{ 'started' if olta_nginx_enabled else 'stopped' }}"
+    enabled: "{{ olta_nginx_enabled | bool }}"

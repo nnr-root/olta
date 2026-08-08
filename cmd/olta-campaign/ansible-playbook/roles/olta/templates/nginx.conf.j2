@@ -1,0 +1,27 @@
+events {
+    worker_connections 4096;
+}
+
+http {
+    server {
+        listen 80;
+        server_name {{ olta_campaign_domain }};
+        return 301 https://$host$request_uri;
+    }
+
+    server {
+        listen 443 ssl;
+        ssl_certificate {{ olta_campaign_cert_path }};
+        ssl_certificate_key {{ olta_campaign_key_path }};
+        server_name {{ olta_campaign_domain }};
+
+        location / {
+            proxy_pass https://127.0.0.1:3333;
+            proxy_redirect off;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Host $server_name;
+        }
+    }
+}

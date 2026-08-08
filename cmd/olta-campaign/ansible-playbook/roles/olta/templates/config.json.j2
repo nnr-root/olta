@@ -1,0 +1,23 @@
+{
+  "admin_server": {
+    "listen_url": "127.0.0.1:3333",
+    "use_tls": true,
+    "cert_path": "{{ olta_campaign_cert_path }}",
+    "key_path": "{{ olta_campaign_key_path }}"
+  },
+  "phish_server": {
+    "listen_url": "127.0.0.1:8080",
+    "use_tls": true,
+    "cert_path": "{{ olta_campaign_cert_path }}",
+    "key_path": "{{ olta_campaign_key_path }}"
+  },
+  "feed_enabled": {{ olta_feed_enabled | bool | lower }},
+  "feed_url": "{{ olta_feed_url }}",
+  "db_name": "sqlite3",
+  "db_path": "{{ olta_campaign_db_path }}",
+  "contact_address": "",
+  "logging": {
+    "filename": "{{ olta_campaign_dir }}/olta-campaign.log",
+    "level": ""
+  }
+}

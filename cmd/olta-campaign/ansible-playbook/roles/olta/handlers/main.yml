@@ -1,0 +1,38 @@
+---
+- name: Reload systemd
+  ansible.builtin.systemd:
+    daemon_reload: true
+
+- name: Restart Olta Campaign
+  ansible.builtin.systemd:
+    name: olta-campaign.service
+    state: restarted
+    daemon_reload: true
+
+- name: Restart Olta Proxy
+  ansible.builtin.systemd:
+    name: olta-proxy.service
+    state: restarted
+    daemon_reload: true
+  when: olta_proxy_enabled | bool
+
+- name: Restart Olta services
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    state: restarted
+    daemon_reload: true
+  loop:
+    - olta-campaign.service
+    - olta-proxy.service
+  when: item != 'olta-proxy.service' or olta_proxy_enabled | bool
+
+- name: Restart Postfix
+  ansible.builtin.service:
+    name: postfix
+    state: restarted
+
+- name: Reload nginx
+  ansible.builtin.service:
+    name: nginx
+    state: reloaded
+  when: olta_nginx_enabled | bool

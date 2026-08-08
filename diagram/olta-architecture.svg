@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1100" viewBox="0 0 1600 1100" role="img" aria-labelledby="title desc">
+  <title id="title">Olta v1.0.0-Alpha architecture</title>
+  <desc id="desc">Authorized purple-team flow across Olta Campaign, Olta Proxy, Olta Feed, target systems, optional redirector and future modules.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#07141d"/><stop offset="1" stop-color="#0b202b"/></linearGradient>
+    <filter id="shadow"><feDropShadow dx="0" dy="8" stdDeviation="10" flood-color="#000" flood-opacity=".28"/></filter>
+    <marker id="arrowCyan" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0l10 5-10 5z" fill="#65c7df"/></marker>
+    <marker id="arrowPink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0l10 5-10 5z" fill="#ff426f"/></marker>
+    <style>
+      text{font-family:Inter,Segoe UI,Arial,sans-serif}.title{fill:#f7fafc;font-size:30px;font-weight:700}.zoneTitle{font-size:17px;font-weight:700;letter-spacing:1.8px}.nodeTitle{fill:#fff;font-size:23px;font-weight:700}.nodeText{fill:#c8d7de;font-size:16px}.edgeText{fill:#d9f4fa;font-size:14px;font-weight:600}.planned{fill:#aebcc4;font-size:15px;font-weight:700;letter-spacing:1.5px}.futureTitle{fill:#eef4f6;font-size:20px;font-weight:700}.futureText{fill:#b8c6cc;font-size:15px}
+    </style>
+  </defs>
+  <rect width="1600" height="1100" fill="url(#bg)"/>
+  <circle cx="1460" cy="95" r="180" fill="#e52f5d" opacity=".06"/><circle cx="120" cy="1020" r="230" fill="#45aeca" opacity=".06"/>
+  <text x="800" y="60" text-anchor="middle" class="title">OLTA v1.0.0-Alpha • Authorized Purple Team Architecture</text>
+
+  <rect x="55" y="115" width="410" height="720" rx="20" fill="#0a1c26" stroke="#2b728d" stroke-width="2"/>
+  <text x="85" y="158" class="zoneTitle" fill="#8dd9ec">SIMULATION TARGET ENVIRONMENT</text>
+  <g filter="url(#shadow)"><rect x="100" y="210" width="320" height="110" rx="14" fill="#173746" stroke="#4eaac4"/><rect x="100" y="405" width="320" height="110" rx="14" fill="#173746" stroke="#4eaac4"/><rect x="100" y="600" width="320" height="110" rx="14" fill="#173746" stroke="#4eaac4"/></g>
+  <text x="125" y="250" class="nodeTitle">Target Devices</text><text x="125" y="282" class="nodeText">Browser • Mobile • Mail Client</text>
+  <text x="125" y="445" class="nodeTitle">Defensive Controls</text><text x="125" y="477" class="nodeText">Firewall • EDR • SOC/SIEM</text>
+  <text x="125" y="640" class="nodeTitle">Authorized Operator</text><text x="125" y="672" class="nodeText">Administration and monitoring</text>
+
+  <rect x="520" y="115" width="1025" height="720" rx="20" fill="#0a1720" stroke="#e52f5d" stroke-width="2"/>
+  <text x="550" y="158" class="zoneTitle" fill="#ff6a8d">AUTHORIZED OLTA INFRASTRUCTURE</text>
+  <g filter="url(#shadow)">
+    <rect x="575" y="205" width="400" height="155" rx="15" fill="#183141" stroke="#e52f5d" stroke-width="2"/>
+    <rect x="575" y="500" width="400" height="175" rx="15" fill="#183141" stroke="#e52f5d" stroke-width="2"/>
+    <rect x="1090" y="205" width="400" height="155" rx="15" fill="#183141" stroke="#e52f5d" stroke-width="2"/>
+    <rect x="1090" y="445" width="400" height="130" rx="15" fill="#183141" stroke="#4eaac4"/>
+    <rect x="1090" y="650" width="400" height="110" rx="15" fill="#183141" stroke="#4eaac4"/>
+  </g>
+  <text x="605" y="245" class="nodeTitle">olta-campaign</text><text x="605" y="280" class="nodeText">Campaign engine • Admin/API • Mail/SMS • QR</text><text x="605" y="312" class="nodeText">SQLite WAL or MySQL</text>
+  <text x="605" y="540" class="nodeTitle">olta-proxy</text><text x="605" y="575" class="nodeText">AiTM reverse proxy • phishlets • lures</text><text x="605" y="607" class="nodeText">TLS certificates • BuntDB session store</text>
+  <text x="1120" y="245" class="nodeTitle">olta-feed</text><text x="1120" y="280" class="nodeText">WebSocket live event stream</text><text x="1120" y="312" class="nodeText">Bounded client queue • Browser UI</text>
+  <text x="1120" y="485" class="nodeTitle">Optional Redirector / Turnstile</text><text x="1120" y="520" class="nodeText">Blocked traffic • Challenge flow</text>
+  <text x="1120" y="690" class="nodeTitle">Legitimate Origin Website</text><text x="1120" y="722" class="nodeText">Upstream content and authentication</text>
+
+  <path d="M420 265H510Q540 265 540 295V555Q540 585 575 585" fill="none" stroke="#65c7df" stroke-width="3" marker-start="url(#arrowCyan)" marker-end="url(#arrowCyan)"/>
+  <rect x="432" y="372" width="127" height="27" rx="7" fill="#07141d"/><text x="495" y="391" text-anchor="middle" class="edgeText">simulation traffic</text>
+  <path d="M420 655H500Q530 655 530 625V290Q530 275 575 275" fill="none" stroke="#65c7df" stroke-width="3" marker-end="url(#arrowCyan)"/>
+  <text x="475" y="692" text-anchor="middle" class="edgeText">Admin/API</text>
+  <path d="M775 360V500" fill="none" stroke="#ff426f" stroke-width="3" marker-end="url(#arrowPink)"/><rect x="790" y="410" width="178" height="27" rx="7" fill="#07141d"/><text x="879" y="429" text-anchor="middle" class="edgeText">campaign + lure context</text>
+  <path d="M975 280H1090" fill="none" stroke="#ff426f" stroke-width="3" marker-end="url(#arrowPink)"/><text x="1032" y="264" text-anchor="middle" class="edgeText">events</text>
+  <path d="M975 545Q1030 545 1030 355Q1030 300 1090 300" fill="none" stroke="#ff426f" stroke-width="3" marker-end="url(#arrowPink)"/><rect x="970" y="374" width="160" height="27" rx="7" fill="#07141d"/><text x="1050" y="393" text-anchor="middle" class="edgeText">captured sessions</text>
+  <path d="M975 575H1090" fill="none" stroke="#65c7df" stroke-width="3" marker-end="url(#arrowCyan)"/><text x="1032" y="563" text-anchor="middle" class="edgeText">blocked</text>
+  <path d="M975 625Q1030 625 1030 705H1090" fill="none" stroke="#65c7df" stroke-width="3" marker-start="url(#arrowCyan)" marker-end="url(#arrowCyan)"/><rect x="952" y="655" width="140" height="27" rx="7" fill="#07141d"/><text x="1022" y="674" text-anchor="middle" class="edgeText">proxied HTTPS</text>
+
+  <text x="55" y="890" class="planned">PLANNED INTEGRATION POINTS</text>
+  <g fill="#0d2430" stroke="#899aa4" stroke-width="2" stroke-dasharray="9 7"><rect x="55" y="925" width="440" height="120" rx="15"/><rect x="580" y="925" width="440" height="120" rx="15"/><rect x="1105" y="925" width="440" height="120" rx="15"/></g>
+  <text x="85" y="970" class="futureTitle">uTLS</text><text x="85" y="1005" class="futureText">Proxy transport • JA3/JA4 shaping</text>
+  <text x="610" y="970" class="futureTitle">Quishing</text><text x="610" y="1005" class="futureText">Dynamic QR campaign engine</text>
+  <text x="1135" y="970" class="futureTitle">ASN Cloaking</text><text x="1135" y="1005" class="futureText">Proxy bot-detection middleware</text>
+</svg>

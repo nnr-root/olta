@@ -7,6 +7,9 @@
 *.dll
 *.so
 *.dylib
+/cmd/olta-proxy/olta-proxy
+/cmd/olta-campaign/olta-campaign
+/cmd/olta-feed/olta-feed
 
 # Test binary, built with `go test -c`
 *.test

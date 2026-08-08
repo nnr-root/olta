@@ -1,0 +1,39 @@
+---
+olta_enable_ufw_firewall: true
+olta_packages:
+  - ca-certificates
+  - git
+  - libcap2-bin
+  - nginx
+  - postfix
+  - python3-cryptography
+
+olta_hostname: olta
+olta_user: ubuntu
+olta_repository: https://github.com/s4l1hs/olta.git
+olta_version: main
+olta_go_version: 1.22.12
+olta_go_arch: amd64
+olta_go_binary: /usr/local/go/bin/go
+olta_source_dir: "/home/{{ olta_user }}/olta-src"
+olta_install_dir: /opt/olta
+olta_campaign_dir: "{{ olta_install_dir }}/campaign"
+olta_proxy_dir: "{{ olta_install_dir }}/proxy"
+olta_proxy_state_dir: "/home/{{ olta_user }}/.olta/proxy"
+
+olta_campaign_domain: olta.local
+olta_campaign_key_path: /etc/ssl/private/olta-campaign.key
+olta_campaign_csr_path: /etc/ssl/csr/olta-campaign.csr
+olta_campaign_cert_path: /etc/ssl/crt/olta-campaign.crt
+olta_campaign_db_path: "{{ olta_campaign_dir }}/olta-campaign.db"
+olta_feed_url: ws://localhost:1337/ws
+olta_feed_enabled: false
+
+# Olta Proxy requires initial domain/phishlet configuration. Enable it after
+# configuring {{ olta_proxy_state_dir }} or providing the required variables.
+olta_proxy_enabled: false
+# Keep nginx disabled when Olta Proxy binds ports 80/443 on the same host.
+olta_nginx_enabled: false
+
+postfix_hostname: olta
+postfix_inet_interfaces: 127.0.0.1

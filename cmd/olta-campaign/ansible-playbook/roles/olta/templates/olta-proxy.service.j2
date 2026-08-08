@@ -1,0 +1,21 @@
+[Unit]
+Description=Olta Proxy Service
+After=network-online.target olta-campaign.service
+Wants=network-online.target
+Requires=olta-campaign.service
+
+[Service]
+Type=simple
+User={{ olta_user }}
+Group={{ olta_user }}
+WorkingDirectory={{ olta_proxy_dir }}
+ExecStart={{ olta_proxy_dir }}/olta-proxy -asset-dir {{ olta_proxy_dir }} -c {{ olta_proxy_state_dir }} -p {{ olta_proxy_dir }}/legacy_phishlets -t {{ olta_proxy_dir }}/redirectors -g {{ olta_campaign_db_path }} -feed-url {{ olta_feed_url }}
+Restart=on-failure
+RestartSec=5
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

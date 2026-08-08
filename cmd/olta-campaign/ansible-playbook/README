@@ -1,0 +1,30 @@
+Olta Ansible deployment
+========================
+
+Tested for current Ubuntu LTS releases. The role checks out
+https://github.com/s4l1hs/olta, downloads the Go modules, and builds both
+olta-campaign and olta-proxy from the selected `olta_version`.
+
+1. Set the target host in `hosts`.
+2. Review `roles/olta/vars/main.yml`, especially `olta_user`,
+   `olta_campaign_domain`, and `olta_version`.
+3. Run one of the following commands from this directory:
+
+    ansible-playbook site.yml -i hosts -u root --private-key=private.key
+    ansible-playbook site.yml -i hosts -u root --ask-pass
+    ansible-playbook site.yml -i hosts -u ubuntu --become --ask-become-pass
+
+Olta Campaign is enabled automatically. Olta Proxy is built and its systemd
+unit is installed, but the unit remains disabled by default because its domain
+and phishlet configuration must be completed first. Set
+`olta_proxy_enabled: true` after preparing the proxy state.
+
+The campaign listener binds to localhost by default; use an SSH tunnel to port
+3333 for administration. The optional nginx frontend is disabled because it
+would otherwise compete with Olta Proxy for ports 80/443 on a single host. Do
+not set both `olta_nginx_enabled` and `olta_proxy_enabled` to true unless they
+bind different IP addresses.
+
+Required collections:
+
+    ansible-galaxy collection install community.general community.crypto
