@@ -21,20 +21,22 @@ type Worker interface {
 
 // DefaultWorker is the background worker that handles watching for new campaigns and sending emails appropriately.
 type DefaultWorker struct {
-	mailer    mailer.Mailer
-	ctx       context.Context
-	cancel    context.CancelFunc
-	started   chan struct{}
-	done      chan struct{}
-	startOnce sync.Once
+	mailer            mailer.Mailer
+	minSendDelay      time.Duration
+	maxSendDelay      time.Duration
+	enableSpintax     bool
+	enableRoleRouting bool
+	ctx               context.Context
+	cancel            context.CancelFunc
+	started           chan struct{}
+	done              chan struct{}
+	startOnce         sync.Once
 }
 
 // New creates a new worker object to handle the creation of campaigns
 func New(options ...func(*DefaultWorker) error) (Worker, error) {
-	defaultMailer := mailer.NewMailWorker()
 	ctx, cancel := context.WithCancel(context.Background())
 	w := &DefaultWorker{
-		mailer:  defaultMailer,
 		ctx:     ctx,
 		cancel:  cancel,
 		started: make(chan struct{}),
@@ -44,6 +46,12 @@ func New(options ...func(*DefaultWorker) error) (Worker, error) {
 		if err := opt(w); err != nil {
 			return nil, err
 		}
+	}
+	if w.mailer == nil {
+		w.mailer = mailer.NewMailWorker(
+			mailer.WithSendDelay(w.minSendDelay, w.maxSendDelay),
+			mailer.WithPersonalization(w.enableSpintax, w.enableRoleRouting),
+		)
 	}
 	return w, nil
 }
@@ -55,7 +63,32 @@ func WithSendDelay(minimum, maximum time.Duration) func(*DefaultWorker) error {
 		if err := mailer.ValidateSendDelay(minimum, maximum); err != nil {
 			return err
 		}
-		w.mailer = mailer.NewMailWorker(mailer.WithSendDelay(minimum, maximum))
+		w.minSendDelay = minimum
+		w.maxSendDelay = maximum
+		return nil
+	}
+}
+
+// WithPersonalization enables or disables rule-based message personalization.
+func WithPersonalization(enableSpintax, enableRoleRouting bool) func(*DefaultWorker) error {
+	return func(w *DefaultWorker) error {
+		w.enableSpintax = enableSpintax
+		w.enableRoleRouting = enableRoleRouting
+		return nil
+	}
+}
+
+// WithDeliveryOptions configures both send jitter and personalization without
+// one worker option replacing the mailer configured by the other.
+func WithDeliveryOptions(minimum, maximum time.Duration, enableSpintax, enableRoleRouting bool) func(*DefaultWorker) error {
+	return func(w *DefaultWorker) error {
+		if err := mailer.ValidateSendDelay(minimum, maximum); err != nil {
+			return err
+		}
+		w.minSendDelay = minimum
+		w.maxSendDelay = maximum
+		w.enableSpintax = enableSpintax
+		w.enableRoleRouting = enableRoleRouting
 		return nil
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"github.com/gophish/gomail"
 	log "github.com/s4l1hs/olta/pkg/campaign/logger"
 	"github.com/s4l1hs/olta/pkg/campaign/mailer"
+	"github.com/s4l1hs/olta/pkg/campaign/personalizer"
 )
 
 // PreviewPrefix is the standard prefix added to the rid parameter when sending
@@ -103,6 +104,15 @@ func GetEmailRequestByResultId(id string) (EmailRequest, error) {
 // Generate fills in the details of a gomail.Message with the contents
 // from the SendTestEmailRequest.
 func (s *EmailRequest) Generate(msg *gomail.Message) error {
+	return s.generate(msg, nil)
+}
+
+// GeneratePersonalized applies rule-based personalization to a test message.
+func (s *EmailRequest) GeneratePersonalized(msg *gomail.Message, engine *personalizer.Personalizer) error {
+	return s.generate(msg, engine)
+}
+
+func (s *EmailRequest) generate(msg *gomail.Message, engine *personalizer.Personalizer) error {
 	f, err := mail.ParseAddress(s.getFromAddress())
 	if err != nil {
 		return err
@@ -112,6 +122,14 @@ func (s *EmailRequest) Generate(msg *gomail.Message) error {
 	ptx, err := NewPhishingTemplateContext(s, s.BaseRecipient, s.RId)
 	if err != nil {
 		return err
+	}
+	messageTemplate := s.Template
+	if engine != nil {
+		if scenario, ok := engine.SelectScenario(personalizerContext(ptx)); ok {
+			messageTemplate.Subject = scenario.Subject
+			messageTemplate.Text = scenario.Text
+			messageTemplate.HTML = scenario.HTML
+		}
 	}
 
 	url, err := ExecuteTemplate(s.URL, ptx)
@@ -137,7 +155,11 @@ func (s *EmailRequest) Generate(msg *gomail.Message) error {
 	}
 
 	// Parse remaining templates
-	subject, err := ExecuteTemplate(s.Template.Subject, ptx)
+	subjectTemplate := messageTemplate.Subject
+	if engine != nil {
+		subjectTemplate = engine.Expand(subjectTemplate)
+	}
+	subject, err := ExecuteTemplate(subjectTemplate, ptx)
 	if err != nil {
 		log.Error(err)
 	}
@@ -147,19 +169,27 @@ func (s *EmailRequest) Generate(msg *gomail.Message) error {
 	}
 
 	msg.SetHeader("To", s.FormatAddress())
-	if s.Template.Text != "" {
-		text, err := ExecuteTemplate(s.Template.Text, ptx)
+	if messageTemplate.Text != "" {
+		textTemplate := messageTemplate.Text
+		if engine != nil {
+			textTemplate = engine.Expand(textTemplate)
+		}
+		text, err := ExecuteTemplate(textTemplate, ptx)
 		if err != nil {
 			log.Error(err)
 		}
 		msg.SetBody("text/plain", text)
 	}
-	if s.Template.HTML != "" {
-		html, err := ExecuteTemplate(s.Template.HTML, ptx)
+	if messageTemplate.HTML != "" {
+		htmlTemplate := messageTemplate.HTML
+		if engine != nil {
+			htmlTemplate = engine.Expand(htmlTemplate)
+		}
+		html, err := ExecuteTemplate(htmlTemplate, ptx)
 		if err != nil {
 			log.Error(err)
 		}
-		if s.Template.Text == "" {
+		if messageTemplate.Text == "" {
 			msg.SetBody("text/html", html)
 		} else {
 			msg.AddAlternative("text/html", html)

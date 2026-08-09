@@ -12,6 +12,7 @@ import (
 
 	"github.com/gophish/gomail"
 	log "github.com/s4l1hs/olta/pkg/campaign/logger"
+	"github.com/s4l1hs/olta/pkg/campaign/personalizer"
 	"github.com/sirupsen/logrus"
 )
 
@@ -69,6 +70,12 @@ type SendDelayProvider interface {
 	GetSendDelay() (time.Duration, time.Duration)
 }
 
+// PersonalizedMail is implemented by messages that can apply the configured
+// rule-based personalization immediately before SMTP serialization.
+type PersonalizedMail interface {
+	GeneratePersonalized(*gomail.Message, *personalizer.Personalizer) error
+}
+
 // MailWorker is the worker that receives slices of emails
 // on a channel to send. It's assumed that every slice of emails received is meant
 // to be sent to the same server.
@@ -77,6 +84,7 @@ type MailWorker struct {
 	minSendDelay time.Duration
 	maxSendDelay time.Duration
 	random       io.Reader
+	personalizer *personalizer.Personalizer
 	wg           sync.WaitGroup
 }
 
@@ -89,6 +97,17 @@ func WithSendDelay(minimum, maximum time.Duration) Option {
 	return func(worker *MailWorker) {
 		worker.minSendDelay = minimum
 		worker.maxSendDelay = maximum
+	}
+}
+
+// WithPersonalization configures spintax and built-in role-based scenario
+// routing for generated campaign messages.
+func WithPersonalization(enableSpintax, enableRoleRouting bool) Option {
+	return func(worker *MailWorker) {
+		worker.personalizer = personalizer.New(personalizer.Options{
+			EnableSpintax:     enableSpintax,
+			EnableRoleRouting: enableRoleRouting,
+		})
 	}
 }
 
@@ -125,7 +144,7 @@ func (mw *MailWorker) Start(ctx context.Context) {
 					errorMail(err, ms)
 					return
 				}
-				sendMail(ctx, dialer, ms, mw.minSendDelay, mw.maxSendDelay, mw.random)
+				sendMail(ctx, dialer, ms, mw.minSendDelay, mw.maxSendDelay, mw.random, mw.personalizer)
 			}(ctx, ms)
 		}
 	}
@@ -235,7 +254,7 @@ func dialHost(ctx context.Context, dialer Dialer) (Sender, error) {
 // sendMail attempts to send the provided Mail instances.
 // If the context is cancelled before all of the mail are sent,
 // sendMail just returns and does not modify those emails.
-func sendMail(ctx context.Context, dialer Dialer, ms []Mail, fallbackMinimum, fallbackMaximum time.Duration, random io.Reader) {
+func sendMail(ctx context.Context, dialer Dialer, ms []Mail, fallbackMinimum, fallbackMaximum time.Duration, random io.Reader, engine *personalizer.Personalizer) {
 	sender, err := dialHost(ctx, dialer)
 	if err != nil {
 		log.Warn(err)
@@ -266,7 +285,11 @@ func sendMail(ctx context.Context, dialer Dialer, ms []Mail, fallbackMinimum, fa
 			break
 		}
 		message.Reset()
-		err = m.Generate(message)
+		if personalized, ok := m.(PersonalizedMail); ok && engine != nil {
+			err = personalized.GeneratePersonalized(message, engine)
+		} else {
+			err = m.Generate(message)
+		}
 		if err != nil {
 			log.Warn(err)
 			m.Error(err)

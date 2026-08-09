@@ -627,10 +627,14 @@ func PostSMSCampaign(c *Campaign, uid int64) error {
 			sendDate := c.generateSendDate(recipientIndex, totalRecipients)
 			r := &Result{
 				BaseRecipient: BaseRecipient{
-					Email:     t.Email,
-					Position:  t.Position,
-					FirstName: t.FirstName,
-					LastName:  t.LastName,
+					Email:       t.Email,
+					Position:    t.Position,
+					FirstName:   t.FirstName,
+					LastName:    t.LastName,
+					Department:  t.Department,
+					Role:        t.Role,
+					Company:     t.Company,
+					ManagerName: t.ManagerName,
 				},
 				Status:       StatusScheduled,
 				CampaignId:   c.Id,
@@ -780,10 +784,14 @@ func PostCampaign(c *Campaign, uid int64) error {
 			}
 			r := &Result{
 				BaseRecipient: BaseRecipient{
-					Email:     t.Email,
-					Position:  t.Position,
-					FirstName: t.FirstName,
-					LastName:  t.LastName,
+					Email:       t.Email,
+					Position:    t.Position,
+					FirstName:   t.FirstName,
+					LastName:    t.LastName,
+					Department:  t.Department,
+					Role:        t.Role,
+					Company:     t.Company,
+					ManagerName: t.ManagerName,
 				},
 				Status:            StatusScheduled,
 				CampaignId:        c.Id,

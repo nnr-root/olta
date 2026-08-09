@@ -54,13 +54,15 @@ const (
 )
 
 var (
-	configPath    = kingpin.Flag("config", "Location of config.json (defaults to the command asset directory).").String()
-	assetDir      = kingpin.Flag("asset-dir", "Runtime asset directory containing VERSION, templates, and static files.").String()
-	disableMailer = kingpin.Flag("disable-mailer", "Disable the mailer (for use with multi-system deployments)").Bool()
-	minSendDelay  = kingpin.Flag("min-send-delay", "Minimum randomized interval between consecutive email sends.").Default("10s").Duration()
-	maxSendDelay  = kingpin.Flag("max-send-delay", "Maximum randomized interval between consecutive email sends.").Default("45s").Duration()
-	mode          = kingpin.Flag("mode", fmt.Sprintf("Run the binary in one of the modes (%s, %s or %s)", modeAll, modeAdmin, modePhish)).
-			Default("all").Enum(modeAll, modeAdmin, modePhish)
+	configPath        = kingpin.Flag("config", "Location of config.json (defaults to the command asset directory).").String()
+	assetDir          = kingpin.Flag("asset-dir", "Runtime asset directory containing VERSION, templates, and static files.").String()
+	disableMailer     = kingpin.Flag("disable-mailer", "Disable the mailer (for use with multi-system deployments)").Bool()
+	minSendDelay      = kingpin.Flag("min-send-delay", "Minimum randomized interval between consecutive email sends.").Default("10s").Duration()
+	maxSendDelay      = kingpin.Flag("max-send-delay", "Maximum randomized interval between consecutive email sends.").Default("45s").Duration()
+	enableSpintax     = kingpin.Flag("enable-spintax", "Enable rule-based spintax expansion for campaign messages.").Default("true").Bool()
+	enableRoleRouting = kingpin.Flag("enable-role-routing", "Enable recipient role and department scenario routing.").Default("true").Bool()
+	mode              = kingpin.Flag("mode", fmt.Sprintf("Run the binary in one of the modes (%s, %s or %s)", modeAll, modeAdmin, modePhish)).
+				Default("all").Enum(modeAll, modeAdmin, modePhish)
 )
 
 func main() {
@@ -138,7 +140,12 @@ func main() {
 	if *disableMailer {
 		adminOptions = append(adminOptions, controllers.WithWorker(nil))
 	} else {
-		campaignWorker, workerErr := worker.New(worker.WithSendDelay(*minSendDelay, *maxSendDelay))
+		campaignWorker, workerErr := worker.New(worker.WithDeliveryOptions(
+			*minSendDelay,
+			*maxSendDelay,
+			*enableSpintax,
+			*enableRoleRouting,
+		))
 		if workerErr != nil {
 			log.Fatal(workerErr)
 		}

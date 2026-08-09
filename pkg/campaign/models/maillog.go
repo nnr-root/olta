@@ -16,6 +16,7 @@ import (
 	"github.com/gophish/gomail"
 	log "github.com/s4l1hs/olta/pkg/campaign/logger"
 	"github.com/s4l1hs/olta/pkg/campaign/mailer"
+	"github.com/s4l1hs/olta/pkg/campaign/personalizer"
 )
 
 // MaxSendAttempts set to 8 since we exponentially backoff after each failed send
@@ -184,6 +185,16 @@ func (m *MailLog) GetSendDelay() (time.Duration, time.Duration) {
 // the maillog. We accept the gomail.Message as an argument so that the caller
 // can choose to re-use the message across recipients.
 func (m *MailLog) Generate(msg *gomail.Message) error {
+	return m.generate(msg, nil)
+}
+
+// GeneratePersonalized applies the mailer's rule-based personalization
+// configuration while retaining the campaign's sender and attachments.
+func (m *MailLog) GeneratePersonalized(msg *gomail.Message, engine *personalizer.Personalizer) error {
+	return m.generate(msg, engine)
+}
+
+func (m *MailLog) generate(msg *gomail.Message, engine *personalizer.Personalizer) error {
 	r, err := GetResult(m.RId)
 	if err != nil {
 		return err
@@ -214,6 +225,13 @@ func (m *MailLog) Generate(msg *gomail.Message) error {
 	if err != nil {
 		return err
 	}
+	if engine != nil {
+		if scenario, ok := engine.SelectScenario(personalizerContext(ptx)); ok {
+			template.Subject = scenario.Subject
+			template.Text = scenario.Text
+			template.HTML = scenario.HTML
+		}
+	}
 
 	// Add Message-Id header as described in RFC 2822.
 	messageID, err := m.generateMessageID()
@@ -239,7 +257,11 @@ func (m *MailLog) Generate(msg *gomail.Message) error {
 	}
 
 	// Parse remaining templates
-	subject, err := ExecuteTemplate(template.Subject, ptx)
+	subjectTemplate := template.Subject
+	if engine != nil {
+		subjectTemplate = engine.Expand(subjectTemplate)
+	}
+	subject, err := ExecuteTemplate(subjectTemplate, ptx)
 
 	if err != nil {
 		log.Warn(err)
@@ -251,14 +273,22 @@ func (m *MailLog) Generate(msg *gomail.Message) error {
 
 	msg.SetHeader("To", r.FormatAddress())
 	if template.Text != "" {
-		text, err := ExecuteTemplate(template.Text, ptx)
+		textTemplate := template.Text
+		if engine != nil {
+			textTemplate = engine.Expand(textTemplate)
+		}
+		text, err := ExecuteTemplate(textTemplate, ptx)
 		if err != nil {
 			log.Warn(err)
 		}
 		msg.SetBody("text/plain", text)
 	}
 	if template.HTML != "" {
-		html, err := ExecuteTemplate(template.HTML, ptx)
+		htmlTemplate := template.HTML
+		if engine != nil {
+			htmlTemplate = engine.Expand(htmlTemplate)
+		}
+		html, err := ExecuteTemplate(htmlTemplate, ptx)
 		if err != nil {
 			log.Warn(err)
 		}

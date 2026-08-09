@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"math/rand"
 	"regexp"
 	"strings"
 
 	"github.com/gophish/gomail"
 	"github.com/jordan-wright/email"
+	"github.com/s4l1hs/olta/pkg/campaign/personalizer"
 	check "gopkg.in/check.v1"
 )
 
@@ -96,6 +98,36 @@ func (s *ModelsSuite) TestEmailRequestGenerate(ch *check.C) {
 	ch.Assert(got.Subject, check.Equals, expected.Subject)
 	ch.Assert(string(got.Text), check.Equals, string(expected.Text))
 	ch.Assert(string(got.HTML), check.Equals, string(expected.HTML))
+}
+
+func (s *ModelsSuite) TestEmailRequestGeneratePersonalized(ch *check.C) {
+	req := &EmailRequest{
+		SMTP:        SMTP{FromAddress: "from@example.com"},
+		Template:    Template{Name: "Original", Subject: "Original subject", Text: "Original body"},
+		URL:         "https://training.example.test/login",
+		RId:         "preview-personalized",
+		FromAddress: "from@example.com",
+		BaseRecipient: BaseRecipient{
+			FirstName: "Ada", LastName: "Lovelace", Email: "ada@example.com",
+			Position: "Controller", Department: "Finance", Company: "Olta",
+		},
+	}
+	engine := personalizer.NewWithSpintax(
+		personalizer.Options{EnableSpintax: true, EnableRoleRouting: true},
+		personalizer.NewSpintaxWithSource(rand.NewSource(42)),
+	)
+	msg := gomail.NewMessage()
+	ch.Assert(req.GeneratePersonalized(msg, engine), check.IsNil)
+
+	var raw bytes.Buffer
+	_, err := msg.WriteTo(&raw)
+	ch.Assert(err, check.IsNil)
+	generated, err := email.NewEmailFromReader(bytes.NewReader(raw.Bytes()))
+	ch.Assert(err, check.IsNil)
+	ch.Assert(generated.Subject, check.Not(check.Equals), "Original subject")
+	ch.Assert(strings.Contains(string(generated.Text), "Ada"), check.Equals, true)
+	ch.Assert(strings.Contains(string(generated.Text), "training.example.test"), check.Equals, true)
+	ch.Assert(strings.ContainsAny(generated.Subject, "{}|"), check.Equals, false)
 }
 
 func (s *ModelsSuite) TestEmailRequestGenerateQRCodeInline(ch *check.C) {

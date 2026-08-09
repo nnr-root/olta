@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-const CurrentVersion = 2
+const CurrentVersion = 3
 
 //go:embed sqlite/001_initial_olta_schema.sql
 var sqliteSchema string
@@ -22,11 +22,17 @@ var sqliteCampaignJitterVariants string
 //go:embed mysql/002_campaign_jitter_variants.sql
 var mysqlCampaignJitterVariants string
 
+//go:embed sqlite/003_recipient_personalization.sql
+var sqliteRecipientPersonalization string
+
+//go:embed mysql/003_recipient_personalization.sql
+var mysqlRecipientPersonalization string
+
 var requiredSchema = map[string][]string{
 	"users":                      {"id", "username", "hash", "api_key", "role_id", "password_change_required", "account_locked", "last_login"},
 	"templates":                  {"id", "user_id", "name", "envelope_sender", "subject", "text", "html", "modified_date"},
 	"attachments":                {"id", "template_id", "content", "type", "name"},
-	"targets":                    {"id", "first_name", "last_name", "email", "position"},
+	"targets":                    {"id", "first_name", "last_name", "email", "position", "department", "role", "company", "manager_name"},
 	"groups":                     {"id", "user_id", "name", "modified_date"},
 	"group_targets":              {"group_id", "target_id"},
 	"smtp":                       {"id", "user_id", "interface_type", "name", "host", "username", "password", "from_address", "modified_date", "ignore_cert_errors"},
@@ -34,11 +40,11 @@ var requiredSchema = map[string][]string{
 	"sms":                        {"id", "user_id", "name", "twilio_account_sid", "twilio_auth_token", "sms_from", "modified_date"},
 	"campaigns":                  {"id", "user_id", "name", "created_date", "launch_date", "send_by_date", "completed_date", "template_id", "page_id", "status", "smtp_id", "sms_id", "url", "qr_size", "min_send_delay", "max_send_delay"},
 	"campaign_template_variants": {"id", "campaign_id", "template_id", "name", "position"},
-	"results":                    {"id", "campaign_id", "user_id", "r_id", "email", "first_name", "last_name", "position", "status", "ip", "latitude", "longitude", "send_date", "reported", "modified_date", "sms_target", "template_variant_id"},
+	"results":                    {"id", "campaign_id", "user_id", "r_id", "email", "first_name", "last_name", "position", "department", "role", "company", "manager_name", "status", "ip", "latitude", "longitude", "send_date", "reported", "modified_date", "sms_target", "template_variant_id"},
 	"events":                     {"id", "campaign_id", "email", "time", "message", "details"},
 	"mail_logs":                  {"id", "campaign_id", "user_id", "send_date", "send_attempt", "r_id", "processing", "target"},
 	"sms_logs":                   {"id", "campaign_id", "user_id", "send_date", "send_attempt", "r_id", "processing", "target"},
-	"email_requests":             {"id", "user_id", "template_id", "page_id", "first_name", "last_name", "email", "position", "url", "r_id", "from_address"},
+	"email_requests":             {"id", "user_id", "template_id", "page_id", "first_name", "last_name", "email", "position", "department", "role", "company", "manager_name", "url", "r_id", "from_address"},
 	"roles":                      {"id", "slug", "name", "description"},
 	"permissions":                {"id", "slug", "name", "description"},
 	"role_permissions":           {"role_id", "permission_id"},
@@ -116,16 +122,19 @@ func Apply(db *sql.DB, dialect string) error {
 }
 
 func migrationFor(dialect string, version int) (string, error) {
-	if version != 2 {
-		return "", fmt.Errorf("campaign schema migration %d is unavailable", version)
-	}
-	switch dialect {
-	case "sqlite3":
+	switch {
+	case dialect == "sqlite3" && version == 2:
 		return sqliteCampaignJitterVariants, nil
-	case "mysql":
+	case dialect == "mysql" && version == 2:
 		return mysqlCampaignJitterVariants, nil
-	default:
+	case dialect == "sqlite3" && version == 3:
+		return sqliteRecipientPersonalization, nil
+	case dialect == "mysql" && version == 3:
+		return mysqlRecipientPersonalization, nil
+	case dialect != "sqlite3" && dialect != "mysql":
 		return "", fmt.Errorf("unsupported database dialect %q", dialect)
+	default:
+		return "", fmt.Errorf("campaign schema migration %d is unavailable", version)
 	}
 }
 
@@ -138,7 +147,9 @@ func legacyRequiredSchema() map[string][]string {
 		filtered := make([]string, 0, len(columns))
 		for _, column := range columns {
 			if (table == "campaigns" && (column == "min_send_delay" || column == "max_send_delay")) ||
-				(table == "results" && column == "template_variant_id") {
+				(table == "results" && column == "template_variant_id") ||
+				((table == "targets" || table == "results" || table == "email_requests") &&
+					(column == "department" || column == "role" || column == "company" || column == "manager_name")) {
 				continue
 			}
 			filtered = append(filtered, column)

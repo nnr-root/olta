@@ -1,0 +1,14 @@
+ALTER TABLE targets ADD COLUMN department VARCHAR(255);
+ALTER TABLE targets ADD COLUMN role VARCHAR(255);
+ALTER TABLE targets ADD COLUMN company VARCHAR(255);
+ALTER TABLE targets ADD COLUMN manager_name VARCHAR(255);
+
+ALTER TABLE results ADD COLUMN department VARCHAR(255);
+ALTER TABLE results ADD COLUMN role VARCHAR(255);
+ALTER TABLE results ADD COLUMN company VARCHAR(255);
+ALTER TABLE results ADD COLUMN manager_name VARCHAR(255);
+
+ALTER TABLE email_requests ADD COLUMN department VARCHAR(255);
+ALTER TABLE email_requests ADD COLUMN role VARCHAR(255);
+ALTER TABLE email_requests ADD COLUMN company VARCHAR(255);
+ALTER TABLE email_requests ADD COLUMN manager_name VARCHAR(255);

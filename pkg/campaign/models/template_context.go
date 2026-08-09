@@ -34,6 +34,9 @@ type PhishingTemplateContext struct {
 	QR          string
 	QRCode      string
 	RIdQR       string
+	// PhishingURL is an explicit alias for URL used by the built-in
+	// personalization templates.
+	PhishingURL string
 	BaseRecipient
 }
 
@@ -128,6 +131,7 @@ func NewPhishingTemplateContext(ctx TemplateContext, r BaseRecipient, rid string
 		BaseRecipient: r,
 		BaseURL:       baseURL.String(),
 		URL:           phishUrlString,
+		PhishingURL:   phishUrlString,
 		TrackingURL:   trackerUrlString,
 		Tracker:       "<img alt='' style='display: none' src='" + trackerUrlString + "'/>",
 		From:          fn,
@@ -185,6 +189,7 @@ func NewPhishingTemplateContextSms(ctx TemplateContext, r BaseRecipient, rid str
 		BaseRecipient: r,
 		BaseURL:       baseURL.String(),
 		URL:           phishURL.String(),
+		PhishingURL:   phishURL.String(),
 		TrackingURL:   trackingURL.String(),
 		Tracker:       "<img alt='' style='display: none' src='" + trackingURL.String() + "'/>",
 		From:          fn,

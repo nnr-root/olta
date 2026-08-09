@@ -77,7 +77,7 @@ func TestApplyRejectsIncompleteLegacySchema(t *testing.T) {
 
 func TestApplyMigratesVersionOneSQLiteSchema(t *testing.T) {
 	db := openSQLiteTestDatabase(t)
-	legacySchema := sqliteSchema
+	legacySchema := schemaWithoutRecipientPersonalization(sqliteSchema)
 	legacySchema = strings.Replace(legacySchema, ",\n    min_send_delay BIGINT NOT NULL DEFAULT 0,\n    max_send_delay BIGINT NOT NULL DEFAULT 0", "", 1)
 	legacySchema = strings.Replace(legacySchema, ",\n    template_variant_id BIGINT NOT NULL DEFAULT 0", "", 1)
 	variantTableStart := strings.Index(legacySchema, "CREATE TABLE IF NOT EXISTS campaign_template_variants")
@@ -134,6 +134,41 @@ func TestApplyMigratesVersionOneSQLiteSchema(t *testing.T) {
 	if resultVariantID != variantID {
 		t.Fatalf("result variant ID = %d, want %d", resultVariantID, variantID)
 	}
+}
+
+func TestApplyMigratesVersionTwoSQLiteSchema(t *testing.T) {
+	db := openSQLiteTestDatabase(t)
+	versionTwoSchema := schemaWithoutRecipientPersonalization(sqliteSchema)
+	if err := executeSchema(db, versionTwoSchema); err != nil {
+		t.Fatalf("apply version two fixture: %v", err)
+	}
+	if err := ensureVersionTable(db, "sqlite3"); err != nil {
+		t.Fatal(err)
+	}
+	if err := recordVersion(db, 2); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO targets (id, email, position) VALUES (1, 'ada@example.com', 'Engineer')`); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Apply(db, "sqlite3"); err != nil {
+		t.Fatalf("Apply() version two migration: %v", err)
+	}
+	if err := validate(db); err != nil {
+		t.Fatalf("validate migrated schema: %v", err)
+	}
+	var email, department string
+	if err := db.QueryRow(`SELECT email, COALESCE(department, '') FROM targets WHERE id = 1`).Scan(&email, &department); err != nil {
+		t.Fatal(err)
+	}
+	if email != "ada@example.com" || department != "" {
+		t.Fatalf("migrated target = %q/%q, want preserved email and empty department", email, department)
+	}
+}
+
+func schemaWithoutRecipientPersonalization(schema string) string {
+	return strings.ReplaceAll(schema, ",\n    department VARCHAR(255),\n    role VARCHAR(255),\n    company VARCHAR(255),\n    manager_name VARCHAR(255)", "")
 }
 
 func TestUnifiedSchemasContainAllRequiredTables(t *testing.T) {

@@ -24,10 +24,14 @@ import (
 )
 
 var (
-	firstNameRegex = regexp.MustCompile(`(?i)first[\s_-]*name`)
-	lastNameRegex  = regexp.MustCompile(`(?i)last[\s_-]*name`)
-	emailRegex     = regexp.MustCompile(`(?i)email`)
-	positionRegex  = regexp.MustCompile(`(?i)position`)
+	firstNameRegex  = regexp.MustCompile(`(?i)first[\s_-]*name`)
+	lastNameRegex   = regexp.MustCompile(`(?i)last[\s_-]*name`)
+	emailRegex      = regexp.MustCompile(`(?i)email`)
+	positionRegex   = regexp.MustCompile(`(?i)position`)
+	departmentRegex = regexp.MustCompile(`(?i)department`)
+	roleRegex       = regexp.MustCompile(`(?i)role`)
+	companyRegex    = regexp.MustCompile(`(?i)company`)
+	managerRegex    = regexp.MustCompile(`(?i)manager[\s_-]*name`)
 )
 
 // ParseMail takes in an HTTP Request and returns an Email object
@@ -70,10 +74,18 @@ func ParseCSV(r *http.Request) ([]models.Target, error) {
 		li := -1
 		ei := -1
 		pi := -1
+		di := -1
+		ri := -1
+		ci := -1
+		mi := -1
 		fn := ""
 		ln := ""
 		ea := ""
 		ps := ""
+		department := ""
+		role := ""
+		company := ""
+		managerName := ""
 		for i, v := range record {
 			switch {
 			case firstNameRegex.MatchString(v):
@@ -84,9 +96,17 @@ func ParseCSV(r *http.Request) ([]models.Target, error) {
 				ei = i
 			case positionRegex.MatchString(v):
 				pi = i
+			case departmentRegex.MatchString(v):
+				di = i
+			case roleRegex.MatchString(v):
+				ri = i
+			case companyRegex.MatchString(v):
+				ci = i
+			case managerRegex.MatchString(v):
+				mi = i
 			}
 		}
-		if fi == -1 && li == -1 && ei == -1 && pi == -1 {
+		if fi == -1 && li == -1 && ei == -1 && pi == -1 && di == -1 && ri == -1 && ci == -1 && mi == -1 {
 			continue
 		}
 		for {
@@ -110,14 +130,30 @@ func ParseCSV(r *http.Request) ([]models.Target, error) {
 			if pi != -1 && len(record) > pi {
 				ps = record[pi]
 			}
+			if di != -1 && len(record) > di {
+				department = record[di]
+			}
+			if ri != -1 && len(record) > ri {
+				role = record[ri]
+			}
+			if ci != -1 && len(record) > ci {
+				company = record[ci]
+			}
+			if mi != -1 && len(record) > mi {
+				managerName = record[mi]
+			}
 			sr := regexp.MustCompile(" ")
 			stripped := sr.ReplaceAllString(ea, "")
 			t := models.Target{
 				BaseRecipient: models.BaseRecipient{
-					FirstName: fn,
-					LastName:  ln,
-					Email:     stripped,
-					Position:  ps,
+					FirstName:   fn,
+					LastName:    ln,
+					Email:       stripped,
+					Position:    ps,
+					Department:  department,
+					Role:        role,
+					Company:     company,
+					ManagerName: managerName,
 				},
 			}
 			fmt.Printf("[+] Parsed target: %s\n", t.Email)

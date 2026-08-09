@@ -27,6 +27,12 @@ All notable changes to Olta are documented in this file.
 - Added automatic client-platform theme selection plus explicit `{{.BITBFrame}}` and `{{.BITBFrameTheme}}` campaign template helpers.
 - Added modular OAuth 2.0/OpenID Connect consent components with application and publisher branding, requested-scope presentation, redirect URI metadata, accept/cancel events, and the `{{.OAuthConsent}}` campaign template helper.
 - Added single-binary CSS and JavaScript distribution for BITB and OAuth consent components through embedded campaign asset routes under `/static/components/`.
+- Added a pure rule-based campaign personalizer with concurrency-safe nested spintax expansion that preserves Go template actions and ordinary HTML/CSS braces.
+- Added a built-in scenario library with coherent subject, plaintext, and HTML variants for student/academia, general HR, finance/accounting, and IT/software engineering audiences.
+- Added Turkish-normalized recipient routing across department, position, and role metadata, with `general_hr_scenarios` as the default fallback.
+- Added rich personalization fields for `{{.FirstName}}`, `{{.LastName}}`, `{{.Position}}`, `{{.Department}}`, `{{.Company}}`, `{{.ManagerName}}`, and `{{.PhishingURL}}`.
+- Added `-enable-spintax` and `-enable-role-routing` campaign options, both enabled by default.
+- Added campaign schema version 3 migrations for SQLite and MySQL to persist recipient department, role, company, and manager metadata across targets, results, and test-email requests.
 
 ### Changed
 
@@ -49,6 +55,8 @@ All notable changes to Olta are documented in this file.
 - Benchmarked local cloaker CIDR lookups at sub-microsecond latency with zero allocations.
 - Added focused coverage for HTML verification injection, assertion enforcement, jitter range calculation, cancellation-aware delay waits, A/B distribution, variant rendering and metrics aggregation, API exposure, and schema v1-to-v2 backfill.
 - Added focused coverage for BITB theme rendering and platform assets, OAuth metadata escaping and scope injection, template helper execution, and embedded component asset routing.
+- Added focused coverage for nested spintax randomness, template-action preservation, category routing and fallback behavior, rich placeholder substitution, personalized mail generation, and schema v2-to-v3 migration.
+- Benchmarked spintax evaluation at approximately 496 ns/op with 261 B/op and 3 allocations/op on Apple M2 hardware.
 - Verified the campaign mailer and worker packages with the Go race detector and the full repository with `go vet ./...`.
 
 [1.0.0-Alpha]: https://github.com/s4l1hs/olta/releases/tag/v1.0.0-alpha
