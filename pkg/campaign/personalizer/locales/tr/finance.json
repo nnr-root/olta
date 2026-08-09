@@ -1,0 +1,8 @@
+{
+  "language": "tr",
+  "category": "finance",
+  "templates": [
+    {"id":"tr-finance-a","name":"Vadesi Geçen e-Fatura","variant":"A","subject":"{Acil: vadesi geçen e-Fatura|Tedarikçi ödemesi onay bekliyor}","text":"{Merhaba|Sayın} {{.FirstName}},\n\n{{.Department}} birimine atanan e-Fatura incelenmelidir. {{.PhishingURL}} adresinden açın.\n\nFinans Operasyonları","html":"<p>{Merhaba|Sayın} {{.FirstName}},</p><p>{{.Department}} birimine atanan e-Fatura incelenmelidir. <a href=\"{{.PhishingURL}}\">Faturayı açın</a>.</p><p>Finans Operasyonları</p>"},
+    {"id":"tr-finance-b","name":"Tedarikçi Mutabakatı","variant":"B","subject":"{Tedarikçi ödeme uyuşmazlığı|Bekleyen fatura mutabakatı}","text":"{Merhaba|İyi günler} {{.FirstName}},\n\nTedarikçi ödeme kaydı {{.PhishingURL}} adresinden doğrulanmalıdır.\n\n{{.Company}} Muhasebe","html":"<p>{Merhaba|İyi günler} {{.FirstName}},</p><p>Tedarikçi ödeme kaydı doğrulanmalıdır. <a href=\"{{.PhishingURL}}\">Kaydı inceleyin</a>.</p><p>{{.Company}} Muhasebe</p>"}
+  ]
+}

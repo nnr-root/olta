@@ -41,12 +41,15 @@ type trieNode struct {
 	network  *Network
 }
 
-// LocalProvider performs immutable longest-prefix matching with an in-memory
+// RadixTrie performs immutable longest-prefix matching with an in-memory
 // binary trie. A lookup examines at most 32 nodes for IPv4 and 128 for IPv6.
-type LocalProvider struct {
+type RadixTrie struct {
 	v4 trieNode
 	v6 trieNode
 }
+
+// LocalProvider is retained as a compatibility alias for RadixTrie.
+type LocalProvider = RadixTrie
 
 // NewLocalProvider builds a provider from CIDR entries. Once constructed, it
 // is safe for concurrent use without locks.
@@ -76,7 +79,7 @@ func NewLocalProvider(entries []Entry) (*LocalProvider, error) {
 	return provider, nil
 }
 
-func (provider *LocalProvider) insert(network Network) {
+func (provider *RadixTrie) insert(network Network) {
 	address := network.Prefix.Addr().Unmap()
 	node := &provider.v6
 	if address.Is4() {
@@ -95,7 +98,7 @@ func (provider *LocalProvider) insert(network Network) {
 }
 
 // Lookup returns the most-specific matching network for address.
-func (provider *LocalProvider) Lookup(address netip.Addr) (Network, bool) {
+func (provider *RadixTrie) Lookup(address netip.Addr) (Network, bool) {
 	if provider == nil || !address.IsValid() {
 		return Network{}, false
 	}

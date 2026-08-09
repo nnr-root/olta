@@ -111,6 +111,13 @@ func WithPersonalization(enableSpintax, enableRoleRouting bool) Option {
 	}
 }
 
+// WithPersonalizer installs a preconfigured personalization engine.
+func WithPersonalizer(engine *personalizer.Personalizer) Option {
+	return func(worker *MailWorker) {
+		worker.personalizer = engine
+	}
+}
+
 // NewMailWorker returns an instance of MailWorker with the mail queue
 // initialized.
 func NewMailWorker(options ...Option) *MailWorker {

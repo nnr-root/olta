@@ -91,6 +91,8 @@ func (as *Server) registerRoutes() {
 	router.HandleFunc("/templates/", as.Templates)
 	router.HandleFunc("/templates/{id:[0-9]+}", as.Template)
 	router.HandleFunc("/quishing/preview", as.QRCodePreview).Methods(http.MethodPost)
+	router.HandleFunc("/v1/personalizer/preview", as.PersonalizerPreview).Methods(http.MethodPost)
+	router.HandleFunc("/v1/bitb/preview", as.BITBPreview).Methods(http.MethodPost)
 	router.HandleFunc("/smtp/", as.SendingProfiles)
 	router.HandleFunc("/smtp/{id:[0-9]+}", as.SendingProfile)
 	router.HandleFunc("/sms/", as.SMSProfiles)

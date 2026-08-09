@@ -1,0 +1,8 @@
+{
+  "language": "de",
+  "category": "hr",
+  "templates": [
+    {"id":"de-hr-a","name":"Resturlaub","variant":"A","subject":"{Hinweis zu Ihrem Resturlaub|Jahresurlaub erfordert Aktion}","text":"{Hallo|Guten Tag} {{.FirstName}},\n\nFür {{.Department}} ist Resturlaub erfasst. Prüfen Sie ihn unter {{.PhishingURL}}.\n\n{{.ManagerName}}\nPersonalabteilung","html":"<p>{Hallo|Guten Tag} {{.FirstName}},</p><p>Für {{.Department}} ist Resturlaub erfasst. <a href=\"{{.PhishingURL}}\">Urlaub prüfen</a>.</p><p>{{.ManagerName}}<br>Personalabteilung</p>"},
+    {"id":"de-hr-b","name":"Leistungsprämie","variant":"B","subject":"{Ihre Leistungsprämie ist verfügbar|Gutschein zur Mitarbeiteranerkennung}","text":"{Glückwunsch|Hallo} {{.FirstName}},\n\nFür Ihren Beitrag als {{.Position}} wurde ein Gutschein ausgestellt. Rufen Sie {{.PhishingURL}} auf.\n\n{{.Company}} HR","html":"<p>{Glückwunsch|Hallo} {{.FirstName}},</p><p>Für Ihren Beitrag als {{.Position}} wurde ein Gutschein ausgestellt. <a href=\"{{.PhishingURL}}\">Gutschein abrufen</a>.</p><p>{{.Company}} HR</p>"}
+  ]
+}

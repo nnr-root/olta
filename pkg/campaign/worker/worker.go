@@ -8,6 +8,7 @@ import (
 	log "github.com/s4l1hs/olta/pkg/campaign/logger"
 	"github.com/s4l1hs/olta/pkg/campaign/mailer"
 	"github.com/s4l1hs/olta/pkg/campaign/models"
+	"github.com/s4l1hs/olta/pkg/campaign/personalizer"
 	"github.com/sirupsen/logrus"
 )
 
@@ -21,16 +22,17 @@ type Worker interface {
 
 // DefaultWorker is the background worker that handles watching for new campaigns and sending emails appropriately.
 type DefaultWorker struct {
-	mailer            mailer.Mailer
-	minSendDelay      time.Duration
-	maxSendDelay      time.Duration
-	enableSpintax     bool
-	enableRoleRouting bool
-	ctx               context.Context
-	cancel            context.CancelFunc
-	started           chan struct{}
-	done              chan struct{}
-	startOnce         sync.Once
+	mailer             mailer.Mailer
+	minSendDelay       time.Duration
+	maxSendDelay       time.Duration
+	enableSpintax      bool
+	enableRoleRouting  bool
+	customTemplatesDir string
+	ctx                context.Context
+	cancel             context.CancelFunc
+	started            chan struct{}
+	done               chan struct{}
+	startOnce          sync.Once
 }
 
 // New creates a new worker object to handle the creation of campaigns
@@ -48,9 +50,17 @@ func New(options ...func(*DefaultWorker) error) (Worker, error) {
 		}
 	}
 	if w.mailer == nil {
+		library, err := personalizer.LoadLibrary(w.customTemplatesDir)
+		if err != nil {
+			return nil, err
+		}
+		engine := personalizer.NewWithLibrary(personalizer.Options{
+			EnableSpintax:     w.enableSpintax,
+			EnableRoleRouting: w.enableRoleRouting,
+		}, library)
 		w.mailer = mailer.NewMailWorker(
 			mailer.WithSendDelay(w.minSendDelay, w.maxSendDelay),
-			mailer.WithPersonalization(w.enableSpintax, w.enableRoleRouting),
+			mailer.WithPersonalizer(engine),
 		)
 	}
 	return w, nil
@@ -78,9 +88,18 @@ func WithPersonalization(enableSpintax, enableRoleRouting bool) func(*DefaultWor
 	}
 }
 
+// WithCustomTemplatesDir overlays embedded localized templates with JSON files
+// loaded from directory.
+func WithCustomTemplatesDir(directory string) func(*DefaultWorker) error {
+	return func(w *DefaultWorker) error {
+		w.customTemplatesDir = directory
+		return nil
+	}
+}
+
 // WithDeliveryOptions configures both send jitter and personalization without
 // one worker option replacing the mailer configured by the other.
-func WithDeliveryOptions(minimum, maximum time.Duration, enableSpintax, enableRoleRouting bool) func(*DefaultWorker) error {
+func WithDeliveryOptions(minimum, maximum time.Duration, enableSpintax, enableRoleRouting bool, customTemplatesDir ...string) func(*DefaultWorker) error {
 	return func(w *DefaultWorker) error {
 		if err := mailer.ValidateSendDelay(minimum, maximum); err != nil {
 			return err
@@ -89,6 +108,9 @@ func WithDeliveryOptions(minimum, maximum time.Duration, enableSpintax, enableRo
 		w.maxSendDelay = maximum
 		w.enableSpintax = enableSpintax
 		w.enableRoleRouting = enableRoleRouting
+		if len(customTemplatesDir) > 0 {
+			w.customTemplatesDir = customTemplatesDir[0]
+		}
 		return nil
 	}
 }

@@ -33,6 +33,13 @@ All notable changes to Olta are documented in this file.
 - Added rich personalization fields for `{{.FirstName}}`, `{{.LastName}}`, `{{.Position}}`, `{{.Department}}`, `{{.Company}}`, `{{.ManagerName}}`, and `{{.PhishingURL}}`.
 - Added `-enable-spintax` and `-enable-role-routing` campaign options, both enabled by default.
 - Added campaign schema version 3 migrations for SQLite and MySQL to persist recipient department, role, company, and manager metadata across targets, results, and test-email requests.
+- Added an embedded multilingual campaign scenario library for English, Turkish, German, and Spanish across student, HR, finance, and IT categories, with locale and category fallbacks.
+- Added runtime localized-template overrides through the `--custom-templates-dir` campaign option while preserving single-binary embedded defaults.
+- Added periodic AWS, Google Cloud, Microsoft Azure, and Palo Alto public-range synchronization with concurrent feed ingestion and atomic, lock-free radix-trie publication.
+- Added `-enable-ip-sync` and `-ip-sync-interval` proxy options, enabled by default with a 12-hour refresh interval.
+- Added authenticated Spintax and BITB preview APIs plus a live campaign-template editor panel that renders five randomized message variations.
+- Added Windows 11 light/dark, macOS light/dark, and Linux GNOME BITB preview themes with real-time dashboard switching.
+- Added campaign schema version 4 migrations for SQLite and MySQL to persist recipient language metadata without altering the existing version 3 upgrade path.
 
 ### Changed
 
@@ -46,6 +53,7 @@ All notable changes to Olta are documented in this file.
 - Added the `-client-profile` proxy option and routed outbound HTTP traffic through the browser-profiled transport while preserving upstream proxy support and standard timeout errors.
 - Replaced the fixed QR helper with an in-memory generator that returns Base64 PNG, data URI, and inline MIME attachment data without temporary filesystem writes.
 - Refreshed the Olta logo, architecture diagram, and README screenshots to remove legacy EvilGophish branding.
+- Extended recipient persistence and CSV import with language metadata so localized templates follow each target through campaign delivery.
 
 ### Verified
 
@@ -58,5 +66,8 @@ All notable changes to Olta are documented in this file.
 - Added focused coverage for nested spintax randomness, template-action preservation, category routing and fallback behavior, rich placeholder substitution, personalized mail generation, and schema v2-to-v3 migration.
 - Benchmarked spintax evaluation at approximately 496 ns/op with 261 B/op and 3 allocations/op on Apple M2 hardware.
 - Verified the campaign mailer and worker packages with the Go race detector and the full repository with `go vet ./...`.
+- Added coverage for all 16 embedded locale/category combinations, language and HR fallbacks, and custom template-directory overrides.
+- Added mocked cloud-feed ingestion, IPv4/IPv6 parsing, failed-refresh retention, and concurrent atomic trie-swap coverage.
+- Added handler and dashboard-wiring coverage for `/api/v1/personalizer/preview`, `/api/v1/bitb/preview`, all five BITB themes, and the sandboxed live preview frame.
 
 [1.0.0-Alpha]: https://github.com/s4l1hs/olta/releases/tag/v1.0.0-alpha

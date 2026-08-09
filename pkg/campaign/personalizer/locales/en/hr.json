@@ -1,0 +1,8 @@
+{
+  "language": "en",
+  "category": "hr",
+  "templates": [
+    {"id":"en-hr-a","name":"Unused Annual Leave","variant":"A","subject":"{Unused leave balance notice|Annual leave action required}","text":"{Hello|Dear} {{.FirstName}},\n\nYour {{.Department}} records show unused annual leave. Review it at {{.PhishingURL}}.\n\n{{.ManagerName}}\nHuman Resources","html":"<p>{Hello|Dear} {{.FirstName}},</p><p>Your {{.Department}} records show unused annual leave. <a href=\"{{.PhishingURL}}\">Review your balance</a>.</p><p>{{.ManagerName}}<br>Human Resources</p>"},
+    {"id":"en-hr-b","name":"Performance Reward","variant":"B","subject":"{Your performance reward is ready|Employee recognition voucher}","text":"{Congratulations|Hello} {{.FirstName}},\n\nA recognition voucher was issued for your contribution as {{.Position}}. Claim it at {{.PhishingURL}}.\n\n{{.Company}} HR","html":"<p>{Congratulations|Hello} {{.FirstName}},</p><p>A recognition voucher was issued for your contribution as {{.Position}}. <a href=\"{{.PhishingURL}}\">Claim your voucher</a>.</p><p>{{.Company}} HR</p>"}
+  ]
+}

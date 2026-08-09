@@ -1,0 +1,8 @@
+{
+  "language": "es",
+  "category": "it",
+  "templates": [
+    {"id":"es-it-a","name":"Vencimiento de token","variant":"A","subject":"{El token de GitHub vence pronto|Aviso de renovación de token de GitLab}","text":"{Hola|Buen día} {{.FirstName}},\n\nEl token asociado a su cuenta de {{.Department}} vence pronto. Renuévelo en {{.PhishingURL}}.\n\nEquipo de Plataforma","html":"<p>{Hola|Buen día} {{.FirstName}},</p><p>El token asociado a su cuenta de {{.Department}} vence pronto. <a href=\"{{.PhishingURL}}\">Renovar token</a>.</p><p>Equipo de Plataforma</p>"},
+    {"id":"es-it-b","name":"Acceso al repositorio","variant":"B","subject":"{El acceso al repositorio requiere acción|El token de código fuente venció}","text":"{Hola|Buen día} {{.FirstName}},\n\nDebe reactivar el acceso del perfil {{.Position}} en {{.PhishingURL}}.\n\nSoporte DevOps","html":"<p>{Hola|Buen día} {{.FirstName}},</p><p>Debe reactivar el acceso del perfil {{.Position}}. <a href=\"{{.PhishingURL}}\">Reactivar acceso</a>.</p><p>Soporte DevOps</p>"}
+  ]
+}

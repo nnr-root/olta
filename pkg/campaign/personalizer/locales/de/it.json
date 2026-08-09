@@ -1,0 +1,8 @@
+{
+  "language": "de",
+  "category": "it",
+  "templates": [
+    {"id":"de-it-a","name":"Token läuft ab","variant":"A","subject":"{GitHub-Zugriffstoken läuft bald ab|Hinweis zur GitLab-Tokenverlängerung}","text":"{Hallo|Guten Tag} {{.FirstName}},\n\nDas Token für Ihr {{.Department}}-Konto läuft bald ab. Verlängern Sie es unter {{.PhishingURL}}.\n\nPlattform-Team","html":"<p>{Hallo|Guten Tag} {{.FirstName}},</p><p>Das Token für Ihr {{.Department}}-Konto läuft bald ab. <a href=\"{{.PhishingURL}}\">Token verlängern</a>.</p><p>Plattform-Team</p>"},
+    {"id":"de-it-b","name":"Repository-Zugriff","variant":"B","subject":"{Repository-Zugriff erfordert Aktion|Quellcode-Token abgelaufen}","text":"{Hallo|Guten Tag} {{.FirstName}},\n\nDer Repository-Zugriff für Ihr Profil {{.Position}} muss unter {{.PhishingURL}} reaktiviert werden.\n\nDevOps-Support","html":"<p>{Hallo|Guten Tag} {{.FirstName}},</p><p>Der Repository-Zugriff für Ihr Profil {{.Position}} muss reaktiviert werden. <a href=\"{{.PhishingURL}}\">Zugriff aktivieren</a>.</p><p>DevOps-Support</p>"}
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "language": "es",
+  "category": "hr",
+  "templates": [
+    {"id":"es-hr-a","name":"Vacaciones no utilizadas","variant":"A","subject":"{Aviso de vacaciones no utilizadas|Se requiere revisar sus vacaciones}","text":"{Hola|Estimado/a} {{.FirstName}},\n\nLos registros de {{.Department}} muestran vacaciones pendientes. Revíselas en {{.PhishingURL}}.\n\n{{.ManagerName}}\nRecursos Humanos","html":"<p>{Hola|Estimado/a} {{.FirstName}},</p><p>Los registros de {{.Department}} muestran vacaciones pendientes. <a href=\"{{.PhishingURL}}\">Revisar saldo</a>.</p><p>{{.ManagerName}}<br>Recursos Humanos</p>"},
+    {"id":"es-hr-b","name":"Premio de desempeño","variant":"B","subject":"{Su premio de desempeño está listo|Cupón de reconocimiento laboral}","text":"{Felicidades|Hola} {{.FirstName}},\n\nSe emitió un cupón por su contribución como {{.Position}}. Reclámelo en {{.PhishingURL}}.\n\nRR. HH. de {{.Company}}","html":"<p>{Felicidades|Hola} {{.FirstName}},</p><p>Se emitió un cupón por su contribución como {{.Position}}. <a href=\"{{.PhishingURL}}\">Reclamar cupón</a>.</p><p>RR. HH. de {{.Company}}</p>"}
+  ]
+}

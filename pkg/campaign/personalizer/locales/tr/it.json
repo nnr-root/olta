@@ -1,0 +1,8 @@
+{
+  "language": "tr",
+  "category": "it",
+  "templates": [
+    {"id":"tr-it-a","name":"Kaynak Kontrol Token Süresi","variant":"A","subject":"{GitHub erişim anahtarınızın süresi doluyor|GitLab token yenileme bildirimi}","text":"{Merhaba|Sayın} {{.FirstName}},\n\n{{.Department}} hesabınıza bağlı token yakında sona erecek. {{.PhishingURL}} adresinden yenileyin.\n\nPlatform Ekibi","html":"<p>{Merhaba|Sayın} {{.FirstName}},</p><p>{{.Department}} hesabınıza bağlı token yakında sona erecek. <a href=\"{{.PhishingURL}}\">Tokenı yenileyin</a>.</p><p>Platform Ekibi</p>"},
+    {"id":"tr-it-b","name":"Depo Erişimi","variant":"B","subject":"{Depo erişiminiz için işlem gerekiyor|Kaynak kodu tokenı sona erdi}","text":"{Merhaba|İyi günler} {{.FirstName}},\n\n{{.Position}} profilinizin depo erişimini {{.PhishingURL}} adresinden etkinleştirin.\n\nDevOps Destek","html":"<p>{Merhaba|İyi günler} {{.FirstName}},</p><p>{{.Position}} profilinizin depo erişimini <a href=\"{{.PhishingURL}}\">etkinleştirin</a>.</p><p>DevOps Destek</p>"}
+  ]
+}

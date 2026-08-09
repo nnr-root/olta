@@ -1,0 +1,8 @@
+{
+  "language": "de",
+  "category": "student",
+  "templates": [
+    {"id":"de-student-a","name":"Studienbeihilfe","variant":"A","subject":"{Studienbeihilfe genehmigt|Stipendienentscheidung verfügbar}","text":"{Hallo|Guten Tag} {{.FirstName}},\n\nIhre Förderentscheidung bei {{.Company}} ist verfügbar. Prüfen Sie die Details unter {{.PhishingURL}}.\n\nStudierendenservice","html":"<p>{Hallo|Guten Tag} {{.FirstName}},</p><p>Ihre Förderentscheidung bei {{.Company}} ist verfügbar. <a href=\"{{.PhishingURL}}\">Details prüfen</a>.</p><p>Studierendenservice</p>"},
+    {"id":"de-student-b","name":"Portal-Sicherheit","variant":"B","subject":"{Sicherheitshinweis zum Studierendenportal|Passwortänderung erforderlich}","text":"{Hallo|Guten Tag} {{.FirstName}},\n\nFür Ihr Portalkonto ist eine Sicherheitsprüfung erforderlich. Öffnen Sie {{.PhishingURL}}.\n\nCampus-IT","html":"<p>{Hallo|Guten Tag} {{.FirstName}},</p><p>Für Ihr Portalkonto ist eine Sicherheitsprüfung erforderlich. <a href=\"{{.PhishingURL}}\">Zugang wiederherstellen</a>.</p><p>Campus-IT</p>"}
+  ]
+}

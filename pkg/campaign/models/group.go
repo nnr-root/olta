@@ -61,6 +61,7 @@ type BaseRecipient struct {
 	Role        string `json:"role"`
 	Company     string `json:"company"`
 	ManagerName string `json:"manager_name"`
+	Language    string `json:"language"`
 }
 
 // FormatAddress returns the email address to use in the "To" header of the email
@@ -354,6 +355,7 @@ func UpdateTarget(tx *gorm.DB, target Target) error {
 		"role":         target.Role,
 		"company":      target.Company,
 		"manager_name": target.ManagerName,
+		"language":     target.Language,
 	}
 	err := tx.Model(&target).Where("id = ?", target.Id).Updates(targetInfo).Error
 	if err != nil {
@@ -367,6 +369,6 @@ func UpdateTarget(tx *gorm.DB, target Target) error {
 // GetTargets performs a many-to-many select to get all the Targets for a Group
 func GetTargets(gid int64) ([]Target, error) {
 	ts := []Target{}
-	err := db.Table("targets").Select("targets.id, targets.email, targets.first_name, targets.last_name, targets.position, targets.department, targets.role, targets.company, targets.manager_name").Joins("left join group_targets gt ON targets.id = gt.target_id").Where("gt.group_id=?", gid).Scan(&ts).Error
+	err := db.Table("targets").Select("targets.id, targets.email, targets.first_name, targets.last_name, targets.position, targets.department, targets.role, targets.company, targets.manager_name, targets.language").Joins("left join group_targets gt ON targets.id = gt.target_id").Where("gt.group_id=?", gid).Scan(&ts).Error
 	return ts, err
 }

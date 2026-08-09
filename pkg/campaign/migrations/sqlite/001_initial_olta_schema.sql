@@ -38,7 +38,8 @@ CREATE TABLE IF NOT EXISTS targets (
     department VARCHAR(255),
     role VARCHAR(255),
     company VARCHAR(255),
-    manager_name VARCHAR(255)
+    manager_name VARCHAR(255),
+    language VARCHAR(32)
 );
 
 CREATE TABLE IF NOT EXISTS groups (
@@ -120,6 +121,7 @@ CREATE TABLE IF NOT EXISTS results (
     role VARCHAR(255),
     company VARCHAR(255),
     manager_name VARCHAR(255),
+    language VARCHAR(32),
     status VARCHAR(255) NOT NULL,
     ip VARCHAR(255),
     latitude REAL,
@@ -175,6 +177,7 @@ CREATE TABLE IF NOT EXISTS email_requests (
     role VARCHAR(255),
     company VARCHAR(255),
     manager_name VARCHAR(255),
+    language VARCHAR(32),
     url VARCHAR(1000),
     r_id VARCHAR(255),
     from_address VARCHAR(255)

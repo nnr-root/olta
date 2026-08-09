@@ -1,0 +1,8 @@
+{
+  "language": "de",
+  "category": "finance",
+  "templates": [
+    {"id":"de-finance-a","name":"Überfällige E-Rechnung","variant":"A","subject":"{Dringend: überfällige E-Rechnung|Lieferantenzahlung wartet auf Freigabe}","text":"{Hallo|Guten Tag} {{.FirstName}},\n\nEine überfällige Rechnung für {{.Department}} muss geprüft werden. Öffnen Sie {{.PhishingURL}}.\n\nFinanzabteilung","html":"<p>{Hallo|Guten Tag} {{.FirstName}},</p><p>Eine überfällige Rechnung für {{.Department}} muss geprüft werden. <a href=\"{{.PhishingURL}}\">Rechnung öffnen</a>.</p><p>Finanzabteilung</p>"},
+    {"id":"de-finance-b","name":"Lieferantenabgleich","variant":"B","subject":"{Abweichung bei Lieferantenzahlung|Ausstehender Rechnungsabgleich}","text":"{Hallo|Guten Tag} {{.FirstName}},\n\nEine Lieferantenzahlung muss unter {{.PhishingURL}} bestätigt werden.\n\n{{.Company}} Buchhaltung","html":"<p>{Hallo|Guten Tag} {{.FirstName}},</p><p>Eine Lieferantenzahlung muss bestätigt werden. <a href=\"{{.PhishingURL}}\">Datensatz prüfen</a>.</p><p>{{.Company}} Buchhaltung</p>"}
+  ]
+}

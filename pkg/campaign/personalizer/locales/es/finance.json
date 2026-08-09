@@ -1,0 +1,8 @@
+{
+  "language": "es",
+  "category": "finance",
+  "templates": [
+    {"id":"es-finance-a","name":"Factura electrónica vencida","variant":"A","subject":"{Urgente: factura electrónica vencida|Pago a proveedor pendiente de aprobación}","text":"{Hola|Estimado/a} {{.FirstName}},\n\nUna factura vencida asignada a {{.Department}} requiere revisión. Abra {{.PhishingURL}}.\n\nOperaciones Financieras","html":"<p>{Hola|Estimado/a} {{.FirstName}},</p><p>Una factura vencida asignada a {{.Department}} requiere revisión. <a href=\"{{.PhishingURL}}\">Abrir factura</a>.</p><p>Operaciones Financieras</p>"},
+    {"id":"es-finance-b","name":"Conciliación de proveedor","variant":"B","subject":"{Discrepancia en pago a proveedor|Conciliación de factura pendiente}","text":"{Hola|Buen día} {{.FirstName}},\n\nDebe confirmar un pago a proveedor en {{.PhishingURL}}.\n\nContabilidad de {{.Company}}","html":"<p>{Hola|Buen día} {{.FirstName}},</p><p>Debe confirmar un pago a proveedor. <a href=\"{{.PhishingURL}}\">Revisar registro</a>.</p><p>Contabilidad de {{.Company}}</p>"}
+  ]
+}

@@ -12,5 +12,6 @@ func personalizerContext(context PhishingTemplateContext) personalizer.Context {
 		Company:     context.Company,
 		ManagerName: context.ManagerName,
 		PhishingURL: context.PhishingURL,
+		Language:    context.Language,
 	}
 }

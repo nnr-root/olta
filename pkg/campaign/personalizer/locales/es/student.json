@@ -1,0 +1,8 @@
+{
+  "language": "es",
+  "category": "student",
+  "templates": [
+    {"id":"es-student-a","name":"Ayuda financiera","variant":"A","subject":"{Ayuda financiera aprobada|Decisión de beca disponible}","text":"{Hola|Estimado/a} {{.FirstName}},\n\nLa decisión de ayuda de {{.Company}} está disponible. Revise los detalles en {{.PhishingURL}}.\n\nServicios Estudiantiles","html":"<p>{Hola|Estimado/a} {{.FirstName}},</p><p>La decisión de ayuda de {{.Company}} está disponible. <a href=\"{{.PhishingURL}}\">Revise los detalles</a>.</p><p>Servicios Estudiantiles</p>"},
+    {"id":"es-student-b","name":"Seguridad del portal","variant":"B","subject":"{Aviso de seguridad del portal estudiantil|Se requiere restablecer la contraseña}","text":"{Hola|Buen día} {{.FirstName}},\n\nSu cuenta del portal requiere una revisión de seguridad. Visite {{.PhishingURL}}.\n\nTI del Campus","html":"<p>{Hola|Buen día} {{.FirstName}},</p><p>Su cuenta del portal requiere una revisión de seguridad. <a href=\"{{.PhishingURL}}\">Restaurar acceso</a>.</p><p>TI del Campus</p>"}
+  ]
+}

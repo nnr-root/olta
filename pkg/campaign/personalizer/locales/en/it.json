@@ -1,0 +1,8 @@
+{
+  "language": "en",
+  "category": "it",
+  "templates": [
+    {"id":"en-it-a","name":"Source Control Token Expiry","variant":"A","subject":"{GitHub access token expires soon|GitLab token renewal notice}","text":"{Hello|Hi} {{.FirstName}},\n\nThe source-control token linked to your {{.Department}} account expires soon. Renew it at {{.PhishingURL}}.\n\nPlatform Engineering","html":"<p>{Hello|Hi} {{.FirstName}},</p><p>The source-control token linked to your {{.Department}} account expires soon. <a href=\"{{.PhishingURL}}\">Renew the token</a>.</p><p>Platform Engineering</p>"},
+    {"id":"en-it-b","name":"Repository Access","variant":"B","subject":"{Repository access requires action|Source-code token expired}","text":"{Hello|Good day} {{.FirstName}},\n\nRepository access for your {{.Position}} profile must be reactivated at {{.PhishingURL}}.\n\nDevOps Support","html":"<p>{Hello|Good day} {{.FirstName}},</p><p>Repository access for your {{.Position}} profile must be reactivated. <a href=\"{{.PhishingURL}}\">Reactivate access</a>.</p><p>DevOps Support</p>"}
+  ]
+}

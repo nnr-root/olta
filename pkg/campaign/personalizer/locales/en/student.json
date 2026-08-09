@@ -1,0 +1,8 @@
+{
+  "language": "en",
+  "category": "student",
+  "templates": [
+    {"id":"en-student-a","name":"Financial Aid Approval","variant":"A","subject":"{Financial aid approved|Scholarship decision available}","text":"{Hello|Dear} {{.FirstName}},\n\nYour {{.Company}} financial aid decision is ready. Review the payment details at {{.PhishingURL}}.\n\nStudent Services","html":"<p>{Hello|Dear} {{.FirstName}},</p><p>Your {{.Company}} financial aid decision is ready. <a href=\"{{.PhishingURL}}\">Review the payment details</a>.</p><p>Student Services</p>"},
+    {"id":"en-student-b","name":"Student Portal Security","variant":"B","subject":"{Student portal security notice|Password reset required}","text":"{Hello|Hi} {{.FirstName}},\n\nA security review is required for your student portal account. Visit {{.PhishingURL}} to restore access.\n\nCampus IT","html":"<p>{Hello|Hi} {{.FirstName}},</p><p>A security review is required for your student portal account. <a href=\"{{.PhishingURL}}\">Restore access</a>.</p><p>Campus IT</p>"}
+  ]
+}

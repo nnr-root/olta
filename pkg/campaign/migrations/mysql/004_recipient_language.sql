@@ -1,0 +1,3 @@
+ALTER TABLE `targets` ADD COLUMN `language` VARCHAR(32);
+ALTER TABLE `results` ADD COLUMN `language` VARCHAR(32);
+ALTER TABLE `email_requests` ADD COLUMN `language` VARCHAR(32);

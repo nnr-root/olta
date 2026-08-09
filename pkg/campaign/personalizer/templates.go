@@ -13,13 +13,14 @@ const (
 // ScenarioTemplate is a coherent subject/body combination. A scenario is
 // selected once per recipient, so its subject and content always stay paired.
 type ScenarioTemplate struct {
-	ID       string
-	Name     string
-	Category Category
-	Variant  string
-	Subject  string
-	Text     string
-	HTML     string
+	ID       string   `json:"id"`
+	Name     string   `json:"name"`
+	Language string   `json:"language,omitempty"`
+	Category Category `json:"category,omitempty"`
+	Variant  string   `json:"variant"`
+	Subject  string   `json:"subject"`
+	Text     string   `json:"text"`
+	HTML     string   `json:"html"`
 }
 
 // StudentScenarios contains financial-aid and student-portal simulations.

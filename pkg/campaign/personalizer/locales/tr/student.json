@@ -1,0 +1,8 @@
+{
+  "language": "tr",
+  "category": "student",
+  "templates": [
+    {"id":"tr-student-a","name":"Burs Onayı","variant":"A","subject":"{Burs başvurunuz onaylandı|Mali yardım kararınız hazır}","text":"{Merhaba|Sayın} {{.FirstName}},\n\n{{.Company}} burs kararınız hazır. Ödeme ayrıntılarını {{.PhishingURL}} adresinden inceleyin.\n\nÖğrenci İşleri","html":"<p>{Merhaba|Sayın} {{.FirstName}},</p><p>{{.Company}} burs kararınız hazır. <a href=\"{{.PhishingURL}}\">Ödeme ayrıntılarını inceleyin</a>.</p><p>Öğrenci İşleri</p>"},
+    {"id":"tr-student-b","name":"ÖBS Güvenliği","variant":"B","subject":"{ÖBS güvenlik bildirimi|Portal parola sıfırlama gerekiyor}","text":"{Merhaba|İyi günler} {{.FirstName}},\n\nÖğrenci portalı hesabınız için güvenlik doğrulaması gerekiyor. {{.PhishingURL}} adresinden erişimi yenileyin.\n\nBilgi İşlem","html":"<p>{Merhaba|İyi günler} {{.FirstName}},</p><p>Öğrenci portalı hesabınız için güvenlik doğrulaması gerekiyor. <a href=\"{{.PhishingURL}}\">Erişimi yenileyin</a>.</p><p>Bilgi İşlem</p>"}
+  ]
+}

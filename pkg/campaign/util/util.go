@@ -32,6 +32,7 @@ var (
 	roleRegex       = regexp.MustCompile(`(?i)role`)
 	companyRegex    = regexp.MustCompile(`(?i)company`)
 	managerRegex    = regexp.MustCompile(`(?i)manager[\s_-]*name`)
+	languageRegex   = regexp.MustCompile(`(?i)(language|locale)`)
 )
 
 // ParseMail takes in an HTTP Request and returns an Email object
@@ -78,6 +79,7 @@ func ParseCSV(r *http.Request) ([]models.Target, error) {
 		ri := -1
 		ci := -1
 		mi := -1
+		languageIndex := -1
 		fn := ""
 		ln := ""
 		ea := ""
@@ -86,6 +88,7 @@ func ParseCSV(r *http.Request) ([]models.Target, error) {
 		role := ""
 		company := ""
 		managerName := ""
+		language := ""
 		for i, v := range record {
 			switch {
 			case firstNameRegex.MatchString(v):
@@ -104,9 +107,11 @@ func ParseCSV(r *http.Request) ([]models.Target, error) {
 				ci = i
 			case managerRegex.MatchString(v):
 				mi = i
+			case languageRegex.MatchString(v):
+				languageIndex = i
 			}
 		}
-		if fi == -1 && li == -1 && ei == -1 && pi == -1 && di == -1 && ri == -1 && ci == -1 && mi == -1 {
+		if fi == -1 && li == -1 && ei == -1 && pi == -1 && di == -1 && ri == -1 && ci == -1 && mi == -1 && languageIndex == -1 {
 			continue
 		}
 		for {
@@ -142,6 +147,9 @@ func ParseCSV(r *http.Request) ([]models.Target, error) {
 			if mi != -1 && len(record) > mi {
 				managerName = record[mi]
 			}
+			if languageIndex != -1 && len(record) > languageIndex {
+				language = record[languageIndex]
+			}
 			sr := regexp.MustCompile(" ")
 			stripped := sr.ReplaceAllString(ea, "")
 			t := models.Target{
@@ -154,6 +162,7 @@ func ParseCSV(r *http.Request) ([]models.Target, error) {
 					Role:        role,
 					Company:     company,
 					ManagerName: managerName,
+					Language:    language,
 				},
 			}
 			fmt.Printf("[+] Parsed target: %s\n", t.Email)

@@ -1,0 +1,8 @@
+{
+  "language": "tr",
+  "category": "hr",
+  "templates": [
+    {"id":"tr-hr-a","name":"Kullanılmayan Yıllık İzin","variant":"A","subject":"{Kullanılmayan izin bakiyeniz|Yıllık izin işlemi gerekiyor}","text":"{Merhaba|Sayın} {{.FirstName}},\n\n{{.Department}} kayıtlarında kullanılmayan izniniz bulunuyor. {{.PhishingURL}} adresinden inceleyin.\n\n{{.ManagerName}}\nİnsan Kaynakları","html":"<p>{Merhaba|Sayın} {{.FirstName}},</p><p>{{.Department}} kayıtlarında kullanılmayan izniniz bulunuyor. <a href=\"{{.PhishingURL}}\">Bakiyeyi inceleyin</a>.</p><p>{{.ManagerName}}<br>İnsan Kaynakları</p>"},
+    {"id":"tr-hr-b","name":"Performans Ödülü","variant":"B","subject":"{Performans ödülünüz hazır|Çalışan takdir kuponunuz}","text":"{Tebrikler|Merhaba} {{.FirstName}},\n\n{{.Position}} rolündeki katkınız için ödül kuponu tanımlandı. {{.PhishingURL}} adresinden alın.\n\n{{.Company}} İK","html":"<p>{Tebrikler|Merhaba} {{.FirstName}},</p><p>{{.Position}} rolündeki katkınız için ödül kuponu tanımlandı. <a href=\"{{.PhishingURL}}\">Kuponu alın</a>.</p><p>{{.Company}} İK</p>"}
+  ]
+}

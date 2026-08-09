@@ -167,8 +167,43 @@ func TestApplyMigratesVersionTwoSQLiteSchema(t *testing.T) {
 	}
 }
 
+func TestApplyMigratesVersionThreeSQLiteSchema(t *testing.T) {
+	db := openSQLiteTestDatabase(t)
+	versionThreeSchema := strings.ReplaceAll(sqliteSchema, ",\n    language VARCHAR(32)", "")
+	if err := executeSchema(db, versionThreeSchema); err != nil {
+		t.Fatalf("apply version three fixture: %v", err)
+	}
+	if err := ensureVersionTable(db, "sqlite3"); err != nil {
+		t.Fatal(err)
+	}
+	if err := recordVersion(db, 3); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO targets (id, email, position, department) VALUES (1, 'ada@example.com', 'Engineer', 'Software')`); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Apply(db, "sqlite3"); err != nil {
+		t.Fatalf("Apply() version three migration: %v", err)
+	}
+	var email, department, language string
+	if err := db.QueryRow(`SELECT email, COALESCE(department, ''), COALESCE(language, '') FROM targets WHERE id = 1`).Scan(&email, &department, &language); err != nil {
+		t.Fatal(err)
+	}
+	if email != "ada@example.com" || department != "Software" || language != "" {
+		t.Fatalf("migrated target = %q/%q/%q, want preserved metadata and empty language", email, department, language)
+	}
+	version, err := currentVersion(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if version != CurrentVersion {
+		t.Fatalf("version = %d, want %d", version, CurrentVersion)
+	}
+}
+
 func schemaWithoutRecipientPersonalization(schema string) string {
-	return strings.ReplaceAll(schema, ",\n    department VARCHAR(255),\n    role VARCHAR(255),\n    company VARCHAR(255),\n    manager_name VARCHAR(255)", "")
+	return strings.ReplaceAll(schema, ",\n    department VARCHAR(255),\n    role VARCHAR(255),\n    company VARCHAR(255),\n    manager_name VARCHAR(255),\n    language VARCHAR(32)", "")
 }
 
 func TestUnifiedSchemasContainAllRequiredTables(t *testing.T) {

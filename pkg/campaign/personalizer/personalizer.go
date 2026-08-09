@@ -15,6 +15,15 @@ type Context struct {
 	Company     string
 	ManagerName string
 	PhishingURL string
+	Language    string
+}
+
+// Recipient contains locale and routing metadata for template selection.
+type Recipient struct {
+	Language   string
+	Department string
+	Position   string
+	Role       string
 }
 
 // Options controls independent parts of personalization.
@@ -27,11 +36,12 @@ type Options struct {
 type Personalizer struct {
 	options Options
 	spintax *Spintax
+	library *Library
 }
 
 // New creates a reusable, concurrency-safe personalizer.
 func New(options Options) *Personalizer {
-	return &Personalizer{options: options, spintax: NewSpintax()}
+	return &Personalizer{options: options, spintax: NewSpintax(), library: defaultLibrary}
 }
 
 // NewWithSpintax creates a personalizer with an injected evaluator.
@@ -39,7 +49,15 @@ func NewWithSpintax(options Options, spintax *Spintax) *Personalizer {
 	if spintax == nil {
 		spintax = NewSpintax()
 	}
-	return &Personalizer{options: options, spintax: spintax}
+	return &Personalizer{options: options, spintax: spintax, library: defaultLibrary}
+}
+
+// NewWithLibrary creates a personalizer using a loaded embedded/custom library.
+func NewWithLibrary(options Options, library *Library) *Personalizer {
+	if library == nil {
+		library = defaultLibrary
+	}
+	return &Personalizer{options: options, spintax: NewSpintax(), library: library}
 }
 
 // Options reports the active feature switches.
@@ -64,16 +82,37 @@ func (p *Personalizer) SelectScenario(context Context) (ScenarioTemplate, bool) 
 	if p == nil || !p.options.EnableRoleRouting {
 		return ScenarioTemplate{}, false
 	}
-	category := Route(RecipientMetadata{
-		Department: context.Department,
-		Position:   context.Position,
-		Role:       context.Role,
+	return p.SelectTemplate(Recipient{
+		Language: context.Language, Department: context.Department,
+		Position: context.Position, Role: context.Role,
 	})
-	templates := builtInScenarios[category]
+}
+
+// SelectTemplate chooses a localized category template for recipient.
+func (p *Personalizer) SelectTemplate(recipient Recipient) (ScenarioTemplate, bool) {
+	if p == nil || !p.options.EnableRoleRouting {
+		return ScenarioTemplate{}, false
+	}
+	category := Route(RecipientMetadata{
+		Department: recipient.Department,
+		Position:   recipient.Position,
+		Role:       recipient.Role,
+	})
+	library := p.library
+	if library == nil {
+		library = defaultLibrary
+	}
+	templates := library.Templates(recipient.Language, category)
 	if len(templates) == 0 {
 		return ScenarioTemplate{}, false
 	}
 	return templates[p.spintax.Intn(len(templates))], true
+}
+
+// SelectTemplate selects from the embedded locale library with role routing
+// enabled. Callers needing custom templates should use a Personalizer instance.
+func SelectTemplate(recipient Recipient) (ScenarioTemplate, bool) {
+	return New(Options{EnableRoleRouting: true}).SelectTemplate(recipient)
 }
 
 // Personalize expands spintax and then evaluates supported placeholders.

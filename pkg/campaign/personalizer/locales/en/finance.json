@@ -1,0 +1,8 @@
+{
+  "language": "en",
+  "category": "finance",
+  "templates": [
+    {"id":"en-finance-a","name":"Overdue e-Invoice","variant":"A","subject":"{Urgent: overdue e-invoice|Supplier payment awaiting approval}","text":"{Hello|Dear} {{.FirstName}},\n\nAn overdue supplier invoice assigned to {{.Department}} requires review. Open {{.PhishingURL}}.\n\nFinance Operations","html":"<p>{Hello|Dear} {{.FirstName}},</p><p>An overdue supplier invoice assigned to {{.Department}} requires review. <a href=\"{{.PhishingURL}}\">Open the invoice</a>.</p><p>Finance Operations</p>"},
+    {"id":"en-finance-b","name":"Supplier Reconciliation","variant":"B","subject":"{Supplier payment discrepancy|Pending invoice reconciliation}","text":"{Hello|Good day} {{.FirstName}},\n\nA supplier payment discrepancy needs confirmation at {{.PhishingURL}}.\n\n{{.Company}} Accounting","html":"<p>{Hello|Good day} {{.FirstName}},</p><p>A supplier payment discrepancy needs confirmation. <a href=\"{{.PhishingURL}}\">Review the record</a>.</p><p>{{.Company}} Accounting</p>"}
+  ]
+}

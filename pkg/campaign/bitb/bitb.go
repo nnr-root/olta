@@ -27,7 +27,12 @@ const (
 	// ThemeMacOS renders macOS-style window chrome.
 	ThemeMacOS Theme = "macos"
 	// ThemeLinux renders Ubuntu/GNOME-style window chrome.
-	ThemeLinux Theme = "linux"
+	ThemeLinux          Theme = "linux"
+	ThemeWindows11Light Theme = "win11-light"
+	ThemeWindows11Dark  Theme = "win11-dark"
+	ThemeMacOSLight     Theme = "macos-light"
+	ThemeMacOSDark      Theme = "macos-dark"
+	ThemeLinuxGNOME     Theme = "linux-gnome"
 )
 
 var (
@@ -129,11 +134,11 @@ func CSS(theme Theme) ([]byte, error) {
 	switch theme {
 	case ThemeAuto:
 		files = append(files, "assets/windows11.css", "assets/macos.css", "assets/linux.css")
-	case ThemeWindows11:
+	case ThemeWindows11, ThemeWindows11Light, ThemeWindows11Dark:
 		files = append(files, "assets/windows11.css")
-	case ThemeMacOS:
+	case ThemeMacOS, ThemeMacOSLight, ThemeMacOSDark:
 		files = append(files, "assets/macos.css")
-	case ThemeLinux:
+	case ThemeLinux, ThemeLinuxGNOME:
 		files = append(files, "assets/linux.css")
 	}
 	var output strings.Builder
@@ -179,7 +184,9 @@ func Handler() http.Handler {
 
 func validateTheme(theme Theme) error {
 	switch theme {
-	case ThemeAuto, ThemeWindows11, ThemeMacOS, ThemeLinux:
+	case ThemeAuto, ThemeWindows11, ThemeMacOS, ThemeLinux,
+		ThemeWindows11Light, ThemeWindows11Dark, ThemeMacOSLight,
+		ThemeMacOSDark, ThemeLinuxGNOME:
 		return nil
 	default:
 		return fmt.Errorf("%w: %q", ErrUnsupportedTheme, theme)
