@@ -40,12 +40,13 @@ const (
 
 // Feed configures one official or test range source.
 type Feed struct {
-	Name         string
-	URL          string
-	Kind         FeedKind
-	ASN          uint32
-	Organization string
-	Category     Category
+	Name          string
+	URL           string
+	Kind          FeedKind
+	ASN           uint32
+	Organization  string
+	Category      Category
+	FallbackCIDRs []string
 }
 
 // DefaultFeeds returns the official public sources used by the updater.
@@ -54,7 +55,19 @@ func DefaultFeeds() []Feed {
 		{Name: "aws", URL: AWSIPRangesURL, Kind: FeedAWS, ASN: 16509, Organization: "Amazon Web Services", Category: CategoryCloud},
 		{Name: "gcp", URL: GCPIPRangesURL, Kind: FeedGCP, ASN: 396982, Organization: "Google Cloud", Category: CategoryCloud},
 		{Name: "azure", URL: AzureIPRangesURL, Kind: FeedAzureDiscovery, ASN: 8075, Organization: "Microsoft Azure", Category: CategoryCloud},
-		{Name: "palo-alto", URL: PaloAltoRangesURL, Kind: FeedCIDRText, Organization: "Palo Alto Networks Cortex Xpanse", Category: CategorySecurityCrawler},
+		{
+			Name: "palo-alto", URL: PaloAltoRangesURL, Kind: FeedCIDRText,
+			Organization: "Palo Alto Networks Cortex Xpanse", Category: CategorySecurityCrawler,
+			// Palo Alto currently redirects its published scanning-activity URL
+			// to a JavaScript documentation shell. Keep the last official list as
+			// a continuity fallback while still attempting the official URL first.
+			FallbackCIDRs: []string{
+				"35.203.210.0/23", "144.86.173.0/24", "147.185.132.0/23",
+				"162.216.149.0/24", "162.216.150.0/24", "172.105.147.0/24",
+				"198.235.24.0/24", "205.210.31.0/24", "216.25.88.0/21",
+				"2604:a940:300:5b6::/64", "2604:a940:301:225::/64", "2604:a940:302:118::/64",
+			},
+		},
 	}
 }
 
@@ -111,6 +124,7 @@ type SyncResult struct {
 	Entries         int
 	SuccessfulFeeds int
 	FailedFeeds     int
+	FallbackFeeds   int
 	UpdatedAt       time.Time
 }
 
@@ -200,8 +214,9 @@ func (service *SyncService) runOnce(ctx context.Context) {
 }
 
 type feedResult struct {
-	entries []Entry
-	err     error
+	entries  []Entry
+	fallback bool
+	err      error
 }
 
 // Sync ingests all feeds concurrently, builds a complete immutable trie, and
@@ -218,8 +233,8 @@ func (service *SyncService) Sync(ctx context.Context) (SyncResult, error) {
 		wait.Add(1)
 		go func() {
 			defer wait.Done()
-			entries, err := service.fetch(ctx, feed)
-			results <- feedResult{entries: entries, err: err}
+			entries, fallback, err := service.fetch(ctx, feed)
+			results <- feedResult{entries: entries, fallback: fallback, err: err}
 		}()
 	}
 	wait.Wait()
@@ -228,12 +243,16 @@ func (service *SyncService) Sync(ctx context.Context) (SyncResult, error) {
 	entries := append([]Entry(nil), service.baseEntries...)
 	var failures []error
 	successful := 0
+	fallbacks := 0
 	for result := range results {
 		if result.err != nil {
 			failures = append(failures, result.err)
 			continue
 		}
 		successful++
+		if result.fallback {
+			fallbacks++
+		}
 		entries = append(entries, result.entries...)
 	}
 	if successful == 0 {
@@ -252,31 +271,46 @@ func (service *SyncService) Sync(ctx context.Context) (SyncResult, error) {
 	}
 	result := SyncResult{
 		Entries: len(entries), SuccessfulFeeds: successful,
-		FailedFeeds: len(failures), UpdatedAt: time.Now().UTC(),
+		FailedFeeds: len(failures), FallbackFeeds: fallbacks, UpdatedAt: time.Now().UTC(),
 	}
 	return result, nil
 }
 
-func (service *SyncService) fetch(ctx context.Context, feed Feed) ([]Entry, error) {
+func (service *SyncService) fetch(ctx context.Context, feed Feed) ([]Entry, bool, error) {
 	body, err := service.download(ctx, feed.URL)
 	if err != nil {
-		return nil, fmt.Errorf("fetch %s feed: %w", feed.Name, err)
+		return fallbackEntries(feed, fmt.Errorf("fetch %s feed: %w", feed.Name, err))
 	}
 	if feed.Kind == FeedAzureDiscovery {
 		downloadURL, err := discoverAzureDownloadURL(body)
 		if err != nil {
-			return nil, fmt.Errorf("discover Azure range file: %w", err)
+			return fallbackEntries(feed, fmt.Errorf("discover Azure range file: %w", err))
 		}
 		body, err = service.download(ctx, downloadURL)
 		if err != nil {
-			return nil, fmt.Errorf("fetch Azure range file: %w", err)
+			return fallbackEntries(feed, fmt.Errorf("fetch Azure range file: %w", err))
 		}
 		feed.Kind = FeedAzure
 	}
 	prefixes, err := parseFeed(feed.Kind, body)
 	if err != nil {
-		return nil, fmt.Errorf("parse %s feed: %w", feed.Name, err)
+		return fallbackEntries(feed, fmt.Errorf("parse %s feed: %w", feed.Name, err))
 	}
+	return entriesFromPrefixes(feed, prefixes), false, nil
+}
+
+func fallbackEntries(feed Feed, cause error) ([]Entry, bool, error) {
+	if len(feed.FallbackCIDRs) == 0 {
+		return nil, false, cause
+	}
+	prefixes, err := parseFeed(FeedCIDRText, []byte(strings.Join(feed.FallbackCIDRs, "\n")))
+	if err != nil {
+		return nil, false, fmt.Errorf("%w; fallback is invalid: %v", cause, err)
+	}
+	return entriesFromPrefixes(feed, prefixes), true, nil
+}
+
+func entriesFromPrefixes(feed Feed, prefixes []netip.Prefix) []Entry {
 	entries := make([]Entry, 0, len(prefixes))
 	for _, prefix := range prefixes {
 		entries = append(entries, Entry{
@@ -284,7 +318,7 @@ func (service *SyncService) fetch(ctx context.Context, feed Feed) ([]Entry, erro
 			Organization: feed.Organization, Category: feed.Category,
 		})
 	}
-	return entries, nil
+	return entries
 }
 
 func (service *SyncService) download(ctx context.Context, rawURL string) ([]byte, error) {

@@ -4,6 +4,7 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/tls"
+	"errors"
 	"html/template"
 	"net/http"
 	"net/url"
@@ -118,11 +119,18 @@ func (as *AdminServer) Start() {
 			log.Fatal(err)
 		}
 		log.Infof("Starting admin server at https://%s", as.config.ListenURL)
-		log.Fatal(as.server.ListenAndServeTLS(as.config.CertPath, as.config.KeyPath))
+		logServerError(as.server.ListenAndServeTLS(as.config.CertPath, as.config.KeyPath))
+		return
 	}
 	// If TLS isn't configured, just listen on HTTP
 	log.Infof("Starting admin server at http://%s", as.config.ListenURL)
-	log.Fatal(as.server.ListenAndServe())
+	logServerError(as.server.ListenAndServe())
+}
+
+func logServerError(err error) {
+	if err != nil && !errors.Is(err, http.ErrServerClosed) {
+		log.Fatal(err)
+	}
 }
 
 // Shutdown attempts to gracefully shutdown the server.

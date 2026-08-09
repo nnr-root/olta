@@ -54,6 +54,8 @@ All notable changes to Olta are documented in this file.
 - Replaced the fixed QR helper with an in-memory generator that returns Base64 PNG, data URI, and inline MIME attachment data without temporary filesystem writes.
 - Refreshed the Olta logo, architecture diagram, and README screenshots to remove legacy EvilGophish branding.
 - Extended recipient persistence and CSV import with language metadata so localized templates follow each target through campaign delivery.
+- Added a reported continuity fallback for Palo Alto's last published official scanner ranges when its documentation endpoint returns a client-rendered shell, preventing one unavailable feed from blocking otherwise complete atomic refreshes.
+- Treated the standard HTTP server-closed signal as a successful campaign shutdown so admin and phishing processes exit cleanly during service stops.
 
 ### Verified
 

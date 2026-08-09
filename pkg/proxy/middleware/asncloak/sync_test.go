@@ -130,3 +130,37 @@ func TestSyncFailureRetainsCurrentTrie(t *testing.T) {
 		t.Fatalf("current trie changed after failed sync: %+v/%v", match, ok)
 	}
 }
+
+func TestSyncUsesConfiguredFallbackCIDRs(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(writer, `<html><body>Documentation shell</body></html>`)
+	}))
+	defer server.Close()
+	initial, _ := NewLocalProvider([]Entry{{CIDR: "192.0.2.0/24", Organization: "bootstrap"}})
+	provider, _ := NewAtomicProvider(initial)
+	service, err := NewSyncService(SyncConfig{
+		Provider: provider, Client: server.Client(), Interval: time.Minute,
+		BaseEntries: []Entry{},
+		Feeds: []Feed{{
+			Name: "palo-alto", URL: server.URL, Kind: FeedCIDRText,
+			Organization: "Palo Alto", Category: CategorySecurityCrawler,
+			FallbackCIDRs: []string{"198.235.24.0/24", "2604:a940:300:5b6::/64"},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := service.Sync(context.Background())
+	if err != nil {
+		t.Fatalf("Sync() error = %v", err)
+	}
+	if result.SuccessfulFeeds != 1 || result.FallbackFeeds != 1 || result.Entries != 2 {
+		t.Fatalf("Sync() result = %+v, want one fallback feed and two entries", result)
+	}
+	for _, address := range []string{"198.235.24.10", "2604:a940:300:5b6::1"} {
+		match, ok := provider.Lookup(netip.MustParseAddr(address))
+		if !ok || match.Organization != "Palo Alto" {
+			t.Errorf("Lookup(%s) = %+v/%v", address, match, ok)
+		}
+	}
+}
