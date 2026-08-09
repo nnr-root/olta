@@ -13,6 +13,11 @@ All notable changes to Olta are documented in this file.
 - Added a uTLS-backed proxy transport with Chrome, Firefox, Safari, and per-connection Random browser profiles, including HTTP/2 and HTTP/1.1 ALPN negotiation.
 - Added the in-memory campaign quishing service with configurable image size, foreground and background colors, and Low, Medium, or High error correction.
 - Added recipient-specific `{{.QRCode}}` and `{{.RIdQR}}` email template tags and an authenticated `POST /api/quishing/preview` dashboard API.
+- Added Phase 3 smart-cloaking middleware for the proxy gateway with lock-free in-memory IPv4/IPv6 CIDR and ASN matching for cloud providers and security crawlers.
+- Added rule-based User-Agent, browser-header, and HTTP protocol inspection with configurable 302 redirect or 403/404 block enforcement before lure validation and session initialization.
+- Added `-enable-cloaker`, `-cloaker-redirect-url`, `-cloaker-action`, `-cloaker-block-status`, and `-cloaker-trust-proxy-headers` options to `olta-proxy`.
+- Added an opt-in asynchronous captured-session validation worker pool driven by proxy database capture events, with bounded queues, request timeouts, and non-sensitive identity metadata extraction.
+- Added Discord, Slack, and generic JSON webhook telemetry for sanitized session validation results, configurable with `-enable-session-validator` and `-webhook-url`.
 
 ### Changed
 
@@ -31,5 +36,6 @@ All notable changes to Olta are documented in this file.
 - Resolved the complete Go test suite, including migration, model, controller, API, worker, proxy, feed, and storage tests.
 - Verified with `go test -count=1 ./...`.
 - Verified all command packages build with `go build ./cmd/...`.
+- Benchmarked local cloaker CIDR lookups at sub-microsecond latency with zero allocations.
 
 [1.0.0-Alpha]: https://github.com/s4l1hs/olta/releases/tag/v1.0.0-alpha

