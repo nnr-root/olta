@@ -23,6 +23,10 @@ All notable changes to Olta are documented in this file.
 - Added randomized campaign delivery jitter with global `-min-send-delay` and `-max-send-delay` settings and optional per-campaign delay overrides.
 - Added multi-variant campaign templates with deterministic round-robin recipient assignment, recipient-level persisted variant IDs, and variant-specific delivery, open, click, submission, captured-session, report, and error metrics in campaign API responses.
 - Added campaign schema version 2 migrations for SQLite and MySQL, including automatic Variant A backfill for existing email campaigns and recipient results.
+- Added embedded browser-in-the-browser campaign components with responsive simulated address bars, HTTP/HTTPS status indicators, draggable window chrome, and Windows 11, macOS, and Ubuntu/GNOME-style Linux themes.
+- Added automatic client-platform theme selection plus explicit `{{.BITBFrame}}` and `{{.BITBFrameTheme}}` campaign template helpers.
+- Added modular OAuth 2.0/OpenID Connect consent components with application and publisher branding, requested-scope presentation, redirect URI metadata, accept/cancel events, and the `{{.OAuthConsent}}` campaign template helper.
+- Added single-binary CSS and JavaScript distribution for BITB and OAuth consent components through embedded campaign asset routes under `/static/components/`.
 
 ### Changed
 
@@ -44,6 +48,7 @@ All notable changes to Olta are documented in this file.
 - Verified all command packages build with `go build ./cmd/...`.
 - Benchmarked local cloaker CIDR lookups at sub-microsecond latency with zero allocations.
 - Added focused coverage for HTML verification injection, assertion enforcement, jitter range calculation, cancellation-aware delay waits, A/B distribution, variant rendering and metrics aggregation, API exposure, and schema v1-to-v2 backfill.
+- Added focused coverage for BITB theme rendering and platform assets, OAuth metadata escaping and scope injection, template helper execution, and embedded component asset routing.
 - Verified the campaign mailer and worker packages with the Go race detector and the full repository with `go vet ./...`.
 
 [1.0.0-Alpha]: https://github.com/s4l1hs/olta/releases/tag/v1.0.0-alpha

@@ -1,0 +1,28 @@
+<section class="olta-bitb" data-bitb-window data-theme="{{.Theme}}" role="dialog" aria-label="Simulated browser window for {{.Title}}">
+  <link rel="stylesheet" href="{{.AssetsBaseURL}}bitb.css">
+  <link rel="stylesheet" href="{{.AssetsBaseURL}}windows11.css">
+  <link rel="stylesheet" href="{{.AssetsBaseURL}}macos.css">
+  <link rel="stylesheet" href="{{.AssetsBaseURL}}linux.css">
+  <div class="olta-bitb__window">
+    <header class="olta-bitb__chrome" data-bitb-drag-handle>
+      <div class="olta-bitb__titlebar">
+        <span class="olta-bitb__title">{{.Title}}</span>
+        <div class="olta-bitb__controls" aria-label="Window controls">
+          <button type="button" class="olta-bitb__control olta-bitb__control--minimize" aria-label="Minimize simulated window" data-bitb-minimize></button>
+          <button type="button" class="olta-bitb__control olta-bitb__control--maximize" aria-label="Maximize simulated window" data-bitb-maximize></button>
+          <button type="button" class="olta-bitb__control olta-bitb__control--close" aria-label="Close simulated window" data-bitb-close></button>
+        </div>
+      </div>
+      <div class="olta-bitb__toolbar">
+        <span class="olta-bitb__nav" aria-hidden="true">‹</span>
+        <div class="olta-bitb__address" data-bitb-address>
+          <span class="olta-bitb__ssl{{if not .Secure}} olta-bitb__ssl--insecure{{end}}" role="img" aria-label="{{.SSLStatus}}"></span>
+          <span class="olta-bitb__url">{{.DisplayURL}}</span>
+        </div>
+        <span class="olta-bitb__menu" aria-hidden="true">•••</span>
+      </div>
+    </header>
+    <div class="olta-bitb__content" data-bitb-content>{{if .Content}}{{.Content}}{{else}}<div class="olta-bitb__content-placeholder" aria-label="Simulated browser content"></div>{{end}}</div>
+  </div>
+  <script src="{{.AssetsBaseURL}}bitb.js" defer></script>
+</section>

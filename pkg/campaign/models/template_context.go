@@ -7,7 +7,9 @@ import (
 	"path"
 	"text/template"
 
+	"github.com/s4l1hs/olta/pkg/campaign/bitb"
 	"github.com/s4l1hs/olta/pkg/campaign/evilginx"
+	"github.com/s4l1hs/olta/pkg/campaign/oauthconsent"
 )
 
 // TemplateContext is an interface that allows both campaigns and email
@@ -33,6 +35,33 @@ type PhishingTemplateContext struct {
 	QRCode      string
 	RIdQR       string
 	BaseRecipient
+}
+
+// BITBFrame renders an OS-aware simulated browser pop-up around the supplied
+// address. It is available to campaign templates as {{.BITBFrame "https://..."}}.
+func (p PhishingTemplateContext) BITBFrame(rawURL string) (string, error) {
+	rendered, err := bitb.Render(rawURL)
+	return string(rendered), err
+}
+
+// BITBFrameTheme renders a simulated browser pop-up with a fixed "windows11",
+// "macos", or "linux" theme. The "auto" theme selects from the browser platform.
+func (p PhishingTemplateContext) BITBFrameTheme(rawURL, theme string) (string, error) {
+	rendered, err := bitb.RenderTheme(rawURL, bitb.Theme(theme))
+	return string(rendered), err
+}
+
+// OAuthConsent renders a consent component. Scopes may be comma- or
+// semicolon-separated OAuth identifiers or friendly permission names.
+func (p PhishingTemplateContext) OAuthConsent(applicationName, publisherName, scopes, redirectURI string) (string, error) {
+	metadata := oauthconsent.NewMetadata(
+		applicationName,
+		publisherName,
+		oauthconsent.ParseScopeList(scopes),
+		redirectURI,
+	)
+	rendered, err := oauthconsent.Render(metadata)
+	return string(rendered), err
 }
 
 // NewPhishingTemplateContext returns a populated PhishingTemplateContext,

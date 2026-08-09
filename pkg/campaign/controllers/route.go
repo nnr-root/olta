@@ -167,6 +167,9 @@ func (as *AdminServer) registerRoutes() {
 	)
 	router.PathPrefix("/api/").Handler(api)
 
+	// Serve portable campaign UI component assets from the binary.
+	registerCampaignComponentAssets(router)
+
 	// Setup static file serving
 	router.PathPrefix("/").Handler(http.FileServer(unindexed.Dir("./static/")))
 

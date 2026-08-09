@@ -121,3 +121,14 @@ func (s *ModelsSuite) TestQRTemplateAliases(c *check.C) {
 	c.Assert(err, check.IsNil)
 	c.Assert(strings.Count(rendered, "cid:"+got.QRName), check.Equals, 2)
 }
+
+func (s *ModelsSuite) TestCampaignComponentTemplateHelpers(c *check.C) {
+	context := PhishingTemplateContext{}
+	templateBody := `{{.BITBFrame "https://login.microsoftonline.com"}}` +
+		`{{.OAuthConsent "Contoso Portal" "Contoso" "Read User Profile,Offline Access" "https://example.test/callback"}}`
+
+	rendered, err := ExecuteTemplate(templateBody, context)
+	c.Assert(err, check.IsNil)
+	c.Assert(rendered, check.Matches, `(?s).*data-theme="auto".*login\.microsoftonline\.com.*`)
+	c.Assert(rendered, check.Matches, `(?s).*Contoso Portal.*Read user profile.*Maintain access to data.*`)
+}

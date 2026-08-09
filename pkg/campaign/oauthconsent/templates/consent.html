@@ -1,0 +1,26 @@
+<section class="olta-oauth-consent" data-oauth-consent data-redirect-uri="{{.RedirectURI}}" role="dialog" aria-label="{{.ApplicationName}} permission consent">
+  <link rel="stylesheet" href="{{.AssetsBaseURL}}oauthconsent.css">
+  <div class="olta-oauth-consent__card">
+    <header class="olta-oauth-consent__header">
+      {{if .LogoURL}}<img class="olta-oauth-consent__logo" src="{{.LogoURL}}" alt="">{{else}}<span class="olta-oauth-consent__logo olta-oauth-consent__logo--initial" aria-hidden="true">{{.ApplicationInitial}}</span>{{end}}
+      <div>
+        <h1 class="olta-oauth-consent__title">{{.ApplicationName}}</h1>
+        {{if .PublisherName}}<p class="olta-oauth-consent__publisher">Published by {{.PublisherName}}</p>{{end}}
+      </div>
+    </header>
+    <div class="olta-oauth-consent__body">
+      <h2>Permissions requested</h2>
+      <p class="olta-oauth-consent__intro">This application would like to:</p>
+      <ul class="olta-oauth-consent__scopes">
+        {{range .RequestedScopes}}<li><span class="olta-oauth-consent__scope-icon" aria-hidden="true">✓</span><span><strong>{{.Name}}</strong><small>{{.Description}}</small></span></li>{{else}}<li class="olta-oauth-consent__empty">No additional permissions requested.</li>{{end}}
+      </ul>
+      <p class="olta-oauth-consent__redirect">After approval, you will return to <strong>{{.RedirectHost}}</strong>.</p>
+    </div>
+    <footer class="olta-oauth-consent__actions">
+      <button type="button" class="olta-oauth-consent__button olta-oauth-consent__button--secondary" data-oauth-cancel>Cancel</button>
+      <button type="button" class="olta-oauth-consent__button olta-oauth-consent__button--primary" data-oauth-accept>Accept</button>
+    </footer>
+    <p class="olta-oauth-consent__status" data-oauth-status role="status" aria-live="polite"></p>
+  </div>
+  <script src="{{.AssetsBaseURL}}oauthconsent.js" defer></script>
+</section>

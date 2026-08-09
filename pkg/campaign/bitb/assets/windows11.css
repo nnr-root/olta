@@ -1,0 +1,10 @@
+.olta-bitb[data-theme="windows11"] .olta-bitb__window,
+.olta-bitb[data-resolved-theme="windows11"] .olta-bitb__window { border: 1px solid rgba(15, 23, 42, .18); border-radius: 8px; }
+.olta-bitb[data-theme="windows11"] .olta-bitb__chrome,
+.olta-bitb[data-resolved-theme="windows11"] .olta-bitb__chrome { background: #f3f6fb; }
+.olta-bitb[data-theme="windows11"] .olta-bitb__address,
+.olta-bitb[data-resolved-theme="windows11"] .olta-bitb__address { background: #fff; border: 1px solid #dce3ed; border-radius: 6px; }
+.olta-bitb[data-theme="windows11"] .olta-bitb__control:hover,
+.olta-bitb[data-resolved-theme="windows11"] .olta-bitb__control:hover { background: rgba(15, 23, 42, .08); }
+.olta-bitb[data-theme="windows11"] .olta-bitb__control--close:hover,
+.olta-bitb[data-resolved-theme="windows11"] .olta-bitb__control--close:hover { background: #c42b1c; color: #fff; }

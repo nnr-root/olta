@@ -1,0 +1,80 @@
+.olta-bitb[data-theme="linux"] .olta-bitb__window,
+.olta-bitb[data-resolved-theme="linux"] .olta-bitb__window {
+  border: 1px solid rgba(17, 17, 17, .35);
+  border-radius: 10px 10px 6px 6px;
+  box-shadow: 0 22px 64px rgba(20, 12, 18, .36);
+}
+.olta-bitb[data-theme="linux"] .olta-bitb__chrome,
+.olta-bitb[data-resolved-theme="linux"] .olta-bitb__chrome {
+  background: #3d3846;
+  color: #f7f6f5;
+}
+.olta-bitb[data-theme="linux"] .olta-bitb__titlebar,
+.olta-bitb[data-resolved-theme="linux"] .olta-bitb__titlebar {
+  height: 42px;
+  justify-content: center;
+  position: relative;
+}
+.olta-bitb[data-theme="linux"] .olta-bitb__title,
+.olta-bitb[data-resolved-theme="linux"] .olta-bitb__title {
+  font-weight: 600;
+}
+.olta-bitb[data-theme="linux"] .olta-bitb__controls,
+.olta-bitb[data-resolved-theme="linux"] .olta-bitb__controls {
+  gap: 7px;
+  position: absolute;
+  right: 10px;
+  top: 9px;
+}
+.olta-bitb[data-theme="linux"] .olta-bitb__control,
+.olta-bitb[data-resolved-theme="linux"] .olta-bitb__control {
+  background: #5e5c64;
+  border-radius: 50%;
+  color: #fff;
+  height: 24px;
+  min-width: 24px;
+  padding: 0;
+  width: 24px;
+}
+.olta-bitb[data-theme="linux"] .olta-bitb__control:hover,
+.olta-bitb[data-resolved-theme="linux"] .olta-bitb__control:hover {
+  background: #77767b;
+}
+.olta-bitb[data-theme="linux"] .olta-bitb__control--close,
+.olta-bitb[data-resolved-theme="linux"] .olta-bitb__control--close {
+  background: #e95420;
+}
+.olta-bitb[data-theme="linux"] .olta-bitb__control--close:hover,
+.olta-bitb[data-resolved-theme="linux"] .olta-bitb__control--close:hover {
+  background: #f66b35;
+}
+.olta-bitb[data-theme="linux"] .olta-bitb__control--minimize::before,
+.olta-bitb[data-resolved-theme="linux"] .olta-bitb__control--minimize::before {
+  left: 7px;
+  top: 13px;
+}
+.olta-bitb[data-theme="linux"] .olta-bitb__control--maximize::before,
+.olta-bitb[data-resolved-theme="linux"] .olta-bitb__control--maximize::before {
+  height: 8px;
+  left: 7px;
+  top: 7px;
+  width: 9px;
+}
+.olta-bitb[data-theme="linux"] .olta-bitb__control--close::before,
+.olta-bitb[data-theme="linux"] .olta-bitb__control--close::after,
+.olta-bitb[data-resolved-theme="linux"] .olta-bitb__control--close::before,
+.olta-bitb[data-resolved-theme="linux"] .olta-bitb__control--close::after {
+  left: 6px;
+  top: 11px;
+}
+.olta-bitb[data-theme="linux"] .olta-bitb__toolbar,
+.olta-bitb[data-resolved-theme="linux"] .olta-bitb__toolbar {
+  background: #f2f1f0;
+  color: #3d3846;
+}
+.olta-bitb[data-theme="linux"] .olta-bitb__address,
+.olta-bitb[data-resolved-theme="linux"] .olta-bitb__address {
+  background: #fff;
+  border: 1px solid #c7c4c2;
+  border-radius: 8px;
+}

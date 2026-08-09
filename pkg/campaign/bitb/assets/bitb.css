@@ -1,0 +1,61 @@
+.olta-bitb {
+  --bitb-accent: #2563eb;
+  align-items: center;
+  box-sizing: border-box;
+  display: flex;
+  inset: 0;
+  justify-content: center;
+  padding: clamp(12px, 3vw, 40px);
+  position: fixed;
+  z-index: 2147483000;
+}
+
+.olta-bitb *, .olta-bitb *::before, .olta-bitb *::after { box-sizing: border-box; }
+.olta-bitb[hidden] { display: none; }
+.olta-bitb__window {
+  background: #fff;
+  box-shadow: 0 24px 72px rgba(15, 23, 42, .32);
+  color: #18212f;
+  max-height: calc(100vh - 24px);
+  max-width: 100%;
+  min-height: 360px;
+  overflow: hidden;
+  position: relative;
+  width: min(720px, 94vw);
+}
+.olta-bitb__chrome { cursor: move; touch-action: none; user-select: none; }
+.olta-bitb__titlebar, .olta-bitb__toolbar { align-items: center; display: flex; }
+.olta-bitb__titlebar { height: 38px; justify-content: space-between; }
+.olta-bitb__title { font: 500 12px/1.2 system-ui, sans-serif; overflow: hidden; padding: 0 14px; text-overflow: ellipsis; white-space: nowrap; }
+.olta-bitb__controls { align-self: stretch; display: flex; }
+.olta-bitb__control { background: transparent; border: 0; min-width: 44px; position: relative; }
+.olta-bitb__control:focus-visible { outline: 2px solid var(--bitb-accent); outline-offset: -2px; }
+.olta-bitb__control--minimize::before { border-top: 1px solid currentColor; content: ""; left: 17px; position: absolute; top: 20px; width: 10px; }
+.olta-bitb__control--maximize::before { border: 1px solid currentColor; content: ""; height: 9px; left: 17px; position: absolute; top: 14px; width: 10px; }
+.olta-bitb__control--close::before, .olta-bitb__control--close::after { border-top: 1px solid currentColor; content: ""; left: 16px; position: absolute; top: 18px; transform: rotate(45deg); width: 12px; }
+.olta-bitb__control--close::after { transform: rotate(-45deg); }
+.olta-bitb__toolbar { gap: 10px; padding: 7px 12px 10px; }
+.olta-bitb__nav, .olta-bitb__menu { color: #536071; flex: 0 0 auto; font: 22px/1 system-ui, sans-serif; }
+.olta-bitb__menu { font-size: 13px; letter-spacing: 1px; }
+.olta-bitb__address { align-items: center; display: flex; flex: 1; min-width: 0; padding: 7px 12px; }
+.olta-bitb__ssl { border: 1.5px solid currentColor; border-radius: 2px; height: 9px; margin: 4px 10px 0 1px; position: relative; width: 10px; }
+.olta-bitb__ssl::before { border: 1.5px solid currentColor; border-bottom: 0; border-radius: 8px 8px 0 0; content: ""; height: 7px; left: 1px; position: absolute; top: -7px; width: 5px; }
+.olta-bitb__ssl--insecure { color: #b42318; }
+.olta-bitb__ssl--insecure::after { background: currentColor; content: ""; height: 16px; left: 3px; position: absolute; top: -5px; transform: rotate(45deg); width: 1px; }
+.olta-bitb__url { font: 400 13px/1.35 system-ui, sans-serif; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.olta-bitb__content { min-height: 280px; overflow: auto; }
+.olta-bitb__content-placeholder { min-height: 280px; }
+.olta-bitb--maximized { padding: 0; }
+.olta-bitb--maximized .olta-bitb__window { border-radius: 0; height: 100vh; max-height: 100vh; width: 100vw; }
+
+@media (max-width: 560px) {
+  .olta-bitb { padding: 8px; }
+  .olta-bitb__window { min-height: 300px; width: 100%; }
+  .olta-bitb__control { min-width: 38px; }
+  .olta-bitb__title { max-width: 44vw; }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .olta-bitb__window { animation: olta-bitb-enter .18s ease-out; }
+  @keyframes olta-bitb-enter { from { opacity: 0; transform: scale(.98) translateY(8px); } }
+}
