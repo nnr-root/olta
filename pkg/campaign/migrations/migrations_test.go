@@ -75,6 +75,67 @@ func TestApplyRejectsIncompleteLegacySchema(t *testing.T) {
 	}
 }
 
+func TestApplyMigratesVersionOneSQLiteSchema(t *testing.T) {
+	db := openSQLiteTestDatabase(t)
+	legacySchema := sqliteSchema
+	legacySchema = strings.Replace(legacySchema, ",\n    min_send_delay BIGINT NOT NULL DEFAULT 0,\n    max_send_delay BIGINT NOT NULL DEFAULT 0", "", 1)
+	legacySchema = strings.Replace(legacySchema, ",\n    template_variant_id BIGINT NOT NULL DEFAULT 0", "", 1)
+	variantTableStart := strings.Index(legacySchema, "CREATE TABLE IF NOT EXISTS campaign_template_variants")
+	if variantTableStart == -1 {
+		t.Fatal("variant table not found in current SQLite schema")
+	}
+	variantTableEnd := strings.Index(legacySchema[variantTableStart:], ");")
+	if variantTableEnd == -1 {
+		t.Fatal("variant table terminator not found in current SQLite schema")
+	}
+	variantTableEnd += variantTableStart + 2
+	legacySchema = legacySchema[:variantTableStart] + legacySchema[variantTableEnd:]
+	legacySchema = strings.ReplaceAll(legacySchema, "CREATE INDEX IF NOT EXISTS idx_campaign_template_variants_campaign_id ON campaign_template_variants(campaign_id);", "")
+	legacySchema = strings.ReplaceAll(legacySchema, "CREATE UNIQUE INDEX IF NOT EXISTS idx_campaign_template_variants_position ON campaign_template_variants(campaign_id, position);", "")
+	legacySchema = strings.ReplaceAll(legacySchema, "CREATE INDEX IF NOT EXISTS idx_results_template_variant_id ON results(template_variant_id);", "")
+
+	if err := executeSchema(db, legacySchema); err != nil {
+		t.Fatalf("apply version one fixture: %v", err)
+	}
+	if err := ensureVersionTable(db, "sqlite3"); err != nil {
+		t.Fatal(err)
+	}
+	if err := recordVersion(db, 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO campaigns (id, user_id, name, template_id, smtp_id) VALUES (42, 1, 'legacy', 7, 3)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO results (campaign_id, user_id, r_id, status, reported, sms_target) VALUES (42, 1, 'legacy-result', 'Email/SMS Sent', 0, 0)`); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Apply(db, "sqlite3"); err != nil {
+		t.Fatalf("Apply() version one migration: %v", err)
+	}
+	if err := validate(db); err != nil {
+		t.Fatalf("validate migrated schema: %v", err)
+	}
+	version, err := currentVersion(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if version != CurrentVersion {
+		t.Fatalf("version = %d, want %d", version, CurrentVersion)
+	}
+	var variantID int64
+	if err := db.QueryRow(`SELECT id FROM campaign_template_variants WHERE campaign_id = 42 AND name = 'Variant A'`).Scan(&variantID); err != nil {
+		t.Fatalf("query backfilled variant: %v", err)
+	}
+	var resultVariantID int64
+	if err := db.QueryRow(`SELECT template_variant_id FROM results WHERE r_id = 'legacy-result'`).Scan(&resultVariantID); err != nil {
+		t.Fatalf("query backfilled result: %v", err)
+	}
+	if resultVariantID != variantID {
+		t.Fatalf("result variant ID = %d, want %d", resultVariantID, variantID)
+	}
+}
+
 func TestUnifiedSchemasContainAllRequiredTables(t *testing.T) {
 	for dialect, schema := range map[string]string{"sqlite3": sqliteSchema, "mysql": mysqlSchema} {
 		for table := range requiredSchema {

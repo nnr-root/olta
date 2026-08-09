@@ -16,8 +16,13 @@ All notable changes to Olta are documented in this file.
 - Added Phase 3 smart-cloaking middleware for the proxy gateway with lock-free in-memory IPv4/IPv6 CIDR and ASN matching for cloud providers and security crawlers.
 - Added rule-based User-Agent, browser-header, and HTTP protocol inspection with configurable 302 redirect or 403/404 block enforcement before lure validation and session initialization.
 - Added `-enable-cloaker`, `-cloaker-redirect-url`, `-cloaker-action`, `-cloaker-block-status`, and `-cloaker-trust-proxy-headers` options to `olta-proxy`.
+- Added opt-in client-side environment verification with WebDriver/headless checks, WebGL software-renderer detection, and Canvas consistency assertions injected into proxied HTML responses.
+- Added `-enable-js-inspect` and `-js-inspect-endpoint` options to `olta-proxy`, with configurable 302 safe-URL redirects or 403 enforcement for suspicious browser assertions.
 - Added an opt-in asynchronous captured-session validation worker pool driven by proxy database capture events, with bounded queues, request timeouts, and non-sensitive identity metadata extraction.
 - Added Discord, Slack, and generic JSON webhook telemetry for sanitized session validation results, configurable with `-enable-session-validator` and `-webhook-url`.
+- Added randomized campaign delivery jitter with global `-min-send-delay` and `-max-send-delay` settings and optional per-campaign delay overrides.
+- Added multi-variant campaign templates with deterministic round-robin recipient assignment, recipient-level persisted variant IDs, and variant-specific delivery, open, click, submission, captured-session, report, and error metrics in campaign API responses.
+- Added campaign schema version 2 migrations for SQLite and MySQL, including automatic Variant A backfill for existing email campaigns and recipient results.
 
 ### Changed
 
@@ -27,6 +32,7 @@ All notable changes to Olta are documented in this file.
 - Consolidated inherited campaign migration histories into the unified Olta v1 schema; fresh databases no longer replay redundant historical migrations.
 - Updated deployment recipes to target `olta-campaign` and `olta-proxy` rather than downloading upstream binaries.
 - Replaced non-releasable worker tickers and added graceful `SIGTERM` handling for service-managed campaign shutdowns.
+- Updated the email worker shutdown path to cancel active jitter waits, wait for dispatch goroutines, and unlock persisted mail logs for clean campaign resumption.
 - Added the `-client-profile` proxy option and routed outbound HTTP traffic through the browser-profiled transport while preserving upstream proxy support and standard timeout errors.
 - Replaced the fixed QR helper with an in-memory generator that returns Base64 PNG, data URI, and inline MIME attachment data without temporary filesystem writes.
 - Refreshed the Olta logo, architecture diagram, and README screenshots to remove legacy EvilGophish branding.
@@ -37,5 +43,7 @@ All notable changes to Olta are documented in this file.
 - Verified with `go test -count=1 ./...`.
 - Verified all command packages build with `go build ./cmd/...`.
 - Benchmarked local cloaker CIDR lookups at sub-microsecond latency with zero allocations.
+- Added focused coverage for HTML verification injection, assertion enforcement, jitter range calculation, cancellation-aware delay waits, A/B distribution, variant rendering and metrics aggregation, API exposure, and schema v1-to-v2 backfill.
+- Verified the campaign mailer and worker packages with the Go race detector and the full repository with `go vet ./...`.
 
 [1.0.0-Alpha]: https://github.com/s4l1hs/olta/releases/tag/v1.0.0-alpha

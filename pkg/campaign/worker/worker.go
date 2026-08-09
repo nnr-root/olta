@@ -2,8 +2,7 @@ package worker
 
 import (
 	"context"
-	//"fmt"
-
+	"sync"
 	"time"
 
 	log "github.com/s4l1hs/olta/pkg/campaign/logger"
@@ -15,20 +14,31 @@ import (
 // Worker is an interface that defines the operations needed for a background worker
 type Worker interface {
 	Start()
+	Shutdown() error
 	LaunchCampaign(c models.Campaign)
 	SendTestEmail(s *models.EmailRequest) error
 }
 
 // DefaultWorker is the background worker that handles watching for new campaigns and sending emails appropriately.
 type DefaultWorker struct {
-	mailer mailer.Mailer
+	mailer    mailer.Mailer
+	ctx       context.Context
+	cancel    context.CancelFunc
+	started   chan struct{}
+	done      chan struct{}
+	startOnce sync.Once
 }
 
 // New creates a new worker object to handle the creation of campaigns
-func New(options ...func(Worker) error) (Worker, error) {
+func New(options ...func(*DefaultWorker) error) (Worker, error) {
 	defaultMailer := mailer.NewMailWorker()
+	ctx, cancel := context.WithCancel(context.Background())
 	w := &DefaultWorker{
-		mailer: defaultMailer,
+		mailer:  defaultMailer,
+		ctx:     ctx,
+		cancel:  cancel,
+		started: make(chan struct{}),
+		done:    make(chan struct{}),
 	}
 	for _, opt := range options {
 		if err := opt(w); err != nil {
@@ -36,6 +46,18 @@ func New(options ...func(Worker) error) (Worker, error) {
 		}
 	}
 	return w, nil
+}
+
+// WithSendDelay configures the default randomized interval between
+// consecutive email dispatches.
+func WithSendDelay(minimum, maximum time.Duration) func(*DefaultWorker) error {
+	return func(w *DefaultWorker) error {
+		if err := mailer.ValidateSendDelay(minimum, maximum); err != nil {
+			return err
+		}
+		w.mailer = mailer.NewMailWorker(mailer.WithSendDelay(minimum, maximum))
+		return nil
+	}
 }
 
 // WithMailer sets the mailer for a given worker.
@@ -104,17 +126,47 @@ func (w *DefaultWorker) processCampaigns(t time.Time) error {
 // Start launches the worker to poll the database every minute for any pending maillogs
 // that need to be processed.
 func (w *DefaultWorker) Start() {
-	log.Info("Background Email Worker Started Successfully - Waiting for Campaigns")
-	go w.mailer.Start(context.Background())
-	ticker := time.NewTicker(time.Minute)
-	defer ticker.Stop()
-	for t := range ticker.C {
-		err := w.processCampaigns(t)
-		if err != nil {
-			log.Error(err)
-			continue
+	w.startOnce.Do(func() {
+		close(w.started)
+		defer close(w.done)
+		log.Info("Background Email Worker Started Successfully - Waiting for Campaigns")
+		mailerDone := make(chan struct{})
+		go func() {
+			w.mailer.Start(w.ctx)
+			close(mailerDone)
+		}()
+		ticker := time.NewTicker(time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-w.ctx.Done():
+				<-mailerDone
+				return
+			case t := <-ticker.C:
+				if err := w.processCampaigns(t); err != nil {
+					log.Error(err)
+				}
+			}
 		}
+	})
+}
+
+// Shutdown cancels active delay waits, waits for mail dispatch goroutines to
+// stop, and unlocks persisted mail logs so campaign state can resume cleanly.
+func (w *DefaultWorker) Shutdown() error {
+	if w == nil {
+		return nil
 	}
+	if w.cancel == nil {
+		return models.UnlockAllMailLogs()
+	}
+	w.cancel()
+	select {
+	case <-w.started:
+		<-w.done
+	default:
+	}
+	return models.UnlockAllMailLogs()
 }
 
 // LaunchCampaign starts a campaign

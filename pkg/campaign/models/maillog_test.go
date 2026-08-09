@@ -261,6 +261,38 @@ func (s *ModelsSuite) TestMailLogGenerate(ch *check.C) {
 	ch.Assert(string(got.HTML), check.Equals, string(expected.HTML))
 }
 
+func (s *ModelsSuite) TestMailLogGenerateUsesAssignedTemplateVariant(ch *check.C) {
+	campaign := s.createCampaignDependencies(ch)
+	variantB := Template{
+		Name:    "Mail Variant B",
+		UserId:  campaign.UserId,
+		Subject: "Variant B subject",
+		Text:    "Variant B body",
+	}
+	ch.Assert(PostTemplate(&variantB), check.Equals, nil)
+	campaign.TemplateVariants = []CampaignTemplateVariant{
+		{Name: "Variant A", Template: campaign.Template},
+		{Name: "Variant B", Template: variantB},
+	}
+	ch.Assert(PostCampaign(&campaign, campaign.UserId), check.Equals, nil)
+
+	results := []Result{}
+	ch.Assert(db.Where("campaign_id = ?", campaign.Id).Order("id ASC").Find(&results).Error, check.Equals, nil)
+	ch.Assert(len(results) >= 2, check.Equals, true)
+	mailLog := MailLog{}
+	ch.Assert(db.Where("r_id = ?", results[1].RId).Find(&mailLog).Error, check.Equals, nil)
+
+	message := gomail.NewMessage()
+	ch.Assert(mailLog.Generate(message), check.Equals, nil)
+	buffer := &bytes.Buffer{}
+	_, err := message.WriteTo(buffer)
+	ch.Assert(err, check.Equals, nil)
+	generated, err := email.NewEmailFromReader(buffer)
+	ch.Assert(err, check.Equals, nil)
+	ch.Assert(generated.Subject, check.Equals, "Variant B subject")
+	ch.Assert(string(generated.Text), check.Equals, "Variant B body")
+}
+
 func (s *ModelsSuite) TestMailLogGenerateOverrideTransparencyHeaders(ch *check.C) {
 	expectedHeaders := map[string]string{
 		"X-Mailer":  "",

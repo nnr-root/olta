@@ -2,7 +2,6 @@ package models
 
 import (
 	"errors"
-	"fmt"
 	"net/url"
 	"time"
 
@@ -14,35 +13,39 @@ import (
 
 // Campaign is a struct representing a created campaign
 type Campaign struct {
-	Id            int64     `json:"id"`
-	UserId        int64     `json:"-"`
-	Name          string    `json:"name" sql:"not null"`
-	CreatedDate   time.Time `json:"created_date"`
-	LaunchDate    time.Time `json:"launch_date"`
-	SendByDate    time.Time `json:"send_by_date"`
-	CompletedDate time.Time `json:"completed_date"`
-	TemplateId    int64     `json:"-"`
-	Template      Template  `json:"template"`
-	PageId        int64     `json:"-"`
-	Status        string    `json:"status"`
-	Results       []Result  `json:"results,omitempty"`
-	Groups        []Group   `json:"groups,omitempty"`
-	Events        []Event   `json:"timeline,omitempty"`
-	SMTPId        int64     `json:"-"`
-	SMSId         int64     `json:"-"`
-	SMTP          SMTP      `json:"smtp"`
-	SMS           SMS       `json:"sms"`
-	URL           string    `json:"url"`
-	QRSize        string    `json:"qrsize"`
+	Id               int64                     `json:"id"`
+	UserId           int64                     `json:"-"`
+	Name             string                    `json:"name" sql:"not null"`
+	CreatedDate      time.Time                 `json:"created_date"`
+	LaunchDate       time.Time                 `json:"launch_date"`
+	SendByDate       time.Time                 `json:"send_by_date"`
+	CompletedDate    time.Time                 `json:"completed_date"`
+	TemplateId       int64                     `json:"-"`
+	Template         Template                  `json:"template"`
+	TemplateVariants []CampaignTemplateVariant `json:"template_variants,omitempty" gorm:"-"`
+	PageId           int64                     `json:"-"`
+	Status           string                    `json:"status"`
+	Results          []Result                  `json:"results,omitempty"`
+	Groups           []Group                   `json:"groups,omitempty"`
+	Events           []Event                   `json:"timeline,omitempty"`
+	SMTPId           int64                     `json:"-"`
+	SMSId            int64                     `json:"-"`
+	SMTP             SMTP                      `json:"smtp"`
+	SMS              SMS                       `json:"sms"`
+	URL              string                    `json:"url"`
+	QRSize           string                    `json:"qrsize"`
+	MinSendDelay     int64                     `json:"min_send_delay"`
+	MaxSendDelay     int64                     `json:"max_send_delay"`
 }
 
 // CampaignResults is a struct representing the results from a campaign
 type CampaignResults struct {
-	Id      int64    `json:"id"`
-	Name    string   `json:"name"`
-	Status  string   `json:"status"`
-	Results []Result `json:"results,omitempty"`
-	Events  []Event  `json:"timeline,omitempty"`
+	Id               int64                     `json:"id"`
+	Name             string                    `json:"name"`
+	Status           string                    `json:"status"`
+	Results          []Result                  `json:"results,omitempty"`
+	Events           []Event                   `json:"timeline,omitempty"`
+	TemplateVariants []CampaignTemplateVariant `json:"template_variants,omitempty"`
 }
 
 // CampaignSummaries is a struct representing the overview of campaigns
@@ -53,14 +56,15 @@ type CampaignSummaries struct {
 
 // CampaignSummary is a struct representing the overview of a single camaign
 type CampaignSummary struct {
-	Id            int64         `json:"id"`
-	CreatedDate   time.Time     `json:"created_date"`
-	LaunchDate    time.Time     `json:"launch_date"`
-	SendByDate    time.Time     `json:"send_by_date"`
-	CompletedDate time.Time     `json:"completed_date"`
-	Status        string        `json:"status"`
-	Name          string        `json:"name"`
-	Stats         CampaignStats `json:"stats"`
+	Id               int64                     `json:"id"`
+	CreatedDate      time.Time                 `json:"created_date"`
+	LaunchDate       time.Time                 `json:"launch_date"`
+	SendByDate       time.Time                 `json:"send_by_date"`
+	CompletedDate    time.Time                 `json:"completed_date"`
+	Status           string                    `json:"status"`
+	Name             string                    `json:"name"`
+	Stats            CampaignStats             `json:"stats"`
+	TemplateVariants []CampaignTemplateVariant `json:"template_variants,omitempty"`
 }
 
 // CampaignStats is a struct representing the statistics for a single campaign
@@ -129,6 +133,9 @@ var ErrSMTPNotFound = errors.New("Sending profile not found")
 // launch date
 var ErrInvalidSendByDate = errors.New("The launch date must be before the \"send emails by\" date")
 
+// ErrInvalidSendDelay indicates an invalid campaign-specific jitter range.
+var ErrInvalidSendDelay = errors.New("Minimum send delay cannot exceed maximum send delay or be negative")
+
 // RecipientParameter is the URL parameter that points to the result ID for a recipient.
 const RecipientParameter = "client_id"
 
@@ -139,12 +146,14 @@ func (c *Campaign) Validate() error {
 		return ErrCampaignNameNotSpecified
 	case len(c.Groups) == 0:
 		return ErrGroupNotSpecified
-	case c.Template.Name == "":
+	case c.Template.Name == "" && len(c.TemplateVariants) == 0:
 		return ErrTemplateNotSpecified
 	case c.SMTP.Name == "":
 		return ErrSMTPNotSpecified
 	case !c.SendByDate.IsZero() && !c.LaunchDate.IsZero() && c.SendByDate.Before(c.LaunchDate):
 		return ErrInvalidSendByDate
+	case c.MinSendDelay < 0 || c.MaxSendDelay < 0 || c.MinSendDelay > c.MaxSendDelay:
+		return ErrInvalidSendDelay
 	}
 	return nil
 }
@@ -221,6 +230,9 @@ func (c *Campaign) getDetails() error {
 		log.Warn(err)
 		return err
 	}
+	if err = c.loadTemplateVariants(true); err != nil {
+		return err
+	}
 	err = db.Table("smtp").Where("id=?", c.SMTPId).Find(&c.SMTP).Error
 	if err != nil {
 		// Check if the SMTP was deleted
@@ -285,53 +297,50 @@ func (c *Campaign) generateSendDate(idx int, totalRecipients int) time.Time {
 // getCampaignStats returns a CampaignStats object for the campaign with the given campaign ID.
 // It also backfills numbers as appropriate with a running total, so that the values are aggregated.
 func getCampaignStats(cid int64) (CampaignStats, error) {
+	return getCampaignStatsForVariant(cid, 0)
+}
+
+func getCampaignStatsForVariant(cid int64, variantID int64) (CampaignStats, error) {
 	s := CampaignStats{}
-	query := db.Table("results").Where("campaign_id = ?", cid)
-	err := query.Count(&s.Total).Error
-	if err != nil {
+	baseQuery := func() *gorm.DB {
+		query := db.Table("results").Where("campaign_id = ?", cid)
+		if variantID != 0 {
+			query = query.Where("template_variant_id = ?", variantID)
+		}
+		return query
+	}
+	count := func(destination *int64, condition string, value interface{}) error {
+		return baseQuery().Where(condition, value).Count(destination).Error
+	}
+	if err := baseQuery().Count(&s.Total).Error; err != nil {
 		return s, err
 	}
-	query.Where("status=?", EventCapturedSession).Count(&s.CapturedSession)
-	if err != nil {
-		fmt.Printf("[-] Error: %s\n", err)
+	if err := count(&s.CapturedSession, "status = ?", EventCapturedSession); err != nil {
 		return s, err
 	}
-	query.Where("status=?", EventDataSubmit).Count(&s.SubmittedData)
-	if err != nil {
+	if err := count(&s.SubmittedData, "status = ?", EventDataSubmit); err != nil {
 		return s, err
 	}
-	query.Where("status=?", EventClicked).Count(&s.ClickedLink)
-	if err != nil {
-		return s, err
-	}
-	query.Where("reported=?", true).Count(&s.EmailReported)
-	if err != nil {
-		return s, err
-	}
-	// Every captured session event implies they submitted data
 	s.SubmittedData += s.CapturedSession
-	err = query.Where("status=?", EventClicked).Count(&s.ClickedLink).Error
-	if err != nil {
+	if err := count(&s.ClickedLink, "status = ?", EventClicked); err != nil {
 		return s, err
 	}
-	// Every submitted data event implies they clicked the link
 	s.ClickedLink += s.SubmittedData
-	err = query.Where("status=?", EventOpened).Count(&s.OpenedEmail).Error
-	if err != nil {
+	if err := count(&s.OpenedEmail, "status = ?", EventOpened); err != nil {
 		return s, err
 	}
-	// Every clicked link event implies they opened the email
 	s.OpenedEmail += s.ClickedLink
-	err = query.Where("status=?", EventSent).Count(&s.EmailsSent).Error
-	if err != nil {
+	if err := count(&s.EmailsSent, "status = ?", EventSent); err != nil {
 		return s, err
 	}
-	// Every opened email event implies the email was sent
 	s.EmailsSent += s.OpenedEmail
-	err = query.Where("status=?", Error).Count(&s.Error).Error
-	// Debug
-	//fmt.Println("getCampaignStats function called!")
-	return s, err
+	if err := count(&s.EmailReported, "reported = ?", true); err != nil {
+		return s, err
+	}
+	if err := count(&s.Error, "status = ?", Error); err != nil {
+		return s, err
+	}
+	return s, nil
 }
 
 // GetCampaigns returns the campaigns owned by the given user.
@@ -372,6 +381,11 @@ func GetCampaignSummaries(uid int64) (CampaignSummaries, error) {
 			return overview, err
 		}
 		cs[i].Stats = s
+		campaign := Campaign{Id: cs[i].Id}
+		if err := campaign.loadTemplateVariants(true); err != nil {
+			return overview, err
+		}
+		cs[i].TemplateVariants = campaign.TemplateVariants
 	}
 	overview.Total = int64(len(cs))
 	overview.Campaigns = cs
@@ -396,6 +410,11 @@ func GetCampaignSummary(id int64, uid int64) (CampaignSummary, error) {
 		return cs, err
 	}
 	cs.Stats = s
+	campaign := Campaign{Id: cs.Id}
+	if err := campaign.loadTemplateVariants(true); err != nil {
+		return cs, err
+	}
+	cs.TemplateVariants = campaign.TemplateVariants
 	// Debug
 	//fmt.Println("GetCampaignSummary function called!")
 	return cs, nil
@@ -428,6 +447,9 @@ func GetCampaignMailContext(id int64, uid int64) (Campaign, error) {
 	}
 	err = db.Where("template_id=?", c.Template.Id).Find(&c.Template.Attachments).Error
 	if err != nil && err != gorm.ErrRecordNotFound {
+		return c, err
+	}
+	if err := c.loadTemplateVariants(false); err != nil {
 		return c, err
 	}
 	return c, nil
@@ -489,6 +511,11 @@ func GetCampaignResults(id int64, uid int64) (CampaignResults, error) {
 		log.Errorf("%s: events not found for campaign", err)
 		return cr, err
 	}
+	campaign := Campaign{Id: cr.Id}
+	if err := campaign.loadTemplateVariants(true); err != nil {
+		return cr, err
+	}
+	cr.TemplateVariants = campaign.TemplateVariants
 	return cr, err
 }
 
@@ -699,19 +726,12 @@ func PostCampaign(c *Campaign, uid int64) error {
 		}
 		totalRecipients += len(c.Groups[i].Targets)
 	}
-	// Check to make sure the template exists
-	t, err := GetTemplateByName(c.Template.Name, uid)
-	if err == gorm.ErrRecordNotFound {
-		log.WithFields(logrus.Fields{
-			"template": c.Template.Name,
-		}).Error("Template does not exist")
-		return ErrTemplateNotFound
-	} else if err != nil {
+	// Resolve and validate all A/B template variants. A legacy single-template
+	// campaign is represented as Variant A.
+	if err := c.resolveTemplateVariants(uid); err != nil {
 		log.Error(err)
 		return err
 	}
-	c.Template = t
-	c.TemplateId = t.Id
 	// Check to make sure the sending profile exists
 	s, err := GetSMTPByName(c.SMTP.Name, uid)
 	if err == gorm.ErrRecordNotFound {
@@ -739,6 +759,10 @@ func PostCampaign(c *Campaign, uid int64) error {
 	resultMap := make(map[string]bool)
 	recipientIndex := 0
 	tx := db.Begin()
+	if err = c.saveTemplateVariants(tx); err != nil {
+		tx.Rollback()
+		return err
+	}
 	for _, g := range c.Groups {
 		// Insert a result for each target in the group
 		for _, t := range g.Targets {
@@ -749,6 +773,11 @@ func PostCampaign(c *Campaign, uid int64) error {
 			}
 			resultMap[t.Email] = true
 			sendDate := c.generateSendDate(recipientIndex, totalRecipients)
+			variant, variantErr := AssignTemplateVariant(recipientIndex, c.TemplateVariants)
+			if variantErr != nil {
+				tx.Rollback()
+				return variantErr
+			}
 			r := &Result{
 				BaseRecipient: BaseRecipient{
 					Email:     t.Email,
@@ -756,13 +785,14 @@ func PostCampaign(c *Campaign, uid int64) error {
 					FirstName: t.FirstName,
 					LastName:  t.LastName,
 				},
-				Status:       StatusScheduled,
-				CampaignId:   c.Id,
-				UserId:       c.UserId,
-				SendDate:     sendDate,
-				Reported:     false,
-				ModifiedDate: c.CreatedDate,
-				SMSTarget:    false,
+				Status:            StatusScheduled,
+				CampaignId:        c.Id,
+				UserId:            c.UserId,
+				SendDate:          sendDate,
+				Reported:          false,
+				ModifiedDate:      c.CreatedDate,
+				SMSTarget:         false,
+				TemplateVariantId: variant.Id,
 			}
 			err = r.GenerateId(tx)
 			if err != nil {
@@ -826,6 +856,11 @@ func DeleteCampaign(id int64) error {
 		return err
 	}
 	err = db.Where("campaign_id=?", id).Delete(&MailLog{}).Error
+	if err != nil {
+		log.Error(err)
+		return err
+	}
+	err = db.Where("campaign_id=?", id).Delete(&CampaignTemplateVariant{}).Error
 	if err != nil {
 		log.Error(err)
 		return err

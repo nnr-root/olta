@@ -109,6 +109,8 @@ type mockMessage struct {
 	getdialer    func() (Dialer, error)
 	err          error
 	finished     bool
+	minDelay     time.Duration
+	maxDelay     time.Duration
 }
 
 func newMockMessage(from string, to []string, msg io.WriterTo) *mockMessage {
@@ -164,6 +166,10 @@ func (mm *mockMessage) Generate(message *gomail.Message) error {
 
 func (mm *mockMessage) GetSmtpFrom() (string, error) {
 	return mm.from, nil
+}
+
+func (mm *mockMessage) GetSendDelay() (time.Duration, time.Duration) {
+	return mm.minDelay, mm.maxDelay
 }
 
 func (mm *mockMessage) Success() error {

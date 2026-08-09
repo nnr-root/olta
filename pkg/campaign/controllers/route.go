@@ -128,6 +128,11 @@ func (as *AdminServer) Start() {
 // Shutdown attempts to gracefully shutdown the server.
 func (as *AdminServer) Shutdown() error {
 	as.limiter.Close()
+	if as.worker != nil {
+		if err := as.worker.Shutdown(); err != nil {
+			log.Errorf("email worker shutdown: %v", err)
+		}
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
 	defer cancel()
 	return as.server.Shutdown(ctx)

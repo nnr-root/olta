@@ -164,6 +164,21 @@ func (m *MailLog) GetSmtpFrom() (string, error) {
 	return f.Address, err
 }
 
+// GetSendDelay returns this campaign's optional jitter override. Values are
+// persisted as seconds in the campaign API and schema.
+func (m *MailLog) GetSendDelay() (time.Duration, time.Duration) {
+	campaign := m.cachedCampaign
+	if campaign == nil {
+		loaded, err := GetCampaignMailContext(m.CampaignId, m.UserId)
+		if err != nil {
+			return 0, 0
+		}
+		campaign = &loaded
+	}
+	return time.Duration(campaign.MinSendDelay) * time.Second,
+		time.Duration(campaign.MaxSendDelay) * time.Second
+}
+
 // Generate fills in the details of a gomail.Message instance with
 // the correct headers and body from the campaign and recipient listed in
 // the maillog. We accept the gomail.Message as an argument so that the caller
@@ -181,8 +196,12 @@ func (m *MailLog) Generate(msg *gomail.Message) error {
 		}
 		c = &campaign
 	}
+	template, err := c.TemplateForVariant(r.TemplateVariantId)
+	if err != nil {
+		return err
+	}
 
-	f, err := mail.ParseAddress(c.Template.EnvelopeSender)
+	f, err := mail.ParseAddress(template.EnvelopeSender)
 	if err != nil {
 		f, err = mail.ParseAddress(c.SMTP.FromAddress)
 		if err != nil {
@@ -220,7 +239,7 @@ func (m *MailLog) Generate(msg *gomail.Message) error {
 	}
 
 	// Parse remaining templates
-	subject, err := ExecuteTemplate(c.Template.Subject, ptx)
+	subject, err := ExecuteTemplate(template.Subject, ptx)
 
 	if err != nil {
 		log.Warn(err)
@@ -231,26 +250,26 @@ func (m *MailLog) Generate(msg *gomail.Message) error {
 	}
 
 	msg.SetHeader("To", r.FormatAddress())
-	if c.Template.Text != "" {
-		text, err := ExecuteTemplate(c.Template.Text, ptx)
+	if template.Text != "" {
+		text, err := ExecuteTemplate(template.Text, ptx)
 		if err != nil {
 			log.Warn(err)
 		}
 		msg.SetBody("text/plain", text)
 	}
-	if c.Template.HTML != "" {
-		html, err := ExecuteTemplate(c.Template.HTML, ptx)
+	if template.HTML != "" {
+		html, err := ExecuteTemplate(template.HTML, ptx)
 		if err != nil {
 			log.Warn(err)
 		}
-		if c.Template.Text == "" {
+		if template.Text == "" {
 			msg.SetBody("text/html", html)
 		} else {
 			msg.AddAlternative("text/html", html)
 		}
 	}
 	// Attach the files
-	for _, a := range c.Template.Attachments {
+	for _, a := range template.Attachments {
 		addAttachment(msg, a, ptx)
 	}
 	// Attach the recipient-specific QR code when one was generated.

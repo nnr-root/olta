@@ -90,7 +90,17 @@ CREATE TABLE IF NOT EXISTS campaigns (
     smtp_id BIGINT,
     sms_id BIGINT,
     url VARCHAR(1000),
-    qr_size VARCHAR(255)
+    qr_size VARCHAR(255),
+    min_send_delay BIGINT NOT NULL DEFAULT 0,
+    max_send_delay BIGINT NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS campaign_template_variants (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    campaign_id BIGINT NOT NULL,
+    template_id BIGINT NOT NULL,
+    name VARCHAR(255) NOT NULL,
+    position INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS results (
@@ -109,7 +119,8 @@ CREATE TABLE IF NOT EXISTS results (
     send_date DATETIME,
     reported BOOLEAN NOT NULL DEFAULT 0,
     modified_date DATETIME,
-    sms_target BOOLEAN NOT NULL DEFAULT 0
+    sms_target BOOLEAN NOT NULL DEFAULT 0,
+    template_variant_id BIGINT NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS events (
@@ -212,6 +223,9 @@ CREATE INDEX IF NOT EXISTS idx_headers_smtp_id ON headers(smtp_id);
 CREATE INDEX IF NOT EXISTS idx_sms_user_id ON sms(user_id);
 CREATE INDEX IF NOT EXISTS idx_campaigns_user_id ON campaigns(user_id);
 CREATE INDEX IF NOT EXISTS idx_results_campaign_id ON results(campaign_id);
+CREATE INDEX IF NOT EXISTS idx_campaign_template_variants_campaign_id ON campaign_template_variants(campaign_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_campaign_template_variants_position ON campaign_template_variants(campaign_id, position);
+CREATE INDEX IF NOT EXISTS idx_results_template_variant_id ON results(template_variant_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_results_r_id ON results(r_id);
 CREATE INDEX IF NOT EXISTS idx_events_campaign_id ON events(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_mail_logs_schedule ON mail_logs(processing, send_date);

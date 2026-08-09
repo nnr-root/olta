@@ -105,3 +105,28 @@ func TestSiteImportBaseHref(t *testing.T) {
 		t.Fatalf("unexpected response received. expected %s got %s", expected, cs.HTML)
 	}
 }
+
+func TestCampaignDetailsExposeTemplateVariantMetrics(t *testing.T) {
+	ctx := setupTest(t)
+	createTestData(t)
+
+	request := httptest.NewRequest(http.MethodGet, "/api/campaigns/1", nil)
+	request.Header.Set("Authorization", "Bearer "+ctx.apiKey)
+	response := httptest.NewRecorder()
+	ctx.apiServer.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", response.Code, http.StatusOK, response.Body.String())
+	}
+	campaign := models.Campaign{}
+	if err := json.NewDecoder(response.Body).Decode(&campaign); err != nil {
+		t.Fatalf("decode campaign response: %v", err)
+	}
+	if len(campaign.TemplateVariants) != 1 {
+		t.Fatalf("template variant count = %d, want 1", len(campaign.TemplateVariants))
+	}
+	variant := campaign.TemplateVariants[0]
+	if variant.Name != "Variant A" || variant.Stats.Total != 2 {
+		t.Fatalf("variant metrics = %+v, want Variant A with total 2", variant)
+	}
+}

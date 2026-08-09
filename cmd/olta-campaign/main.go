@@ -43,6 +43,7 @@ import (
 	"github.com/s4l1hs/olta/pkg/campaign/middleware"
 	"github.com/s4l1hs/olta/pkg/campaign/models"
 	"github.com/s4l1hs/olta/pkg/campaign/webhook"
+	"github.com/s4l1hs/olta/pkg/campaign/worker"
 	"github.com/s4l1hs/olta/pkg/runtimepath"
 )
 
@@ -56,6 +57,8 @@ var (
 	configPath    = kingpin.Flag("config", "Location of config.json (defaults to the command asset directory).").String()
 	assetDir      = kingpin.Flag("asset-dir", "Runtime asset directory containing VERSION, templates, and static files.").String()
 	disableMailer = kingpin.Flag("disable-mailer", "Disable the mailer (for use with multi-system deployments)").Bool()
+	minSendDelay  = kingpin.Flag("min-send-delay", "Minimum randomized interval between consecutive email sends.").Default("10s").Duration()
+	maxSendDelay  = kingpin.Flag("max-send-delay", "Maximum randomized interval between consecutive email sends.").Default("45s").Duration()
 	mode          = kingpin.Flag("mode", fmt.Sprintf("Run the binary in one of the modes (%s, %s or %s)", modeAll, modeAdmin, modePhish)).
 			Default("all").Enum(modeAll, modeAdmin, modePhish)
 )
@@ -134,6 +137,12 @@ func main() {
 	adminOptions := []controllers.AdminServerOption{}
 	if *disableMailer {
 		adminOptions = append(adminOptions, controllers.WithWorker(nil))
+	} else {
+		campaignWorker, workerErr := worker.New(worker.WithSendDelay(*minSendDelay, *maxSendDelay))
+		if workerErr != nil {
+			log.Fatal(workerErr)
+		}
+		adminOptions = append(adminOptions, controllers.WithWorker(campaignWorker))
 	}
 	adminConfig := conf.AdminConf
 	adminServer := controllers.NewAdminServer(adminConfig, adminOptions...)

@@ -8,6 +8,7 @@ import (
 	"net/textproto"
 	"reflect"
 	"testing"
+	"time"
 )
 
 func generateMessages(dialer Dialer) []Mail {
@@ -25,6 +26,58 @@ func generateMessages(dialer Dialer) []Mail {
 
 	messages := []Mail{m1, m2}
 	return messages
+}
+
+func TestRandomDelay(t *testing.T) {
+	minimum := 10 * time.Second
+	maximum := 20 * time.Second
+
+	delay, err := RandomDelay(minimum, maximum, bytes.NewReader(make([]byte, 32)))
+	if err != nil {
+		t.Fatalf("RandomDelay() error = %v", err)
+	}
+	if delay != minimum {
+		t.Errorf("RandomDelay() = %s, want minimum %s", delay, minimum)
+	}
+
+	delay, err = RandomDelay(15*time.Second, 15*time.Second, nil)
+	if err != nil || delay != 15*time.Second {
+		t.Errorf("fixed RandomDelay() = %s, %v; want 15s, nil", delay, err)
+	}
+
+	if _, err := RandomDelay(20*time.Second, 10*time.Second, nil); err == nil {
+		t.Fatal("RandomDelay() error = nil for inverted range")
+	}
+}
+
+func TestSendDelayCampaignOverride(t *testing.T) {
+	message := newMockMessage("from@example.com", []string{"to@example.com"}, bytes.NewBufferString("test"))
+	message.minDelay = 2 * time.Second
+	message.maxDelay = 4 * time.Second
+
+	minimum, maximum := sendDelay(message, 10*time.Second, 45*time.Second)
+	if minimum != 2*time.Second || maximum != 4*time.Second {
+		t.Fatalf("sendDelay() = %s-%s, want 2s-4s", minimum, maximum)
+	}
+
+	message.minDelay = 0
+	message.maxDelay = 0
+	minimum, maximum = sendDelay(message, 10*time.Second, 45*time.Second)
+	if minimum != 10*time.Second || maximum != 45*time.Second {
+		t.Fatalf("fallback sendDelay() = %s-%s, want 10s-45s", minimum, maximum)
+	}
+}
+
+func TestWaitForDelayHonorsCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	started := time.Now()
+	if waitForDelay(ctx, time.Hour) {
+		t.Fatal("waitForDelay() = true after cancellation")
+	}
+	if elapsed := time.Since(started); elapsed > 100*time.Millisecond {
+		t.Fatalf("waitForDelay() took %s after cancellation", elapsed)
+	}
 }
 
 func newMockErrorSender(err error) *mockSender {

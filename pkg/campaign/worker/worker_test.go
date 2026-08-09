@@ -21,6 +21,19 @@ func (m *logMailer) Queue(ms []mailer.Mail) {
 	m.queue <- ms
 }
 
+type shutdownMailer struct {
+	started chan struct{}
+	stopped chan struct{}
+}
+
+func (m *shutdownMailer) Start(ctx context.Context) {
+	close(m.started)
+	<-ctx.Done()
+	close(m.stopped)
+}
+
+func (m *shutdownMailer) Queue([]mailer.Mail) {}
+
 // testContext is context to cover API related functions
 type testContext struct {
 	config *config.Config
@@ -146,5 +159,29 @@ func TestMailLogGrouping(t *testing.T) {
 				t.Fatalf("unexpected campaign ID received for maillog: got %d expected %d", got, expected)
 			}
 		}
+	}
+}
+
+func TestWorkerShutdownCancelsMailerAndUnlocksCampaignState(t *testing.T) {
+	setupTest(t)
+	mailer := &shutdownMailer{started: make(chan struct{}), stopped: make(chan struct{})}
+	configured, err := New(WithMailer(mailer))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	go configured.Start()
+	select {
+	case <-mailer.started:
+	case <-time.After(time.Second):
+		t.Fatal("mailer did not start")
+	}
+
+	if err := configured.Shutdown(); err != nil {
+		t.Fatalf("Shutdown() error = %v", err)
+	}
+	select {
+	case <-mailer.stopped:
+	case <-time.After(time.Second):
+		t.Fatal("mailer did not stop after shutdown")
 	}
 }

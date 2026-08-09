@@ -102,7 +102,19 @@ CREATE TABLE IF NOT EXISTS `campaigns` (
     `sms_id` BIGINT,
     `url` VARCHAR(1000),
     `qr_size` VARCHAR(255),
+    `min_send_delay` BIGINT NOT NULL DEFAULT 0,
+    `max_send_delay` BIGINT NOT NULL DEFAULT 0,
     INDEX `idx_campaigns_user_id` (`user_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS `campaign_template_variants` (
+    `id` BIGINT PRIMARY KEY AUTO_INCREMENT,
+    `campaign_id` BIGINT NOT NULL,
+    `template_id` BIGINT NOT NULL,
+    `name` VARCHAR(255) NOT NULL,
+    `position` INTEGER NOT NULL,
+    INDEX `idx_campaign_template_variants_campaign_id` (`campaign_id`),
+    UNIQUE INDEX `idx_campaign_template_variants_position` (`campaign_id`, `position`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS `results` (
@@ -122,7 +134,9 @@ CREATE TABLE IF NOT EXISTS `results` (
     `reported` BOOLEAN NOT NULL DEFAULT FALSE,
     `modified_date` DATETIME,
     `sms_target` BOOLEAN NOT NULL DEFAULT FALSE,
+    `template_variant_id` BIGINT NOT NULL DEFAULT 0,
     INDEX `idx_results_campaign_id` (`campaign_id`),
+    INDEX `idx_results_template_variant_id` (`template_variant_id`),
     UNIQUE INDEX `idx_results_r_id` (`r_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 

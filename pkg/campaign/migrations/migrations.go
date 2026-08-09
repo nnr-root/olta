@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-const CurrentVersion = 1
+const CurrentVersion = 2
 
 //go:embed sqlite/001_initial_olta_schema.sql
 var sqliteSchema string
@@ -16,27 +16,34 @@ var sqliteSchema string
 //go:embed mysql/001_initial_olta_schema.sql
 var mysqlSchema string
 
+//go:embed sqlite/002_campaign_jitter_variants.sql
+var sqliteCampaignJitterVariants string
+
+//go:embed mysql/002_campaign_jitter_variants.sql
+var mysqlCampaignJitterVariants string
+
 var requiredSchema = map[string][]string{
-	"users":            {"id", "username", "hash", "api_key", "role_id", "password_change_required", "account_locked", "last_login"},
-	"templates":        {"id", "user_id", "name", "envelope_sender", "subject", "text", "html", "modified_date"},
-	"attachments":      {"id", "template_id", "content", "type", "name"},
-	"targets":          {"id", "first_name", "last_name", "email", "position"},
-	"groups":           {"id", "user_id", "name", "modified_date"},
-	"group_targets":    {"group_id", "target_id"},
-	"smtp":             {"id", "user_id", "interface_type", "name", "host", "username", "password", "from_address", "modified_date", "ignore_cert_errors"},
-	"headers":          {"id", "key", "value", "smtp_id"},
-	"sms":              {"id", "user_id", "name", "twilio_account_sid", "twilio_auth_token", "sms_from", "modified_date"},
-	"campaigns":        {"id", "user_id", "name", "created_date", "launch_date", "send_by_date", "completed_date", "template_id", "page_id", "status", "smtp_id", "sms_id", "url", "qr_size"},
-	"results":          {"id", "campaign_id", "user_id", "r_id", "email", "first_name", "last_name", "position", "status", "ip", "latitude", "longitude", "send_date", "reported", "modified_date", "sms_target"},
-	"events":           {"id", "campaign_id", "email", "time", "message", "details"},
-	"mail_logs":        {"id", "campaign_id", "user_id", "send_date", "send_attempt", "r_id", "processing", "target"},
-	"sms_logs":         {"id", "campaign_id", "user_id", "send_date", "send_attempt", "r_id", "processing", "target"},
-	"email_requests":   {"id", "user_id", "template_id", "page_id", "first_name", "last_name", "email", "position", "url", "r_id", "from_address"},
-	"roles":            {"id", "slug", "name", "description"},
-	"permissions":      {"id", "slug", "name", "description"},
-	"role_permissions": {"role_id", "permission_id"},
-	"webhooks":         {"id", "name", "url", "secret", "is_active"},
-	"imap":             {"user_id", "host", "port", "username", "password", "modified_date", "tls", "enabled", "folder", "restrict_domain", "delete_reported_campaign_email", "last_login", "imap_freq", "ignore_cert_errors"},
+	"users":                      {"id", "username", "hash", "api_key", "role_id", "password_change_required", "account_locked", "last_login"},
+	"templates":                  {"id", "user_id", "name", "envelope_sender", "subject", "text", "html", "modified_date"},
+	"attachments":                {"id", "template_id", "content", "type", "name"},
+	"targets":                    {"id", "first_name", "last_name", "email", "position"},
+	"groups":                     {"id", "user_id", "name", "modified_date"},
+	"group_targets":              {"group_id", "target_id"},
+	"smtp":                       {"id", "user_id", "interface_type", "name", "host", "username", "password", "from_address", "modified_date", "ignore_cert_errors"},
+	"headers":                    {"id", "key", "value", "smtp_id"},
+	"sms":                        {"id", "user_id", "name", "twilio_account_sid", "twilio_auth_token", "sms_from", "modified_date"},
+	"campaigns":                  {"id", "user_id", "name", "created_date", "launch_date", "send_by_date", "completed_date", "template_id", "page_id", "status", "smtp_id", "sms_id", "url", "qr_size", "min_send_delay", "max_send_delay"},
+	"campaign_template_variants": {"id", "campaign_id", "template_id", "name", "position"},
+	"results":                    {"id", "campaign_id", "user_id", "r_id", "email", "first_name", "last_name", "position", "status", "ip", "latitude", "longitude", "send_date", "reported", "modified_date", "sms_target", "template_variant_id"},
+	"events":                     {"id", "campaign_id", "email", "time", "message", "details"},
+	"mail_logs":                  {"id", "campaign_id", "user_id", "send_date", "send_attempt", "r_id", "processing", "target"},
+	"sms_logs":                   {"id", "campaign_id", "user_id", "send_date", "send_attempt", "r_id", "processing", "target"},
+	"email_requests":             {"id", "user_id", "template_id", "page_id", "first_name", "last_name", "email", "position", "url", "r_id", "from_address"},
+	"roles":                      {"id", "slug", "name", "description"},
+	"permissions":                {"id", "slug", "name", "description"},
+	"role_permissions":           {"role_id", "permission_id"},
+	"webhooks":                   {"id", "name", "url", "secret", "is_active"},
+	"imap":                       {"user_id", "host", "port", "username", "password", "modified_date", "tls", "enabled", "folder", "restrict_domain", "delete_reported_campaign_email", "last_login", "imap_freq", "ignore_cert_errors"},
 }
 
 // Apply initializes a fresh database from one schema or baselines an existing
@@ -66,19 +73,79 @@ func Apply(db *sql.DB, dialect string) error {
 		return err
 	}
 	if exists {
-		if err := validate(db); err != nil {
-			return fmt.Errorf("legacy database is not at the final pre-Olta schema; migrate it with the previous release before upgrading: %w", err)
+		if version == 0 {
+			if err := validate(db); err == nil {
+				return recordVersion(db, CurrentVersion)
+			}
+			if err := validateAgainst(db, legacyRequiredSchema()); err != nil {
+				return fmt.Errorf("legacy database is not at the final pre-Olta schema; migrate it with the previous release before upgrading: %w", err)
+			}
+			if err := recordVersion(db, 1); err != nil {
+				return err
+			}
+			version = 1
 		}
-		return recordVersion(db)
+	} else {
+		if err := executeSchema(db, schema); err != nil {
+			return fmt.Errorf("apply unified Olta %s schema: %w", dialect, err)
+		}
+		if err := validate(db); err != nil {
+			return err
+		}
+		return recordVersion(db, CurrentVersion)
 	}
 
-	if err := executeSchema(db, schema); err != nil {
-		return fmt.Errorf("apply unified Olta %s schema: %w", dialect, err)
+	for version < CurrentVersion {
+		nextVersion := version + 1
+		migration, migrationErr := migrationFor(dialect, nextVersion)
+		if migrationErr != nil {
+			return migrationErr
+		}
+		if err := executeSchema(db, migration); err != nil {
+			return fmt.Errorf("apply Olta %s schema migration %d: %w", dialect, nextVersion, err)
+		}
+		if err := recordVersion(db, nextVersion); err != nil {
+			return err
+		}
+		version = nextVersion
 	}
 	if err := validate(db); err != nil {
 		return err
 	}
-	return recordVersion(db)
+	return nil
+}
+
+func migrationFor(dialect string, version int) (string, error) {
+	if version != 2 {
+		return "", fmt.Errorf("campaign schema migration %d is unavailable", version)
+	}
+	switch dialect {
+	case "sqlite3":
+		return sqliteCampaignJitterVariants, nil
+	case "mysql":
+		return mysqlCampaignJitterVariants, nil
+	default:
+		return "", fmt.Errorf("unsupported database dialect %q", dialect)
+	}
+}
+
+func legacyRequiredSchema() map[string][]string {
+	legacy := make(map[string][]string, len(requiredSchema)-1)
+	for table, columns := range requiredSchema {
+		if table == "campaign_template_variants" {
+			continue
+		}
+		filtered := make([]string, 0, len(columns))
+		for _, column := range columns {
+			if (table == "campaigns" && (column == "min_send_delay" || column == "max_send_delay")) ||
+				(table == "results" && column == "template_variant_id") {
+				continue
+			}
+			filtered = append(filtered, column)
+		}
+		legacy[table] = filtered
+	}
+	return legacy
 }
 
 func schemaFor(dialect string) (string, error) {
@@ -112,8 +179,8 @@ func currentVersion(db *sql.DB) (int, error) {
 	return int(version.Int64), nil
 }
 
-func recordVersion(db *sql.DB) error {
-	_, err := db.Exec(`INSERT INTO olta_schema_migrations(version) VALUES (?)`, CurrentVersion)
+func recordVersion(db *sql.DB, version int) error {
+	_, err := db.Exec(`INSERT INTO olta_schema_migrations(version) VALUES (?)`, version)
 	return err
 }
 
@@ -130,7 +197,11 @@ func tableExists(db *sql.DB, dialect, table string) (bool, error) {
 }
 
 func validate(db *sql.DB) error {
-	for table, columns := range requiredSchema {
+	return validateAgainst(db, requiredSchema)
+}
+
+func validateAgainst(db *sql.DB, schema map[string][]string) error {
+	for table, columns := range schema {
 		query := fmt.Sprintf("SELECT %s FROM %s WHERE 1=0", joinIdentifiers(columns), quoteIdentifier(table))
 		rows, err := db.Query(query)
 		if err != nil {

@@ -2,9 +2,13 @@ package mailer
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
 	"io"
+	"math/big"
 	"net/textproto"
+	"sync"
+	"time"
 
 	"github.com/gophish/gomail"
 	log "github.com/s4l1hs/olta/pkg/campaign/logger"
@@ -58,19 +62,47 @@ type Mail interface {
 	GetSmtpFrom() (string, error)
 }
 
+// SendDelayProvider optionally supplies campaign-specific jitter settings.
+// Mail implementations that do not implement this interface use the worker
+// defaults.
+type SendDelayProvider interface {
+	GetSendDelay() (time.Duration, time.Duration)
+}
+
 // MailWorker is the worker that receives slices of emails
 // on a channel to send. It's assumed that every slice of emails received is meant
 // to be sent to the same server.
 type MailWorker struct {
-	queue chan []Mail
+	queue        chan []Mail
+	minSendDelay time.Duration
+	maxSendDelay time.Duration
+	random       io.Reader
+	wg           sync.WaitGroup
+}
+
+// Option configures a MailWorker.
+type Option func(*MailWorker)
+
+// WithSendDelay configures the fallback jitter range used by campaigns that
+// do not specify their own send delay.
+func WithSendDelay(minimum, maximum time.Duration) Option {
+	return func(worker *MailWorker) {
+		worker.minSendDelay = minimum
+		worker.maxSendDelay = maximum
+	}
 }
 
 // NewMailWorker returns an instance of MailWorker with the mail queue
 // initialized.
-func NewMailWorker() *MailWorker {
-	return &MailWorker{
-		queue: make(chan []Mail),
+func NewMailWorker(options ...Option) *MailWorker {
+	worker := &MailWorker{
+		queue:  make(chan []Mail),
+		random: rand.Reader,
 	}
+	for _, option := range options {
+		option(worker)
+	}
+	return worker
 }
 
 // Start launches the mail worker to begin listening on the Queue channel
@@ -79,21 +111,83 @@ func (mw *MailWorker) Start(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
+			mw.wg.Wait()
 			return
 		case ms := <-mw.queue:
 			if len(ms) == 0 {
 				continue
 			}
+			mw.wg.Add(1)
 			go func(ctx context.Context, ms []Mail) {
+				defer mw.wg.Done()
 				dialer, err := ms[0].GetDialer()
 				if err != nil {
 					errorMail(err, ms)
 					return
 				}
-				sendMail(ctx, dialer, ms)
+				sendMail(ctx, dialer, ms, mw.minSendDelay, mw.maxSendDelay, mw.random)
 			}(ctx, ms)
 		}
 	}
+}
+
+// ValidateSendDelay validates a delivery jitter range.
+func ValidateSendDelay(minimum, maximum time.Duration) error {
+	if minimum < 0 || maximum < 0 {
+		return fmt.Errorf("send delays cannot be negative")
+	}
+	if minimum > maximum {
+		return fmt.Errorf("minimum send delay cannot exceed maximum send delay")
+	}
+	return nil
+}
+
+// RandomDelay returns a cryptographically randomized duration in the
+// inclusive range [minimum, maximum].
+func RandomDelay(minimum, maximum time.Duration, source io.Reader) (time.Duration, error) {
+	if err := ValidateSendDelay(minimum, maximum); err != nil {
+		return 0, err
+	}
+	if minimum == maximum {
+		return minimum, nil
+	}
+	if source == nil {
+		source = rand.Reader
+	}
+	span := int64(maximum - minimum)
+	if span == int64(^uint64(0)>>1) {
+		return 0, fmt.Errorf("send delay range is too large")
+	}
+	offset, err := rand.Int(source, big.NewInt(span+1))
+	if err != nil {
+		return 0, fmt.Errorf("generate send delay: %w", err)
+	}
+	return minimum + time.Duration(offset.Int64()), nil
+}
+
+func waitForDelay(ctx context.Context, delay time.Duration) bool {
+	if delay <= 0 {
+		return true
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+func sendDelay(mail Mail, fallbackMinimum, fallbackMaximum time.Duration) (time.Duration, time.Duration) {
+	minimum, maximum := fallbackMinimum, fallbackMaximum
+	if provider, ok := mail.(SendDelayProvider); ok {
+		campaignMinimum, campaignMaximum := provider.GetSendDelay()
+		if campaignMinimum != 0 || campaignMaximum != 0 {
+			minimum, maximum = campaignMinimum, campaignMaximum
+		}
+	}
+	return minimum, maximum
 }
 
 // Queue sends the provided mail to the internal queue for processing.
@@ -141,16 +235,30 @@ func dialHost(ctx context.Context, dialer Dialer) (Sender, error) {
 // sendMail attempts to send the provided Mail instances.
 // If the context is cancelled before all of the mail are sent,
 // sendMail just returns and does not modify those emails.
-func sendMail(ctx context.Context, dialer Dialer, ms []Mail) {
+func sendMail(ctx context.Context, dialer Dialer, ms []Mail, fallbackMinimum, fallbackMaximum time.Duration, random io.Reader) {
 	sender, err := dialHost(ctx, dialer)
 	if err != nil {
 		log.Warn(err)
 		errorMail(err, ms)
 		return
 	}
+	if sender == nil {
+		return
+	}
 	defer sender.Close()
 	message := gomail.NewMessage()
 	for i, m := range ms {
+		if i > 0 {
+			minimum, maximum := sendDelay(m, fallbackMinimum, fallbackMaximum)
+			delay, delayErr := RandomDelay(minimum, maximum, random)
+			if delayErr != nil {
+				log.Warn(delayErr)
+				delay = minimum
+			}
+			if !waitForDelay(ctx, delay) {
+				return
+			}
+		}
 		select {
 		case <-ctx.Done():
 			return

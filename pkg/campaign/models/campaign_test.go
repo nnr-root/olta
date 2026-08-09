@@ -152,6 +152,73 @@ func (s *ModelsSuite) TestCampaignGetResults(c *check.C) {
 	c.Assert(len(campaign.Results), check.Equals, len(got.Results))
 }
 
+func (s *ModelsSuite) TestTemplateVariantDistributionAndMetrics(c *check.C) {
+	campaign := s.createCampaignDependencies(c)
+	secondTemplate := Template{
+		UserId:  campaign.UserId,
+		Name:    "Second Template",
+		Subject: "Variant B",
+		Text:    "Variant B text",
+	}
+	c.Assert(PostTemplate(&secondTemplate), check.Equals, nil)
+	campaign.Template = Template{}
+	campaign.TemplateVariants = []CampaignTemplateVariant{
+		{Name: "Variant A", Template: Template{Name: "Test Template"}},
+		{Name: "Variant B", Template: Template{Name: secondTemplate.Name}},
+	}
+	campaign.MinSendDelay = 3
+	campaign.MaxSendDelay = 9
+
+	c.Assert(PostCampaign(&campaign, campaign.UserId), check.Equals, nil)
+	c.Assert(len(campaign.TemplateVariants), check.Equals, 2)
+
+	results := []Result{}
+	c.Assert(db.Where("campaign_id = ?", campaign.Id).Order("id ASC").Find(&results).Error, check.Equals, nil)
+	c.Assert(len(results), check.Equals, 4)
+	for index, result := range results {
+		expected := campaign.TemplateVariants[index%2].Id
+		c.Assert(result.TemplateVariantId, check.Equals, expected)
+	}
+
+	statuses := []string{EventSent, EventClicked, EventOpened, EventDataSubmit}
+	for index := range results {
+		c.Assert(db.Model(&results[index]).Update("status", statuses[index]).Error, check.Equals, nil)
+	}
+
+	loaded, err := GetCampaign(campaign.Id, campaign.UserId)
+	c.Assert(err, check.Equals, nil)
+	c.Assert(loaded.MinSendDelay, check.Equals, int64(3))
+	c.Assert(loaded.MaxSendDelay, check.Equals, int64(9))
+	c.Assert(len(loaded.TemplateVariants), check.Equals, 2)
+
+	variantA := loaded.TemplateVariants[0].Stats
+	c.Assert(variantA.Total, check.Equals, int64(2))
+	c.Assert(variantA.EmailsSent, check.Equals, int64(2))
+	c.Assert(variantA.OpenedEmail, check.Equals, int64(1))
+	c.Assert(variantA.ClickedLink, check.Equals, int64(0))
+	c.Assert(variantA.SubmittedData, check.Equals, int64(0))
+
+	variantB := loaded.TemplateVariants[1].Stats
+	c.Assert(variantB.Total, check.Equals, int64(2))
+	c.Assert(variantB.EmailsSent, check.Equals, int64(2))
+	c.Assert(variantB.OpenedEmail, check.Equals, int64(2))
+	c.Assert(variantB.ClickedLink, check.Equals, int64(2))
+	c.Assert(variantB.SubmittedData, check.Equals, int64(1))
+}
+
+func (s *ModelsSuite) TestTemplateVariantHelpers(c *check.C) {
+	c.Assert(TemplateVariantName(0), check.Equals, "Variant A")
+	c.Assert(TemplateVariantName(25), check.Equals, "Variant Z")
+	c.Assert(TemplateVariantName(26), check.Equals, "Variant AA")
+
+	variants := []CampaignTemplateVariant{{Name: "A"}, {Name: "B"}, {Name: "C"}}
+	for index, expected := range []string{"A", "B", "C", "A", "B", "C"} {
+		variant, err := AssignTemplateVariant(index, variants)
+		c.Assert(err, check.Equals, nil)
+		c.Assert(variant.Name, check.Equals, expected)
+	}
+}
+
 func setupCampaignDependencies(b *testing.B, size int) {
 	group := Group{Name: "Test Group"}
 	// Create a large group of 5000 members
