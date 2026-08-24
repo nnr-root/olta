@@ -87,6 +87,8 @@ This is what makes the stream safe to forward to a client's SOC, so it is enforc
 
 Six of the nine fire at call sites that already exist and need only a one-line emit: delivery, open, lure, credential, capture, and report. Two are genuinely new instrumentation — cloak and verify. One rewires an existing dispatcher — replay.
 
+**SMS campaigns reuse T1566.002 rather than getting their own technique.** Enterprise ATT&CK has no smishing sub-technique; the nearest match, T1660 Phishing, belongs to the Mobile matrix, and mixing matrices would invalidate the Navigator layer in section 6, which declares `domain: "enterprise-attack"`. T1566.002 is defensible for an SMS-delivered phishing link — the technique describes the link, not the transport. To keep engagement reports able to separate the two channels without misusing a technique ID, every delivery, open, lure, and credential event carries `medium` in its detail, valued `"email"` or `"sms"`. The `SMSTarget` flag already on each result supplies it.
+
 The three that make the layer purple rather than red are cloak, verify, and report: the first two record what pushed back, and the third records that a human noticed.
 
 ### 4. Bus and sinks
