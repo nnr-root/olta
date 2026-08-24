@@ -229,6 +229,19 @@ CREATE TABLE IF NOT EXISTS imap (
     ignore_cert_errors BOOLEAN
 );
 
+CREATE TABLE IF NOT EXISTS telemetry_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id VARCHAR(32) NOT NULL,
+    timestamp DATETIME NOT NULL,
+    stage VARCHAR(32) NOT NULL,
+    outcome VARCHAR(32) NOT NULL,
+    techniques VARCHAR(255),
+    campaign_id BIGINT,
+    rid VARCHAR(255),
+    actor TEXT,
+    detail TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_templates_user_id ON templates(user_id);
 CREATE INDEX IF NOT EXISTS idx_attachments_template_id ON attachments(template_id);
 CREATE INDEX IF NOT EXISTS idx_groups_user_id ON groups(user_id);
@@ -248,6 +261,10 @@ CREATE INDEX IF NOT EXISTS idx_events_campaign_id ON events(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_mail_logs_schedule ON mail_logs(processing, send_date);
 CREATE INDEX IF NOT EXISTS idx_sms_logs_schedule ON sms_logs(processing, send_date);
 CREATE INDEX IF NOT EXISTS idx_email_requests_r_id ON email_requests(r_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_telemetry_events_event_id ON telemetry_events(event_id);
+CREATE INDEX IF NOT EXISTS idx_telemetry_events_campaign_id ON telemetry_events(campaign_id);
+CREATE INDEX IF NOT EXISTS idx_telemetry_events_rid ON telemetry_events(rid);
+CREATE INDEX IF NOT EXISTS idx_telemetry_events_timestamp ON telemetry_events(timestamp);
 
 INSERT OR IGNORE INTO roles(slug, name, description) VALUES
     ('admin', 'Admin', 'Olta system administrator with full permissions'),

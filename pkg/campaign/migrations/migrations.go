@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-const CurrentVersion = 5
+const CurrentVersion = 6
 
 //go:embed sqlite/001_initial_olta_schema.sql
 var sqliteSchema string
@@ -40,6 +40,12 @@ var sqliteSecretStorage string
 //go:embed mysql/005_secret_storage.sql
 var mysqlSecretStorage string
 
+//go:embed sqlite/006_telemetry_events.sql
+var sqliteTelemetryEvents string
+
+//go:embed mysql/006_telemetry_events.sql
+var mysqlTelemetryEvents string
+
 var requiredSchema = map[string][]string{
 	"users":                      {"id", "username", "hash", "api_key", "api_key_hash", "role_id", "password_change_required", "account_locked", "last_login"},
 	"templates":                  {"id", "user_id", "name", "envelope_sender", "subject", "text", "html", "modified_date"},
@@ -62,6 +68,7 @@ var requiredSchema = map[string][]string{
 	"role_permissions":           {"role_id", "permission_id"},
 	"webhooks":                   {"id", "name", "url", "secret", "is_active"},
 	"imap":                       {"user_id", "host", "port", "username", "password", "modified_date", "tls", "enabled", "folder", "restrict_domain", "delete_reported_campaign_email", "last_login", "imap_freq", "ignore_cert_errors"},
+	"telemetry_events":           {"id", "event_id", "timestamp", "stage", "outcome", "techniques", "campaign_id", "rid", "actor", "detail"},
 }
 
 // Apply initializes a fresh database from one schema or baselines an existing
@@ -151,6 +158,10 @@ func migrationFor(dialect string, version int) (string, error) {
 		return sqliteSecretStorage, nil
 	case dialect == "mysql" && version == 5:
 		return mysqlSecretStorage, nil
+	case dialect == "sqlite3" && version == 6:
+		return sqliteTelemetryEvents, nil
+	case dialect == "mysql" && version == 6:
+		return mysqlTelemetryEvents, nil
 	case dialect != "sqlite3" && dialect != "mysql":
 		return "", fmt.Errorf("unsupported database dialect %q", dialect)
 	default:
@@ -159,9 +170,9 @@ func migrationFor(dialect string, version int) (string, error) {
 }
 
 func legacyRequiredSchema() map[string][]string {
-	legacy := make(map[string][]string, len(requiredSchema)-1)
+	legacy := make(map[string][]string, len(requiredSchema)-2)
 	for table, columns := range requiredSchema {
-		if table == "campaign_template_variants" {
+		if table == "campaign_template_variants" || table == "telemetry_events" {
 			continue
 		}
 		filtered := make([]string, 0, len(columns))

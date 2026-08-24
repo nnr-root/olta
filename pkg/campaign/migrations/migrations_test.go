@@ -281,3 +281,67 @@ func TestApplyFreshMySQLSchema(t *testing.T) {
 		t.Fatalf("version = %d, want %d", version, CurrentVersion)
 	}
 }
+
+func TestTelemetryEventsTableExistsOnFreshInstall(t *testing.T) {
+	db := openSQLiteTestDatabase(t)
+	if err := Apply(db, "sqlite3"); err != nil {
+		t.Fatal(err)
+	}
+
+	version, err := currentVersion(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if version != CurrentVersion {
+		t.Fatalf("version = %d, want %d", version, CurrentVersion)
+	}
+	if CurrentVersion != 6 {
+		t.Fatalf("CurrentVersion = %d, want 6", CurrentVersion)
+	}
+
+	for _, column := range []string{
+		"event_id", "timestamp", "stage", "outcome",
+		"techniques", "campaign_id", "rid", "actor", "detail",
+	} {
+		var count int
+		query := "SELECT COUNT(*) FROM pragma_table_info('telemetry_events') WHERE name = ?"
+		if err := db.QueryRow(query, column).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 1 {
+			t.Fatalf("telemetry_events is missing column %q", column)
+		}
+	}
+}
+
+func TestTelemetryEventsUpgradeFromVersionFive(t *testing.T) {
+	db := openSQLiteTestDatabase(t)
+	if err := Apply(db, "sqlite3"); err != nil {
+		t.Fatal(err)
+	}
+	// Rewind to v5 and drop the new table to simulate a pre-006 database.
+	// currentVersion() takes MAX(version) over an insert-only log, so the
+	// version-6 row recorded by the fresh Apply() above must be cleared
+	// first or MAX() would still report 6 despite the table drop.
+	if _, err := db.Exec("DROP TABLE telemetry_events"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("DELETE FROM olta_schema_migrations"); err != nil {
+		t.Fatal(err)
+	}
+	if err := recordVersion(db, 5); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Apply(db, "sqlite3"); err != nil {
+		t.Fatalf("upgrade v5 to v6: %v", err)
+	}
+
+	version, err := currentVersion(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if version != 6 {
+		t.Fatalf("version after upgrade = %d, want 6", version)
+	}
+}
