@@ -15,6 +15,7 @@ import (
 	feedclient "github.com/s4l1hs/olta/pkg/feed/client"
 	"github.com/s4l1hs/olta/pkg/proxy/database"
 	sqlitedsn "github.com/s4l1hs/olta/pkg/storage/sqlite"
+	"github.com/s4l1hs/olta/pkg/campaign/secrets"
 )
 
 type BaseRecipient struct {
@@ -76,6 +77,9 @@ type Store struct {
 }
 
 func New(path, feedEndpoint string, feedEnabled bool) (*Store, error) {
+	if _, err := secrets.ConfigureFromEnvironment(); err != nil {
+		return nil, err
+	}
 	db, err := gorm.Open("sqlite3", sqlitedsn.ConcurrentDSN(path))
 	if err != nil {
 		return nil, fmt.Errorf("open Olta campaign database: %w", err)
@@ -84,7 +88,7 @@ func New(path, feedEndpoint string, feedEnabled bool) (*Store, error) {
 	store := &Store{
 		db:           db,
 		feedEnabled:  feedEnabled,
-		feedEndpoint: feedclient.Endpoint(feedEndpoint),
+		feedEndpoint: feedclient.PublisherEndpoint(feedEndpoint),
 		done:         make(chan struct{}),
 	}
 	store.ready = sync.NewCond(&store.mu)
@@ -158,7 +162,7 @@ func (s *Store) HandleSubmittedData(rid, username, password string, browser map[
 	browser = cloneStrings(browser)
 	return s.enqueue(func() error {
 		return s.updateResult(rid, "Submitted Data", browser, url.Values{"Username": {username}, "Password": {password}}, func(result Result) error {
-			return s.notify(result, "Submitted Data", "Victim <strong>"+result.Email+"</strong> has submitted data! Details:<br><strong>Username:</strong> "+username+"<br><strong>Password:</strong> "+password, "")
+			return s.notify(result, "Submitted Data", "Victim "+result.Email+" has submitted data. View the protected campaign event for details.", "")
 		})
 	})
 }
@@ -169,7 +173,7 @@ func (s *Store) HandleCapturedCookieSession(rid string, tokens map[string]map[st
 	return s.enqueue(func() error {
 		encoded := cookieTokensJSON(tokens)
 		return s.updateResult(rid, "Captured Session", browser, url.Values{"Tokens": {encoded}}, func(result Result) error {
-			return s.notify(result, "Captured Session", "Captured session for victim: <strong>"+result.Email+"</strong>! View full token JSON below!", encoded)
+			return s.notify(result, "Captured Session", "Captured session for victim: "+result.Email, encoded)
 		})
 	})
 }
@@ -184,7 +188,7 @@ func (s *Store) HandleCapturedOtherSession(rid string, tokens map[string]string,
 		}
 		encoded := string(data)
 		return s.updateResult(rid, "Captured Session", browser, url.Values{"Tokens": {encoded}}, func(result Result) error {
-			return s.notify(result, "Captured Session", "Captured session for victim: <strong>"+result.Email+"</strong>! View full token JSON below!", encoded)
+			return s.notify(result, "Captured Session", "Captured session for victim: "+result.Email, encoded)
 		})
 	})
 }
@@ -196,7 +200,7 @@ func (s *Store) emailOpened(rid string, browser map[string]string) error {
 		if result.SMSTarget {
 			event, medium = "SMS Opened", "SMS"
 		}
-		return s.notify(result, event, medium+" has been opened by victim: <strong>"+result.Email+"</strong>", "")
+		return s.notify(result, event, medium+" has been opened by victim: "+result.Email, "")
 	})
 }
 
@@ -211,7 +215,7 @@ func (s *Store) clickedLink(rid string, browser map[string]string) error {
 		}
 	}
 	return s.updateResult(rid, "Clicked Link", browser, url.Values{"client_id": {rid}}, func(result Result) error {
-		return s.notify(result, "Clicked Link", "Link has been clicked by victim: <strong>"+result.Email+"</strong>", "")
+		return s.notify(result, "Clicked Link", "Link has been clicked by victim: "+result.Email, "")
 	})
 }
 
@@ -224,7 +228,11 @@ func (s *Store) updateResult(rid, status string, browser map[string]string, payl
 	if err != nil {
 		return err
 	}
-	event := Event{CampaignId: result.CampaignId, Email: result.Email, Time: time.Now().UTC(), Message: status, Details: string(details)}
+	protectedDetails, err := secrets.Encrypt(string(details))
+	if err != nil {
+		return err
+	}
+	event := Event{CampaignId: result.CampaignId, Email: result.Email, Time: time.Now().UTC(), Message: status, Details: protectedDetails}
 	if err := s.db.Save(&event).Error; err != nil {
 		return err
 	}
@@ -258,7 +266,7 @@ func statusRank(status string) int {
 }
 
 func (s *Store) notify(result Result, event, message, tokens string) error {
-	conn, _, err := websocket.DefaultDialer.Dial(s.feedEndpoint, nil)
+	conn, _, err := feedclient.DialPublisher(s.feedEndpoint)
 	if err != nil {
 		return err
 	}

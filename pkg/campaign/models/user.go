@@ -17,7 +17,8 @@ type User struct {
 	Id                     int64     `json:"id"`
 	Username               string    `json:"username" sql:"not null;unique"`
 	Hash                   string    `json:"-"`
-	ApiKey                 string    `json:"api_key" sql:"not null;unique"`
+	ApiKey                 string    `json:"api_key,omitempty" sql:"not null;unique"`
+	ApiKeyHash             string    `json:"-" gorm:"column:api_key_hash"`
 	Role                   Role      `json:"role" gorm:"association_autoupdate:false;association_autocreate:false"`
 	RoleID                 int64     `json:"-"`
 	PasswordChangeRequired bool      `json:"password_change_required"`
@@ -30,6 +31,9 @@ type User struct {
 func GetUser(id int64) (User, error) {
 	u := User{}
 	err := db.Preload("Role").Where("id=?", id).First(&u).Error
+	if err == nil {
+		err = openUser(&u)
+	}
 	return u, err
 }
 
@@ -37,6 +41,11 @@ func GetUser(id int64) (User, error) {
 func GetUsers() ([]User, error) {
 	us := []User{}
 	err := db.Preload("Role").Find(&us).Error
+	for i := range us {
+		if err == nil {
+			err = openUser(&us[i])
+		}
+	}
 	return us, err
 }
 
@@ -44,7 +53,10 @@ func GetUsers() ([]User, error) {
 // error is thrown.
 func GetUserByAPIKey(key string) (User, error) {
 	u := User{}
-	err := db.Preload("Role").Where("api_key = ?", key).First(&u).Error
+	err := db.Preload("Role").Where("api_key_hash = ?", apiKeyHash(key)).First(&u).Error
+	if err == nil {
+		err = openUser(&u)
+	}
 	return u, err
 }
 
@@ -53,12 +65,20 @@ func GetUserByAPIKey(key string) (User, error) {
 func GetUserByUsername(username string) (User, error) {
 	u := User{}
 	err := db.Preload("Role").Where("username = ?", username).First(&u).Error
+	if err == nil {
+		err = openUser(&u)
+	}
 	return u, err
 }
 
 // PutUser updates the given user
 func PutUser(u *User) error {
-	err := db.Save(u).Error
+	stored, err := storedUser(*u)
+	if err != nil {
+		return err
+	}
+	err = db.Save(&stored).Error
+	u.Id = stored.Id
 	return err
 }
 

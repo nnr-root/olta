@@ -12,7 +12,7 @@
         "key_path": "olta-campaign_template.key"
     },
     "feed_enabled": false,
-    "feed_url": "ws://localhost:1337/ws",
+    "feed_url": "ws://localhost:1337/ws/publish",
     "db_name": "sqlite3",
     "db_path": "olta-campaign.db",
     "contact_address": "",

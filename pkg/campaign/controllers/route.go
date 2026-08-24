@@ -25,6 +25,7 @@ import (
 	mid "github.com/s4l1hs/olta/pkg/campaign/middleware"
 	"github.com/s4l1hs/olta/pkg/campaign/middleware/ratelimit"
 	"github.com/s4l1hs/olta/pkg/campaign/models"
+	"github.com/s4l1hs/olta/pkg/campaign/secrets"
 	"github.com/s4l1hs/olta/pkg/campaign/smsworker"
 	"github.com/s4l1hs/olta/pkg/campaign/util"
 	"github.com/s4l1hs/olta/pkg/campaign/worker"
@@ -85,8 +86,12 @@ func NewAdminServer(config config.AdminServer, options ...AdminServerOption) *Ad
 	defaultWorker, _ := worker.New()
 	defaultSmsWorker, _ := smsworker.New()
 	defaultServer := &http.Server{
-		ReadTimeout: 10 * time.Second,
-		Addr:        config.ListenURL,
+		ReadTimeout:       15 * time.Second,
+		ReadHeaderTimeout: 5 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       90 * time.Second,
+		MaxHeaderBytes:    1 << 20,
+		Addr:              config.ListenURL,
 	}
 	defaultLimiter := ratelimit.NewPostLimiter()
 	as := &AdminServer{
@@ -172,6 +177,8 @@ func (as *AdminServer) registerRoutes() {
 		api.WithWorker(as.worker),
 		api.WithSmsWorker(as.smsworker),
 		api.WithLimiter(as.limiter),
+		api.WithAllowedOrigins(as.config.AllowedAPIOrigins),
+		api.WithInsecureSiteImport(as.config.AllowInsecureSiteImport),
 	)
 	router.PathPrefix("/api/").Handler(api)
 
@@ -184,7 +191,11 @@ func (as *AdminServer) registerRoutes() {
 	// Setup CSRF Protection
 	csrfKey := []byte(as.config.CSRFKey)
 	if len(csrfKey) == 0 {
-		csrfKey = []byte(auth.GenerateSecureKey(auth.APIKeyLength))
+		if derived, ok := secrets.Derive("campaign/csrf/v1", 32); ok {
+			csrfKey = derived
+		} else {
+			csrfKey = []byte(auth.GenerateSecureKey(auth.APIKeyLength))
+		}
 	}
 	csrfHandler := csrf.Protect(csrfKey,
 		csrf.FieldName("csrf_token"),
@@ -196,9 +207,8 @@ func (as *AdminServer) registerRoutes() {
 	gzipWrapper, _ := gziphandler.NewGzipLevelHandler(gzip.BestCompression)
 	adminHandler = gzipWrapper(adminHandler)
 
-	// Respect X-Forwarded-For and X-Real-IP headers in case we're behind a
-	// reverse proxy.
-	adminHandler = handlers.ProxyHeaders(adminHandler)
+	// Honor forwarding headers only from explicitly trusted reverse proxies.
+	adminHandler = mid.TrustedProxyHeaders(as.config.TrustedProxies, adminHandler)
 
 	// Setup logging
 	adminHandler = handlers.CombinedLoggingHandler(log.Writer(), adminHandler)

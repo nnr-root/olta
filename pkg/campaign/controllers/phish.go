@@ -19,6 +19,7 @@ import (
 	"github.com/s4l1hs/olta/pkg/campaign/config"
 	ctx "github.com/s4l1hs/olta/pkg/campaign/context"
 	log "github.com/s4l1hs/olta/pkg/campaign/logger"
+	mid "github.com/s4l1hs/olta/pkg/campaign/middleware"
 	"github.com/s4l1hs/olta/pkg/campaign/models"
 	"github.com/s4l1hs/olta/pkg/campaign/util"
 )
@@ -51,9 +52,12 @@ type PhishingServer struct {
 // provided options applied.
 func NewPhishingServer(config config.PhishServer, options ...PhishingServerOption) *PhishingServer {
 	defaultServer := &http.Server{
-		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 10 * time.Second,
-		Addr:         config.ListenURL,
+		ReadTimeout:       15 * time.Second,
+		ReadHeaderTimeout: 5 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       90 * time.Second,
+		MaxHeaderBytes:    1 << 20,
+		Addr:              config.ListenURL,
 	}
 	ps := &PhishingServer{
 		server: defaultServer,
@@ -146,9 +150,8 @@ func (ps *PhishingServer) registerRoutes() {
 	gzipWrapper, _ := gziphandler.NewGzipLevelHandler(gzip.BestCompression)
 	phishHandler := gzipWrapper(router)
 
-	// Respect X-Forwarded-For and X-Real-IP headers in case we're behind a
-	// reverse proxy.
-	phishHandler = handlers.ProxyHeaders(phishHandler)
+	// Honor forwarding headers only from explicitly trusted reverse proxies.
+	phishHandler = mid.TrustedProxyHeaders(ps.config.TrustedProxies, phishHandler)
 
 	// Setup logging
 	phishHandler = handlers.CombinedLoggingHandler(log.Writer(), phishHandler)

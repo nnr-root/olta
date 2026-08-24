@@ -11,7 +11,7 @@ type Webhook struct {
 	Id       int64  `json:"id" gorm:"column:id; primary_key:yes"`
 	Name     string `json:"name"`
 	URL      string `json:"url"`
-	Secret   string `json:"secret"`
+	Secret   string `json:"secret,omitempty"`
 	IsActive bool   `json:"is_active"`
 }
 
@@ -25,6 +25,11 @@ var ErrNameNotSpecified = errors.New("Name can't be empty")
 func GetWebhooks() ([]Webhook, error) {
 	whs := []Webhook{}
 	err := db.Find(&whs).Error
+	for i := range whs {
+		if err == nil {
+			err = openWebhook(&whs[i])
+		}
+	}
 	return whs, err
 }
 
@@ -32,6 +37,11 @@ func GetWebhooks() ([]Webhook, error) {
 func GetActiveWebhooks() ([]Webhook, error) {
 	whs := []Webhook{}
 	err := db.Where("is_active=?", true).Find(&whs).Error
+	for i := range whs {
+		if err == nil {
+			err = openWebhook(&whs[i])
+		}
+	}
 	return whs, err
 }
 
@@ -40,6 +50,9 @@ func GetActiveWebhooks() ([]Webhook, error) {
 func GetWebhook(id int64) (Webhook, error) {
 	wh := Webhook{}
 	err := db.Where("id=?", id).First(&wh).Error
+	if err == nil {
+		err = openWebhook(&wh)
+	}
 	return wh, err
 }
 
@@ -50,7 +63,12 @@ func PostWebhook(wh *Webhook) error {
 		log.Error(err)
 		return err
 	}
-	err = db.Save(wh).Error
+	stored, err := storedWebhook(*wh)
+	if err != nil {
+		return err
+	}
+	err = db.Save(&stored).Error
+	wh.Id = stored.Id
 	if err != nil {
 		log.Error(err)
 	}
@@ -64,7 +82,11 @@ func PutWebhook(wh *Webhook) error {
 		log.Error(err)
 		return err
 	}
-	err = db.Save(wh).Error
+	stored, err := storedWebhook(*wh)
+	if err != nil {
+		return err
+	}
+	err = db.Save(&stored).Error
 	return err
 }
 

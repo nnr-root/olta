@@ -199,7 +199,13 @@ func AddEvent(e *Event, campaignID int64) error {
 		log.Errorf("error getting active webhooks: %v", err)
 	}
 
-	return db.Save(e).Error
+	stored, err := storedEvent(*e)
+	if err != nil {
+		return err
+	}
+	err = db.Save(&stored).Error
+	e.Id = stored.Id
+	return err
 }
 
 // getDetails retrieves the related attributes of the campaign
@@ -216,6 +222,11 @@ func (c *Campaign) getDetails() error {
 	if err != nil {
 		log.Warnf("%s: events not found for campaign", err)
 		return err
+	}
+	for i := range c.Events {
+		if err = openEvent(&c.Events[i]); err != nil {
+			return err
+		}
 	}
 	err = db.Table("templates").Where("id=?", c.TemplateId).Find(&c.Template).Error
 	if err != nil {
@@ -241,6 +252,11 @@ func (c *Campaign) getDetails() error {
 		}
 		c.SMTP = SMTP{Name: "[Deleted]"}
 		log.Warnf("%s: sending profile not found for campaign", err)
+	}
+	if err == nil {
+		if err = openSMTP(&c.SMTP); err != nil {
+			return err
+		}
 	}
 	err = db.Where("smtp_id=?", c.SMTP.Id).Find(&c.SMTP.Headers).Error
 	if err != nil && err != gorm.ErrRecordNotFound {
@@ -437,6 +453,9 @@ func GetCampaignMailContext(id int64, uid int64) (Campaign, error) {
 	if err != nil {
 		return c, err
 	}
+	if err = openSMTP(&c.SMTP); err != nil {
+		return c, err
+	}
 	err = db.Where("smtp_id=?", c.SMTP.Id).Find(&c.SMTP.Headers).Error
 	if err != nil && err != gorm.ErrRecordNotFound {
 		return c, err
@@ -463,6 +482,9 @@ func GetCampaignSMSContext(id int64, uid int64) (Campaign, error) {
 	}
 	err = db.Table("sms").Where("id=?", c.SMSId).Find(&c.SMS).Error
 	if err != nil {
+		return c, err
+	}
+	if err = openSMS(&c.SMS); err != nil {
 		return c, err
 	}
 	err = db.Table("templates").Where("id=?", c.TemplateId).Find(&c.Template).Error
@@ -507,6 +529,11 @@ func GetCampaignResults(id int64, uid int64) (CampaignResults, error) {
 		return cr, err
 	}
 	err = db.Table("events").Where("campaign_id=?", cr.Id).Find(&cr.Events).Error
+	for i := range cr.Events {
+		if err == nil {
+			err = openEvent(&cr.Events[i])
+		}
+	}
 	if err != nil {
 		log.Errorf("%s: events not found for campaign", err)
 		return cr, err

@@ -72,7 +72,9 @@ func Send(endPoint EndPoint, data interface{}) error {
 func SendAll(endPoints []EndPoint, data interface{}) {
 	for _, e := range endPoints {
 		go func(e EndPoint) {
-			senderInstance.Send(e, data)
+			if err := senderInstance.Send(e, data); err != nil {
+				log.Error(err)
+			}
 		}(e)
 	}
 }
@@ -102,7 +104,11 @@ func (ds defaultSender) Send(endPoint EndPoint, data interface{}) error {
 		log.Error(err)
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			log.Error(err)
+		}
+	}()
 
 	if resp.StatusCode >= MinHTTPStatusErrorCode {
 		errMsg := fmt.Sprintf("http status of response: %s", resp.Status)

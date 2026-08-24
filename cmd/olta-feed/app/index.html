@@ -4,7 +4,6 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Olta live feed</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
     <link rel="icon" type="image/x-icon" href="favicon.ico" />
     <base href="/" />
     <link rel="stylesheet" href="/css/bulma.min.css">
@@ -12,7 +11,20 @@
   <body>
       <section class="section">
           <div class="container">
-       <h1 class="notification is-info">Olta live feed<div id="audio-control" class="muted">Unmute</div></h1>   
+       <h1 class="notification is-info">Olta live feed<div id="audio-control" class="muted">Unmute</div></h1>
+       <div id="connection-status" class="notification is-light">Connecting…</div>
+       <form id="token-form" class="box" hidden>
+         <label class="label" for="viewer-token">Viewer token</label>
+         <div class="field has-addons">
+           <div class="control is-expanded">
+             <input id="viewer-token" class="input" type="password" autocomplete="current-password" required>
+           </div>
+           <div class="control">
+             <button class="button is-info" type="submit">Connect</button>
+           </div>
+         </div>
+         <p class="help">The token is kept only for this browser tab.</p>
+       </form>
 <div class="columns">
   <div class="column is-7">
     <div id="feed">
@@ -22,7 +34,5 @@
           </div>
        </section>
   </body>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/handlebars.js/4.1.0/handlebars.min.js"></script>
-  <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.5.1/jquery.min.js"></script>
-  <script src="js/app.js"></script>
+  <script src="/js/app.js"></script>
 </html>

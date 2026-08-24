@@ -4,10 +4,12 @@ CREATE TABLE IF NOT EXISTS `users` (
     `username` VARCHAR(255) NOT NULL UNIQUE,
     `hash` VARCHAR(255),
     `api_key` VARCHAR(255) NOT NULL UNIQUE,
+    `api_key_hash` VARCHAR(64),
     `role_id` BIGINT,
     `password_change_required` BOOLEAN NOT NULL DEFAULT FALSE,
     `account_locked` BOOLEAN NOT NULL DEFAULT FALSE,
-    `last_login` DATETIME
+    `last_login` DATETIME,
+    UNIQUE INDEX `idx_users_api_key_hash` (`api_key_hash`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS `templates` (
@@ -66,7 +68,7 @@ CREATE TABLE IF NOT EXISTS `smtp` (
     `name` VARCHAR(255),
     `host` VARCHAR(255),
     `username` VARCHAR(255),
-    `password` VARCHAR(255),
+    `password` TEXT,
     `from_address` VARCHAR(255),
     `modified_date` DATETIME DEFAULT CURRENT_TIMESTAMP,
     `ignore_cert_errors` BOOLEAN NOT NULL DEFAULT FALSE,
@@ -86,7 +88,7 @@ CREATE TABLE IF NOT EXISTS `sms` (
     `user_id` BIGINT,
     `name` VARCHAR(255),
     `twilio_account_sid` VARCHAR(255),
-    `twilio_auth_token` VARCHAR(255),
+    `twilio_auth_token` TEXT,
     `sms_from` VARCHAR(255),
     `modified_date` DATETIME DEFAULT CURRENT_TIMESTAMP,
     INDEX `idx_sms_user_id` (`user_id`)
@@ -228,7 +230,7 @@ CREATE TABLE IF NOT EXISTS `webhooks` (
     `id` BIGINT PRIMARY KEY AUTO_INCREMENT,
     `name` VARCHAR(255),
     `url` VARCHAR(1000),
-    `secret` VARCHAR(255),
+    `secret` TEXT,
     `is_active` BOOLEAN NOT NULL DEFAULT FALSE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
@@ -237,7 +239,7 @@ CREATE TABLE IF NOT EXISTS `imap` (
     `host` VARCHAR(255),
     `port` INTEGER,
     `username` VARCHAR(255),
-    `password` VARCHAR(255),
+    `password` TEXT,
     `modified_date` DATETIME DEFAULT CURRENT_TIMESTAMP,
     `tls` BOOLEAN,
     `enabled` BOOLEAN,

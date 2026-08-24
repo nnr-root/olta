@@ -4,6 +4,7 @@ CREATE TABLE IF NOT EXISTS users (
     username VARCHAR(255) NOT NULL UNIQUE,
     hash VARCHAR(255),
     api_key VARCHAR(255) NOT NULL UNIQUE,
+    api_key_hash VARCHAR(64),
     role_id INTEGER,
     password_change_required BOOLEAN NOT NULL DEFAULT 0,
     account_locked BOOLEAN NOT NULL DEFAULT 0,
@@ -58,7 +59,7 @@ CREATE TABLE IF NOT EXISTS smtp (
     name VARCHAR(255),
     host VARCHAR(255),
     username VARCHAR(255),
-    password VARCHAR(255),
+    password TEXT,
     from_address VARCHAR(255),
     modified_date DATETIME DEFAULT CURRENT_TIMESTAMP,
     ignore_cert_errors BOOLEAN NOT NULL DEFAULT 0
@@ -76,7 +77,7 @@ CREATE TABLE IF NOT EXISTS sms (
     user_id BIGINT,
     name VARCHAR(255),
     twilio_account_sid VARCHAR(255),
-    twilio_auth_token VARCHAR(255),
+    twilio_auth_token TEXT,
     sms_from VARCHAR(255),
     modified_date DATETIME DEFAULT CURRENT_TIMESTAMP
 );
@@ -207,7 +208,7 @@ CREATE TABLE IF NOT EXISTS webhooks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name VARCHAR(255),
     url VARCHAR(1000),
-    secret VARCHAR(255),
+    secret TEXT,
     is_active BOOLEAN NOT NULL DEFAULT 0
 );
 
@@ -216,7 +217,7 @@ CREATE TABLE IF NOT EXISTS imap (
     host VARCHAR(255),
     port INTEGER,
     username VARCHAR(255),
-    password VARCHAR(255),
+    password TEXT,
     modified_date DATETIME DEFAULT CURRENT_TIMESTAMP,
     tls BOOLEAN,
     enabled BOOLEAN,
@@ -234,6 +235,7 @@ CREATE INDEX IF NOT EXISTS idx_groups_user_id ON groups(user_id);
 CREATE INDEX IF NOT EXISTS idx_group_targets_group_id ON group_targets(group_id);
 CREATE INDEX IF NOT EXISTS idx_group_targets_target_id ON group_targets(target_id);
 CREATE INDEX IF NOT EXISTS idx_smtp_user_id ON smtp(user_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_api_key_hash ON users(api_key_hash);
 CREATE INDEX IF NOT EXISTS idx_headers_smtp_id ON headers(smtp_id);
 CREATE INDEX IF NOT EXISTS idx_sms_user_id ON sms(user_id);
 CREATE INDEX IF NOT EXISTS idx_campaigns_user_id ON campaigns(user_id);

@@ -6,8 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"net/url"
 	"strings"
+	"time"
 
 	"github.com/PuerkitoBio/goquery"
 	"github.com/jordan-wright/email"
@@ -22,9 +25,18 @@ type cloneRequest struct {
 	IncludeResources bool   `json:"include_resources"`
 }
 
+const maxImportedSiteBytes = 10 << 20
+
 func (cr *cloneRequest) validate() error {
 	if cr.URL == "" {
 		return errors.New("No URL Specified")
+	}
+	parsed, err := url.ParseRequestURI(cr.URL)
+	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return errors.New("URL must be an absolute HTTP or HTTPS URL")
+	}
+	if parsed.User != nil {
+		return errors.New("URL must not contain credentials")
 	}
 	return nil
 }
@@ -117,18 +129,32 @@ func (as *Server) ImportSite(w http.ResponseWriter, r *http.Request) {
 	restrictedDialer := dialer.Dialer()
 	tr := &http.Transport{
 		DialContext: restrictedDialer.DialContext,
-		TLSClientConfig: &tls.Config{
-			InsecureSkipVerify: true,
-		},
 	}
-	client := &http.Client{Transport: tr}
+	if as.allowInsecureSiteImport {
+		tr.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12, InsecureSkipVerify: true} //nolint:gosec // Explicit lab-only configuration.
+	}
+	client := &http.Client{Transport: tr, Timeout: 30 * time.Second}
 	resp, err := client.Get(cr.URL)
 	if err != nil {
 		JSONResponse(w, models.Response{Success: false, Message: err.Error()}, http.StatusBadRequest)
 		return
 	}
-	// Insert the base href tag to better handle relative resources
-	d, err := goquery.NewDocumentFromResponse(resp)
+	defer resp.Body.Close()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusBadRequest {
+		JSONResponse(w, models.Response{Success: false, Message: "Upstream site returned " + resp.Status}, http.StatusBadRequest)
+		return
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxImportedSiteBytes+1))
+	if err != nil {
+		JSONResponse(w, models.Response{Success: false, Message: err.Error()}, http.StatusBadRequest)
+		return
+	}
+	if len(body) > maxImportedSiteBytes {
+		JSONResponse(w, models.Response{Success: false, Message: "Imported site exceeds 10 MiB limit"}, http.StatusBadRequest)
+		return
+	}
+	// Insert the base href tag to better handle relative resources.
+	d, err := goquery.NewDocumentFromReader(bytes.NewReader(body))
 	if err != nil {
 		JSONResponse(w, models.Response{Success: false, Message: err.Error()}, http.StatusBadRequest)
 		return

@@ -62,12 +62,16 @@ func (as *Server) Webhook(w http.ResponseWriter, r *http.Request) {
 		JSONResponse(w, models.Response{Success: true, Message: "Webhook deleted Successfully!"}, http.StatusOK)
 
 	case r.Method == "PUT":
+		existing := wh
 		wh = models.Webhook{}
 		err = json.NewDecoder(r.Body).Decode(&wh)
 		if err != nil {
 			log.Errorf("error decoding webhook: %v", err)
 			JSONResponse(w, models.Response{Success: false, Message: err.Error()}, http.StatusBadRequest)
 			return
+		}
+		if wh.Secret == "" {
+			wh.Secret = existing.Secret
 		}
 		wh.Id = id
 		err = models.PutWebhook(&wh)

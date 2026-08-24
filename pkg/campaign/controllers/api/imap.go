@@ -22,6 +22,12 @@ func (as *Server) IMAPServerValidate(w http.ResponseWriter, r *http.Request) {
 			JSONResponse(w, models.Response{Success: false, Message: "Invalid request"}, http.StatusBadRequest)
 			return
 		}
+		if im.Password == "" {
+			existing, lookupErr := models.GetIMAP(ctx.Get(r, "user_id").(int64))
+			if lookupErr == nil && len(existing) > 0 {
+				im.Password = existing[0].Password
+			}
+		}
 		err = imap.Validate(&im)
 		if err != nil {
 			JSONResponse(w, models.Response{Success: false, Message: err.Error()}, http.StatusOK)
@@ -49,6 +55,12 @@ func (as *Server) IMAPServer(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			JSONResponse(w, models.Response{Success: false, Message: "Invalid data. Please check your IMAP settings."}, http.StatusBadRequest)
 			return
+		}
+		if im.Password == "" {
+			existing, lookupErr := models.GetIMAP(ctx.Get(r, "user_id").(int64))
+			if lookupErr == nil && len(existing) > 0 {
+				im.Password = existing[0].Password
+			}
 		}
 		im.ModifiedDate = time.Now().UTC()
 		im.UserId = ctx.Get(r, "user_id").(int64)

@@ -19,7 +19,7 @@ type IMAP struct {
 	Host                        string    `json:"host"`
 	Port                        uint16    `json:"port,string,omitempty"`
 	Username                    string    `json:"username"`
-	Password                    string    `json:"password"`
+	Password                    string    `json:"password,omitempty"`
 	TLS                         bool      `json:"tls"`
 	IgnoreCertErrors            bool      `json:"ignore_cert_errors"`
 	Folder                      string    `json:"folder"`
@@ -110,6 +110,11 @@ func GetIMAP(uid int64) ([]IMAP, error) {
 		log.Error(err)
 		return im, err
 	}
+	for i := range im {
+		if err = openIMAP(&im[i]); err != nil {
+			return im, err
+		}
+	}
 	return im, nil
 }
 
@@ -129,7 +134,11 @@ func PostIMAP(im *IMAP, uid int64) error {
 	}
 
 	// Insert new settings into the DB
-	err = db.Save(im).Error
+	stored, err := storedIMAP(*im)
+	if err != nil {
+		return err
+	}
+	err = db.Save(&stored).Error
 	if err != nil {
 		log.Error("Unable to save to database: ", err.Error())
 	}

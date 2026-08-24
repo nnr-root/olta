@@ -14,20 +14,24 @@ const (
 
 // AdminServer represents the Admin server configuration details
 type AdminServer struct {
-	ListenURL            string   `json:"listen_url"`
-	UseTLS               bool     `json:"use_tls"`
-	CertPath             string   `json:"cert_path"`
-	KeyPath              string   `json:"key_path"`
-	CSRFKey              string   `json:"csrf_key"`
-	AllowedInternalHosts []string `json:"allowed_internal_hosts"`
+	ListenURL               string   `json:"listen_url"`
+	UseTLS                  bool     `json:"use_tls"`
+	CertPath                string   `json:"cert_path"`
+	KeyPath                 string   `json:"key_path"`
+	CSRFKey                 string   `json:"csrf_key"`
+	AllowedInternalHosts    []string `json:"allowed_internal_hosts"`
+	AllowedAPIOrigins       []string `json:"allowed_api_origins"`
+	TrustedProxies          []string `json:"trusted_proxies"`
+	AllowInsecureSiteImport bool     `json:"allow_insecure_site_import"`
 }
 
 // PhishServer represents the Phish server configuration details
 type PhishServer struct {
-	ListenURL string `json:"listen_url"`
-	UseTLS    bool   `json:"use_tls"`
-	CertPath  string `json:"cert_path"`
-	KeyPath   string `json:"key_path"`
+	ListenURL      string   `json:"listen_url"`
+	UseTLS         bool     `json:"use_tls"`
+	CertPath       string   `json:"cert_path"`
+	KeyPath        string   `json:"key_path"`
+	TrustedProxies []string `json:"trusted_proxies"`
 }
 
 // Config represents the configuration information.

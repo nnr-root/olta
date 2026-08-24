@@ -70,14 +70,20 @@ func (as *Server) SMSProfile(w http.ResponseWriter, r *http.Request) {
 		}
 		JSONResponse(w, models.Response{Success: true, Message: "SMS Deleted Successfully"}, http.StatusOK)
 	case r.Method == "PUT":
+		existing := s
 		s := models.SMS{}
 		err = json.NewDecoder(r.Body).Decode(&s)
 		if err != nil {
 			log.Error(err)
+			JSONResponse(w, models.Response{Success: false, Message: "Invalid request"}, http.StatusBadRequest)
+			return
 		}
 		if s.Id != id {
 			JSONResponse(w, models.Response{Success: false, Message: "/:id and /:sms_id mismatch"}, http.StatusBadRequest)
 			return
+		}
+		if s.TwilioAuthToken == "" {
+			s.TwilioAuthToken = existing.TwilioAuthToken
 		}
 		err = s.Validate()
 		if err != nil {

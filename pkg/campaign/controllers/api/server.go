@@ -19,10 +19,12 @@ type ServerOption func(*Server)
 // stopped. Rather, it's meant to be used as an http.Handler in the
 // AdminServer.
 type Server struct {
-	handler   http.Handler
-	worker    worker.Worker
-	smsworker smsworker.Worker
-	limiter   *ratelimit.PostLimiter
+	handler                 http.Handler
+	worker                  worker.Worker
+	smsworker               smsworker.Worker
+	limiter                 *ratelimit.PostLimiter
+	allowedOrigins          []string
+	allowInsecureSiteImport bool
 }
 
 // NewServer returns a new instance of the API handler with the provided
@@ -63,6 +65,19 @@ func WithLimiter(limiter *ratelimit.PostLimiter) ServerOption {
 	}
 }
 
+// WithAllowedOrigins configures the API CORS allowlist.
+func WithAllowedOrigins(origins []string) ServerOption {
+	return func(as *Server) {
+		as.allowedOrigins = append([]string(nil), origins...)
+	}
+}
+
+// WithInsecureSiteImport allows importing sites with invalid TLS certificates.
+// It should be used only for explicitly authorized lab infrastructure.
+func WithInsecureSiteImport(allowed bool) ServerOption {
+	return func(as *Server) { as.allowInsecureSiteImport = allowed }
+}
+
 // Close releases background resources owned by the API handler.
 func (as *Server) Close() {
 	as.limiter.Close()
@@ -72,7 +87,7 @@ func (as *Server) registerRoutes() {
 	root := mux.NewRouter()
 	root = root.StrictSlash(true)
 	router := root.PathPrefix("/api/").Subrouter()
-	router.Use(mid.RequireAPIKey)
+	router.Use(mid.RequireAPIKeyWithOrigins(as.allowedOrigins))
 	router.Use(mid.EnforceViewOnly)
 	router.HandleFunc("/imap/", as.IMAPServer)
 	router.HandleFunc("/imap/validate", as.IMAPServerValidate)

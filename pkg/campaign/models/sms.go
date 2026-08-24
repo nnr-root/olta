@@ -13,7 +13,7 @@ type SMS struct {
 	UserId           int64     `json:"-" gorm:"column:user_id"`
 	Name             string    `json:"name"`
 	TwilioAccountSid string    `json:"account_sid"`
-	TwilioAuthToken  string    `json:"auth_token"`
+	TwilioAuthToken  string    `json:"auth_token,omitempty"`
 	SMSFrom          string    `json:"sms_from"`
 	ModifiedDate     time.Time `json:"modified_date"`
 }
@@ -46,6 +46,11 @@ func GetSMSs(uid int64) ([]SMS, error) {
 		log.Error(err)
 		return ss, err
 	}
+	for i := range ss {
+		if err = openSMS(&ss[i]); err != nil {
+			return ss, err
+		}
+	}
 
 	return ss, nil
 }
@@ -56,6 +61,9 @@ func GetSMS(id int64, uid int64) (SMS, error) {
 	err := db.Where("user_id=? and id=?", uid, id).Find(&s).Error
 	if err != nil {
 		log.Error(err)
+		return s, err
+	}
+	if err = openSMS(&s); err != nil {
 		return s, err
 	}
 
@@ -70,6 +78,9 @@ func GetSMSByName(n string, uid int64) (SMS, error) {
 		log.Error(err)
 		return s, err
 	}
+	if err = openSMS(&s); err != nil {
+		return s, err
+	}
 	return s, err
 }
 
@@ -81,7 +92,12 @@ func PostSMS(s *SMS) error {
 		return err
 	}
 	// Insert into the DB
-	err = db.Save(s).Error
+	stored, err := storedSMS(*s)
+	if err != nil {
+		return err
+	}
+	err = db.Save(&stored).Error
+	s.Id = stored.Id
 	if err != nil {
 		log.Error(err)
 	}
@@ -97,7 +113,11 @@ func PutSMS(s *SMS) error {
 		log.Error(err)
 		return err
 	}
-	err = db.Where("id=?", s.Id).Save(s).Error
+	stored, err := storedSMS(*s)
+	if err != nil {
+		return err
+	}
+	err = db.Where("id=?", s.Id).Save(&stored).Error
 	if err != nil {
 		log.Error(err)
 	}

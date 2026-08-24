@@ -135,12 +135,27 @@ func TestRequireAPIKey(t *testing.T) {
 func TestCORSHeaders(t *testing.T) {
 	setupTest(t)
 	req := httptest.NewRequest(http.MethodOptions, "/", nil)
+	req.Header.Set("Origin", "https://admin.example")
 	response := httptest.NewRecorder()
-	RequireAPIKey(successHandler).ServeHTTP(response, req)
+	RequireAPIKeyWithOrigins([]string{"https://admin.example"})(successHandler).ServeHTTP(response, req)
 	expected := "POST, GET, OPTIONS, PUT, DELETE"
 	got := response.Result().Header.Get("Access-Control-Allow-Methods")
 	if got != expected {
 		t.Fatalf("incorrect cors options received. expected %s got %s", expected, got)
+	}
+	if got := response.Header().Get("Access-Control-Allow-Origin"); got != "https://admin.example" {
+		t.Fatalf("Access-Control-Allow-Origin = %q", got)
+	}
+}
+
+func TestCORSRejectsUnlistedOrigin(t *testing.T) {
+	setupTest(t)
+	req := httptest.NewRequest(http.MethodOptions, "/", nil)
+	req.Header.Set("Origin", "https://attacker.example")
+	response := httptest.NewRecorder()
+	RequireAPIKeyWithOrigins([]string{"https://admin.example"})(successHandler).ServeHTTP(response, req)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusForbidden)
 	}
 }
 
@@ -174,6 +189,40 @@ func TestBearerToken(t *testing.T) {
 	}
 }
 
+func TestQueryAPIKeyIsRejected(t *testing.T) {
+	testCtx := setupTest(t)
+	req := httptest.NewRequest(http.MethodGet, "/?api_key="+testCtx.apiKey, nil)
+	response := httptest.NewRecorder()
+	RequireAPIKey(successHandler).ServeHTTP(response, req)
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestTrustedProxyHeaders(t *testing.T) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(r.RemoteAddr))
+	})
+
+	trustedRequest := httptest.NewRequest(http.MethodGet, "/", nil)
+	trustedRequest.RemoteAddr = "127.0.0.1:1234"
+	trustedRequest.Header.Set("X-Forwarded-For", "203.0.113.10")
+	trustedResponse := httptest.NewRecorder()
+	TrustedProxyHeaders([]string{"127.0.0.1"}, handler).ServeHTTP(trustedResponse, trustedRequest)
+	if trustedResponse.Body.String() != "203.0.113.10" {
+		t.Fatalf("trusted proxy client = %q", trustedResponse.Body.String())
+	}
+
+	untrustedRequest := httptest.NewRequest(http.MethodGet, "/", nil)
+	untrustedRequest.RemoteAddr = "192.0.2.10:1234"
+	untrustedRequest.Header.Set("X-Forwarded-For", "203.0.113.10")
+	untrustedResponse := httptest.NewRecorder()
+	TrustedProxyHeaders([]string{"127.0.0.1"}, handler).ServeHTTP(untrustedResponse, untrustedRequest)
+	if untrustedResponse.Body.String() != "192.0.2.10:1234" {
+		t.Fatalf("untrusted proxy client = %q", untrustedResponse.Body.String())
+	}
+}
+
 func TestPasswordResetRequired(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req = ctx.Set(req, "user", models.User{
@@ -195,7 +244,9 @@ func TestPasswordResetRequired(t *testing.T) {
 
 func TestApplySecurityHeaders(t *testing.T) {
 	expected := map[string]string{
-		"Content-Security-Policy": "frame-ancestors 'none';",
+		"Content-Security-Policy": "object-src 'none'; base-uri 'self'; frame-ancestors 'none';",
+		"Referrer-Policy":         "no-referrer",
+		"X-Content-Type-Options":  "nosniff",
 		"X-Frame-Options":         "DENY",
 	}
 	req := httptest.NewRequest(http.MethodGet, "/", nil)

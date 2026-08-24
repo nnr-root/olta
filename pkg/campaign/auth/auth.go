@@ -38,7 +38,9 @@ var ErrPasswordTooShort = fmt.Errorf("Password must be at least %d characters", 
 // random bytes
 func GenerateSecureKey(n int) string {
 	k := make([]byte, n)
-	io.ReadFull(rand.Reader, k)
+	if _, err := io.ReadFull(rand.Reader, k); err != nil {
+		panic(fmt.Sprintf("secure random key generation failed: %v", err))
+	}
 	return fmt.Sprintf("%x", k)
 }
 

@@ -66,27 +66,30 @@ func (sw *SmsWorker) Queue(sms []Sms) {
 // sendSms just returns and does not modify those sms's.
 func sendSms(ctx context.Context, sms []Sms) {
 	for _, s := range sms {
-		select {
-		case <-ctx.Done():
+		if ctx.Err() != nil {
 			return
-		default:
-			break
 		}
 		// Generate the message
 		message := &TwilioMessage{}
 		err := s.Generate(message)
 		if err != nil {
 			log.Warn(err)
-			s.Error(err)
+			if callbackErr := s.Error(err); callbackErr != nil {
+				log.Warn(callbackErr)
+			}
 			continue
 		}
 		// Send the message
 		_, err = message.Client.Api.CreateMessage(&message.Params)
 		if err != nil {
 			log.Warn(err)
-			s.Backoff(err)
+			if callbackErr := s.Backoff(err); callbackErr != nil {
+				log.Warn(callbackErr)
+			}
 			continue
 		}
-		s.Success()
+		if callbackErr := s.Success(); callbackErr != nil {
+			log.Warn(callbackErr)
+		}
 	}
 }

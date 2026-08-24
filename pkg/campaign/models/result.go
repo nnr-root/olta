@@ -49,7 +49,7 @@ type FeedEvent struct {
 }
 
 func (r *Result) NotifyEmailSent() error {
-	c, _, err := websocket.DefaultDialer.Dial(feedclient.Endpoint(conf.FeedURL), nil)
+	c, _, err := feedclient.DialPublisher(conf.FeedURL)
 	if err != nil {
 		return err
 	}
@@ -57,7 +57,7 @@ func (r *Result) NotifyEmailSent() error {
 
 	fe := FeedEvent{}
 	fe.Event = "Email Sent"
-	fe.Message = "Email has been sent to victim: <strong>" + r.Email + "</strong>"
+	fe.Message = "Email has been sent to victim: " + r.Email
 	fe.Time = r.ModifiedDate.String()
 	data, _ := json.Marshal(fe)
 
@@ -69,7 +69,7 @@ func (r *Result) NotifyEmailSent() error {
 }
 
 func (r *Result) NotifySMSSent() error {
-	c, _, err := websocket.DefaultDialer.Dial(feedclient.Endpoint(conf.FeedURL), nil)
+	c, _, err := feedclient.DialPublisher(conf.FeedURL)
 	if err != nil {
 		return err
 	}
@@ -77,7 +77,7 @@ func (r *Result) NotifySMSSent() error {
 
 	fe := FeedEvent{}
 	fe.Event = "SMS Sent"
-	fe.Message = "SMS has been sent to victim: <strong>" + r.Email + "</strong>"
+	fe.Message = "SMS has been sent to victim: " + r.Email
 	fe.Time = r.ModifiedDate.String()
 	data, _ := json.Marshal(fe)
 

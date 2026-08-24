@@ -1,41 +1,30 @@
 package feed
 
-import (
-	"github.com/gorilla/websocket"
-)
+import "github.com/gorilla/websocket"
 
 type Client struct {
-	hub *Hub
-
-	// The websocket connection.
+	hub  *Hub
 	conn *websocket.Conn
-
-	// Buffered channel of outbound messages.
 	send chan []byte
 }
 
-// Hub maintains the set of active clients and broadcasts messages to the
-// clients.
+// Hub maintains subscribers and a bounded in-memory replay history.
 type Hub struct {
-	// Registered clients.
-	clients map[*Client]bool
-
-	// Inbound messages from the clients.
-	broadcast chan []byte
-
-	// Register requests from the clients.
-	register chan *Client
-
-	// Unregister requests from clients.
-	unregister chan *Client
+	clients      map[*Client]bool
+	broadcast    chan []byte
+	register     chan *Client
+	unregister   chan *Client
+	history      [][]byte
+	historyLimit int
 }
 
-func newHub() *Hub {
+func newHub(historyLimit int) *Hub {
 	return &Hub{
-		broadcast:  make(chan []byte),
-		register:   make(chan *Client),
-		unregister: make(chan *Client),
-		clients:    make(map[*Client]bool),
+		broadcast:    make(chan []byte),
+		register:     make(chan *Client),
+		unregister:   make(chan *Client),
+		clients:      make(map[*Client]bool),
+		historyLimit: historyLimit,
 	}
 }
 
@@ -44,12 +33,22 @@ func (h *Hub) run() {
 		select {
 		case client := <-h.register:
 			h.clients[client] = true
+			for _, message := range h.history {
+				client.send <- append([]byte(nil), message...)
+			}
 		case client := <-h.unregister:
 			if _, ok := h.clients[client]; ok {
 				delete(h.clients, client)
 				close(client.send)
 			}
 		case message := <-h.broadcast:
+			if h.historyLimit > 0 {
+				h.history = append(h.history, append([]byte(nil), message...))
+				if len(h.history) > h.historyLimit {
+					copy(h.history, h.history[len(h.history)-h.historyLimit:])
+					h.history = h.history[:h.historyLimit]
+				}
+			}
 			for client := range h.clients {
 				select {
 				case client.send <- message:

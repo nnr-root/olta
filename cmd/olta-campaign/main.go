@@ -119,7 +119,9 @@ func main() {
 
 	// Configure our various upstream clients to make sure that we restrict
 	// outbound connections as needed.
-	dialer.SetAllowedHosts(conf.AdminConf.AllowedInternalHosts)
+	if err := dialer.SetAllowedHosts(conf.AdminConf.AllowedInternalHosts); err != nil {
+		log.Fatal(err)
+	}
 	webhook.SetTransport(&http.Transport{
 		DialContext: dialer.Dialer().DialContext,
 	})
@@ -134,6 +136,9 @@ func main() {
 	err = models.Setup(conf)
 	if err != nil {
 		log.Fatal(err)
+	}
+	if !middleware.ConfigureStoreFromMasterKey() {
+		log.Warn("session cookies use process-local keys; configure OLTA_MASTER_KEY for restart-safe sessions")
 	}
 
 	// Unlock any maillogs that may have been locked for processing

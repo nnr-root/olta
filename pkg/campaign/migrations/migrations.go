@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-const CurrentVersion = 4
+const CurrentVersion = 5
 
 //go:embed sqlite/001_initial_olta_schema.sql
 var sqliteSchema string
@@ -34,8 +34,14 @@ var sqliteRecipientLanguage string
 //go:embed mysql/004_recipient_language.sql
 var mysqlRecipientLanguage string
 
+//go:embed sqlite/005_secret_storage.sql
+var sqliteSecretStorage string
+
+//go:embed mysql/005_secret_storage.sql
+var mysqlSecretStorage string
+
 var requiredSchema = map[string][]string{
-	"users":                      {"id", "username", "hash", "api_key", "role_id", "password_change_required", "account_locked", "last_login"},
+	"users":                      {"id", "username", "hash", "api_key", "api_key_hash", "role_id", "password_change_required", "account_locked", "last_login"},
 	"templates":                  {"id", "user_id", "name", "envelope_sender", "subject", "text", "html", "modified_date"},
 	"attachments":                {"id", "template_id", "content", "type", "name"},
 	"targets":                    {"id", "first_name", "last_name", "email", "position", "department", "role", "company", "manager_name", "language"},
@@ -141,6 +147,10 @@ func migrationFor(dialect string, version int) (string, error) {
 		return sqliteRecipientLanguage, nil
 	case dialect == "mysql" && version == 4:
 		return mysqlRecipientLanguage, nil
+	case dialect == "sqlite3" && version == 5:
+		return sqliteSecretStorage, nil
+	case dialect == "mysql" && version == 5:
+		return mysqlSecretStorage, nil
 	case dialect != "sqlite3" && dialect != "mysql":
 		return "", fmt.Errorf("unsupported database dialect %q", dialect)
 	default:
@@ -159,7 +169,8 @@ func legacyRequiredSchema() map[string][]string {
 			if (table == "campaigns" && (column == "min_send_delay" || column == "max_send_delay")) ||
 				(table == "results" && column == "template_variant_id") ||
 				((table == "targets" || table == "results" || table == "email_requests") &&
-					(column == "department" || column == "role" || column == "company" || column == "manager_name" || column == "language")) {
+					(column == "department" || column == "role" || column == "company" || column == "manager_name" || column == "language")) ||
+				(table == "users" && column == "api_key_hash") {
 				continue
 			}
 			filtered = append(filtered, column)
@@ -228,7 +239,9 @@ func validateAgainst(db *sql.DB, schema map[string][]string) error {
 		if err != nil {
 			return fmt.Errorf("required table %s is missing or incomplete: %w", table, err)
 		}
-		rows.Close()
+		if err := rows.Close(); err != nil {
+			return fmt.Errorf("close schema validation rows for %s: %w", table, err)
+		}
 	}
 	return nil
 }

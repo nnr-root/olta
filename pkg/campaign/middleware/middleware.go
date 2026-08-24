@@ -3,10 +3,12 @@ package middleware
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"strings"
 
 	"github.com/gorilla/csrf"
+	"github.com/gorilla/handlers"
 	ctx "github.com/s4l1hs/olta/pkg/campaign/context"
 	"github.com/s4l1hs/olta/pkg/campaign/models"
 )
@@ -71,41 +73,91 @@ func GetContext(handler http.Handler) http.HandlerFunc {
 	}
 }
 
-// RequireAPIKey ensures that a valid API key is set as either the api_key GET
-// parameter, or a Bearer token.
+// RequireAPIKey ensures that a valid API key is supplied as a Bearer token.
 func RequireAPIKey(handler http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		if r.Method == "OPTIONS" {
-			w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS, PUT, DELETE")
-			w.Header().Set("Access-Control-Max-Age", "1000")
-			w.Header().Set("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept")
-			return
+	return RequireAPIKeyWithOrigins(nil)(handler)
+}
+
+// RequireAPIKeyWithOrigins creates API-key middleware with an explicit CORS
+// allowlist. An empty allowlist disables cross-origin API access.
+func RequireAPIKeyWithOrigins(allowedOrigins []string) func(http.Handler) http.Handler {
+	return func(handler http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			origin := r.Header.Get("Origin")
+			if origin != "" {
+				if !originInList(origin, allowedOrigins) {
+					JSONError(w, http.StatusForbidden, "Origin not allowed")
+					return
+				}
+				w.Header().Set("Access-Control-Allow-Origin", origin)
+				w.Header().Add("Vary", "Origin")
+			}
+			if r.Method == "OPTIONS" {
+				w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS, PUT, DELETE")
+				w.Header().Set("Access-Control-Max-Age", "1000")
+				w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+			parts := strings.Fields(r.Header.Get("Authorization"))
+			if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
+				JSONError(w, http.StatusUnauthorized, "Bearer API key not set")
+				return
+			}
+			ak := parts[1]
+			u, err := models.GetUserByAPIKey(ak)
+			if err != nil {
+				JSONError(w, http.StatusUnauthorized, "Invalid API Key")
+				return
+			}
+			r = ctx.Set(r, "user", u)
+			r = ctx.Set(r, "user_id", u.Id)
+			r = ctx.Set(r, "api_key", ak)
+			handler.ServeHTTP(w, r)
+		})
+	}
+}
+
+func originInList(origin string, allowed []string) bool {
+	normalized := strings.TrimSuffix(strings.TrimSpace(origin), "/")
+	for _, candidate := range allowed {
+		if strings.EqualFold(normalized, strings.TrimSuffix(strings.TrimSpace(candidate), "/")) {
+			return true
 		}
-		r.ParseForm()
-		ak := r.Form.Get("api_key")
-		// If we can't get the API key, we'll also check for the
-		// Authorization Bearer token
-		if ak == "" {
-			tokens, ok := r.Header["Authorization"]
-			if ok && len(tokens) >= 1 {
-				ak = tokens[0]
-				ak = strings.TrimPrefix(ak, "Bearer ")
+	}
+	return false
+}
+
+// TrustedProxyHeaders honors forwarding headers only when the direct peer is
+// in the configured IP/CIDR allowlist.
+func TrustedProxyHeaders(trusted []string, next http.Handler) http.Handler {
+	trustedNetworks := make([]*net.IPNet, 0, len(trusted))
+	for _, value := range trusted {
+		if ip := net.ParseIP(value); ip != nil {
+			bits := 128
+			if ip.To4() != nil {
+				bits = 32
+			}
+			trustedNetworks = append(trustedNetworks, &net.IPNet{IP: ip, Mask: net.CIDRMask(bits, bits)})
+			continue
+		}
+		if _, network, err := net.ParseCIDR(value); err == nil {
+			trustedNetworks = append(trustedNetworks, network)
+		}
+	}
+	proxyHandler := handlers.ProxyHeaders(next)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		host, _, err := net.SplitHostPort(r.RemoteAddr)
+		if err == nil {
+			ip := net.ParseIP(host)
+			for _, network := range trustedNetworks {
+				if network.Contains(ip) {
+					proxyHandler.ServeHTTP(w, r)
+					return
+				}
 			}
 		}
-		if ak == "" {
-			JSONError(w, http.StatusUnauthorized, "API Key not set")
-			return
-		}
-		u, err := models.GetUserByAPIKey(ak)
-		if err != nil {
-			JSONError(w, http.StatusUnauthorized, "Invalid API Key")
-			return
-		}
-		r = ctx.Set(r, "user", u)
-		r = ctx.Set(r, "user_id", u.Id)
-		r = ctx.Set(r, "api_key", ak)
-		handler.ServeHTTP(w, r)
+		next.ServeHTTP(w, r)
 	})
 }
 
@@ -180,8 +232,10 @@ func RequirePermission(perm string) func(http.Handler) http.HandlerFunc {
 // practices.
 func ApplySecurityHeaders(next http.Handler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		csp := "frame-ancestors 'none';"
+		csp := "object-src 'none'; base-uri 'self'; frame-ancestors 'none';"
 		w.Header().Set("Content-Security-Policy", csp)
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
 		next.ServeHTTP(w, r)
 	}

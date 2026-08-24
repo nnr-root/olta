@@ -135,7 +135,9 @@ func checkForNewEmails(im models.IMAP) {
 		return
 	}
 	// Update last_succesful_login here via im.Host
-	err = models.SuccessfulLogin(&im)
+	if err = models.SuccessfulLogin(&im); err != nil {
+		log.Error(err)
+	}
 
 	if len(msgs) > 0 {
 		log.Debugf("%d new emails for %s", len(msgs), im.Username)

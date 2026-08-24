@@ -134,6 +134,9 @@ func GetSMTPs(uid int64) ([]SMTP, error) {
 		return ss, err
 	}
 	for i := range ss {
+		if err = openSMTP(&ss[i]); err != nil {
+			return ss, err
+		}
 		err = db.Where("smtp_id=?", ss[i].Id).Find(&ss[i].Headers).Error
 		if err != nil && err != gorm.ErrRecordNotFound {
 			log.Error(err)
@@ -149,6 +152,9 @@ func GetSMTP(id int64, uid int64) (SMTP, error) {
 	err := db.Where("user_id=? and id=?", uid, id).Find(&s).Error
 	if err != nil {
 		log.Error(err)
+		return s, err
+	}
+	if err = openSMTP(&s); err != nil {
 		return s, err
 	}
 	err = db.Where("smtp_id=?", s.Id).Find(&s.Headers).Error
@@ -167,6 +173,9 @@ func GetSMTPByName(n string, uid int64) (SMTP, error) {
 		log.Error(err)
 		return s, err
 	}
+	if err = openSMTP(&s); err != nil {
+		return s, err
+	}
 	err = db.Where("smtp_id=?", s.Id).Find(&s.Headers).Error
 	if err != nil && err != gorm.ErrRecordNotFound {
 		log.Error(err)
@@ -182,7 +191,12 @@ func PostSMTP(s *SMTP) error {
 		return err
 	}
 	// Insert into the DB
-	err = db.Save(s).Error
+	stored, err := storedSMTP(*s)
+	if err != nil {
+		return err
+	}
+	err = db.Save(&stored).Error
+	s.Id = stored.Id
 	if err != nil {
 		log.Error(err)
 	}
@@ -206,7 +220,11 @@ func PutSMTP(s *SMTP) error {
 		log.Error(err)
 		return err
 	}
-	err = db.Where("id=?", s.Id).Save(s).Error
+	stored, err := storedSMTP(*s)
+	if err != nil {
+		return err
+	}
+	err = db.Where("id=?", s.Id).Save(&stored).Error
 	if err != nil {
 		log.Error(err)
 	}

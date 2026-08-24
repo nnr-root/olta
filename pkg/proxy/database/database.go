@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/s4l1hs/olta/pkg/campaign/secrets"
 	"github.com/tidwall/buntdb"
 )
 
@@ -52,6 +53,9 @@ type rateWindow struct {
 }
 
 func NewDatabase(path string) (*Database, error) {
+	if _, err := secrets.ConfigureFromEnvironment(); err != nil {
+		return nil, err
+	}
 	db, err := buntdb.Open(path)
 	if err != nil {
 		return nil, err
@@ -83,6 +87,12 @@ func NewDatabase(path string) (*Database, error) {
 	if err := d.loadSessions(); err != nil {
 		db.Close()
 		return nil, err
+	}
+	if secrets.Enabled() {
+		if err := d.protectPersistedSessions(); err != nil {
+			_ = db.Close()
+			return nil, err
+		}
 	}
 	if err := d.loadRateWindows(); err != nil {
 		db.Close()
@@ -329,6 +339,10 @@ func (d *Database) loadRateWindows() error {
 func sessionKey(id int) string { return fmt.Sprintf("%s:%d", SessionTable, id) }
 
 func marshalSession(s *Session) (string, error) {
-	data, err := json.Marshal(s)
+	stored, err := storedSession(s)
+	if err != nil {
+		return "", err
+	}
+	data, err := json.Marshal(stored)
 	return string(data), err
 }

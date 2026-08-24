@@ -78,6 +78,7 @@ func TestApplyRejectsIncompleteLegacySchema(t *testing.T) {
 func TestApplyMigratesVersionOneSQLiteSchema(t *testing.T) {
 	db := openSQLiteTestDatabase(t)
 	legacySchema := schemaWithoutRecipientPersonalization(sqliteSchema)
+	legacySchema = schemaWithoutSecretStorage(legacySchema)
 	legacySchema = strings.Replace(legacySchema, ",\n    min_send_delay BIGINT NOT NULL DEFAULT 0,\n    max_send_delay BIGINT NOT NULL DEFAULT 0", "", 1)
 	legacySchema = strings.Replace(legacySchema, ",\n    template_variant_id BIGINT NOT NULL DEFAULT 0", "", 1)
 	variantTableStart := strings.Index(legacySchema, "CREATE TABLE IF NOT EXISTS campaign_template_variants")
@@ -139,6 +140,7 @@ func TestApplyMigratesVersionOneSQLiteSchema(t *testing.T) {
 func TestApplyMigratesVersionTwoSQLiteSchema(t *testing.T) {
 	db := openSQLiteTestDatabase(t)
 	versionTwoSchema := schemaWithoutRecipientPersonalization(sqliteSchema)
+	versionTwoSchema = schemaWithoutSecretStorage(versionTwoSchema)
 	if err := executeSchema(db, versionTwoSchema); err != nil {
 		t.Fatalf("apply version two fixture: %v", err)
 	}
@@ -170,6 +172,7 @@ func TestApplyMigratesVersionTwoSQLiteSchema(t *testing.T) {
 func TestApplyMigratesVersionThreeSQLiteSchema(t *testing.T) {
 	db := openSQLiteTestDatabase(t)
 	versionThreeSchema := strings.ReplaceAll(sqliteSchema, ",\n    language VARCHAR(32)", "")
+	versionThreeSchema = schemaWithoutSecretStorage(versionThreeSchema)
 	if err := executeSchema(db, versionThreeSchema); err != nil {
 		t.Fatalf("apply version three fixture: %v", err)
 	}
@@ -204,6 +207,39 @@ func TestApplyMigratesVersionThreeSQLiteSchema(t *testing.T) {
 
 func schemaWithoutRecipientPersonalization(schema string) string {
 	return strings.ReplaceAll(schema, ",\n    department VARCHAR(255),\n    role VARCHAR(255),\n    company VARCHAR(255),\n    manager_name VARCHAR(255),\n    language VARCHAR(32)", "")
+}
+
+func schemaWithoutSecretStorage(schema string) string {
+	schema = strings.Replace(schema, "\n    api_key_hash VARCHAR(64),", "", 1)
+	schema = strings.ReplaceAll(schema, "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_api_key_hash ON users(api_key_hash);", "")
+	return schema
+}
+
+func TestApplyMigratesVersionFourSQLiteSchema(t *testing.T) {
+	db := openSQLiteTestDatabase(t)
+	versionFourSchema := schemaWithoutSecretStorage(sqliteSchema)
+	if err := executeSchema(db, versionFourSchema); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureVersionTable(db, "sqlite3"); err != nil {
+		t.Fatal(err)
+	}
+	if err := recordVersion(db, 4); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO users (username, api_key) VALUES ('operator', 'legacy-key')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := Apply(db, "sqlite3"); err != nil {
+		t.Fatal(err)
+	}
+	var hash sql.NullString
+	if err := db.QueryRow(`SELECT api_key_hash FROM users WHERE username='operator'`).Scan(&hash); err != nil {
+		t.Fatal(err)
+	}
+	if hash.Valid {
+		t.Fatalf("migration should leave hash population to the model layer, got %q", hash.String)
+	}
 }
 
 func TestUnifiedSchemasContainAllRequiredTables(t *testing.T) {

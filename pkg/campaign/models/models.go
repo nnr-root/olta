@@ -1,9 +1,6 @@
 package models
 
 import (
-	"crypto/rand"
-	"fmt"
-	"io"
 	"os"
 	"time"
 
@@ -11,6 +8,7 @@ import (
 	"github.com/s4l1hs/olta/pkg/campaign/config"
 	campaigndb "github.com/s4l1hs/olta/pkg/campaign/database"
 	"github.com/s4l1hs/olta/pkg/campaign/migrations"
+	"github.com/s4l1hs/olta/pkg/campaign/secrets"
 
 	"github.com/jinzhu/gorm"
 	log "github.com/s4l1hs/olta/pkg/campaign/logger"
@@ -70,13 +68,6 @@ type Response struct {
 	Data    interface{} `json:"data"`
 }
 
-// Copy of auth.GenerateSecureKey to prevent cyclic import with auth library
-func generateSecureKey() string {
-	k := make([]byte, 32)
-	io.ReadFull(rand.Reader, k)
-	return fmt.Sprintf("%x", k)
-}
-
 func createTemporaryPassword(u *User) error {
 	var temporaryPassword string
 	if envPassword := os.Getenv(InitialAdminPassword); envPassword != "" {
@@ -94,7 +85,7 @@ func createTemporaryPassword(u *User) error {
 	// Anytime a temporary password is created, we will force the user
 	// to change their password
 	u.PasswordChangeRequired = true
-	err = db.Save(u).Error
+	err = PutUser(u)
 	if err != nil {
 		return err
 	}
@@ -110,6 +101,10 @@ func createTemporaryPassword(u *User) error {
 // Once the database is up-to-date, we create an admin user (if needed) that
 // has a randomly generated API key and password.
 func Setup(c *config.Config) error {
+	encryptionEnabled, err := secrets.ConfigureFromEnvironment()
+	if err != nil {
+		return err
+	}
 	// Setup the package-scoped config
 	conf = c
 	conf.ApplyDatabaseDefaults()
@@ -148,6 +143,12 @@ func Setup(c *config.Config) error {
 		log.Error(err)
 		return err
 	}
+	if err := protectStoredSecrets(); err != nil {
+		return err
+	}
+	if !encryptionEnabled && conf.DBPath != ":memory:" {
+		log.Warn("OLTA_MASTER_KEY is not configured; operational secrets will remain plaintext at rest")
+	}
 	// Create the admin user if it doesn't exist
 	var userCount int64
 	var adminUser User
@@ -171,7 +172,7 @@ func Setup(c *config.Config) error {
 			adminUser.ApiKey = auth.GenerateSecureKey(auth.APIKeyLength)
 		}
 
-		err = db.Save(&adminUser).Error
+		err = PutUser(&adminUser)
 		if err != nil {
 			log.Error(err)
 			return err
