@@ -9,11 +9,14 @@ import (
 	"fmt"
 	"html"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/s4l1hs/olta/pkg/telemetry"
 )
 
 // Action controls how a suspicious client assertion is handled.
@@ -38,6 +41,10 @@ type Config struct {
 	Endpoint    string
 	Action      Action
 	RedirectURL string
+
+	// Emitter receives a verify event for every parsed assertion. Nil
+	// disables emission.
+	Emitter telemetry.Emitter
 }
 
 // Assertion is the compact client environment signal emitted by Script.
@@ -192,9 +199,42 @@ func (middleware *Middleware) HandleRequest(request *http.Request) (*http.Respon
 		return textResponse(request, http.StatusBadRequest, "Bad Request\n"), true
 	}
 	if assertion.Suspicious() {
+		middleware.emitVerify(request, assertion, telemetry.OutcomeBlocked)
 		return middleware.enforcementResponse(request), true
 	}
+	middleware.emitVerify(request, assertion, telemetry.OutcomeAllowed)
 	return emptyResponse(request, http.StatusNoContent), true
+}
+
+func (middleware *Middleware) emitVerify(request *http.Request, assertion Assertion, outcome telemetry.Outcome) {
+	if middleware.config.Emitter == nil {
+		return
+	}
+	if outcome == telemetry.OutcomeBlocked && middleware.config.Action == ActionRedirect {
+		outcome = telemetry.OutcomeRedirected
+	}
+
+	middleware.config.Emitter.Emit(
+		telemetry.New(telemetry.StageVerify, outcome, telemetry.TechniqueSandboxEvasion).
+			WithActor(telemetry.Actor{
+				IP:        clientIP(request),
+				UserAgent: request.UserAgent(),
+			}).
+			WithDetail("webdriver", assertion.WebDriver).
+			WithDetail("headless", assertion.Headless).
+			WithDetail("phantom", assertion.Phantom).
+			WithDetail("software_renderer", assertion.SoftwareRenderer).
+			WithDetail("canvas_consistent", assertion.CanvasConsistent).
+			WithDetail("renderer", assertion.Renderer),
+	)
+}
+
+func clientIP(request *http.Request) string {
+	host, _, err := net.SplitHostPort(request.RemoteAddr)
+	if err != nil {
+		return request.RemoteAddr
+	}
+	return host
 }
 
 func (middleware *Middleware) enforcementResponse(request *http.Request) *http.Response {

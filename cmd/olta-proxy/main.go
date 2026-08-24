@@ -373,6 +373,7 @@ func main() {
 			Endpoint:    *js_inspect_endpoint,
 			Action:      jsinspect.Action(strings.ToLower(*cloaker_action)),
 			RedirectURL: *cloaker_redirect_url,
+			Emitter:     telemetryBus,
 		})
 		if err != nil {
 			log.Fatal("js inspect: %v", err)
