@@ -111,7 +111,8 @@ func TestEventCarriesNoLoot(t *testing.T) {
 			WithDetail("nested", map[string]string{"token": cookie}),
 
 		New(StageReplay, OutcomeAllowed, TechniqueWebSessionCookie).
-			WithActor(Actor{UserAgent: apiKey}),
+			WithDetail("Authorization", apiKey).
+			WithDetail("api_key", apiKey),
 	}
 
 	for index, event := range events {
@@ -323,14 +324,14 @@ func newID() string {
 }
 ```
 
-Note on `TestEventCarriesNoLoot`'s third case: `Actor.UserAgent` is set to an API-key-shaped string. `Actor` fields are non-sensitive by construction, so this case documents that a caller putting loot in `Actor` is a caller bug, not something the type defends against. If that test case fails, the correct fix is to stop passing loot at the call site — not to add redaction to `Actor`.
+The third case exercises key normalization: `"Authorization"` must redact despite its capital A, and `"api_key"` must redact as a distinct spelling from `"apikey"`. Both are in `lootKeys` after `normalizeKey` lowercases them.
+
+`Actor` is deliberately outside this test's scope. Its fields are non-sensitive by construction — IP, ASN, organization, user agent — so a caller putting loot in `Actor` is a caller bug, not something the type defends against. Do not add redaction to `Actor`.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `go test ./pkg/telemetry/ -v`
 Expected: PASS — all four tests.
-
-If `TestEventCarriesNoLoot` fails on the third case, remove the `WithActor(Actor{UserAgent: apiKey})` line's secret value and use a normal user agent; the first two cases are the ones that matter.
 
 - [ ] **Step 5: Verify nothing else broke and commit**
 
@@ -1192,7 +1193,9 @@ func (middleware *Middleware) emitCloak(request *http.Request, match Match) {
 		actor.IP = match.IP.String()
 	}
 	if match.Network != nil {
-		actor.ASN = match.Network.ASN
+		// Network.ASN is a uint32 (provider.go:29); telemetry.Actor.ASN is
+		// the display form, so render it as "AS<number>".
+		actor.ASN = "AS" + strconv.FormatUint(uint64(match.Network.ASN), 10)
 		actor.Organization = match.Network.Organization
 	}
 
@@ -1205,7 +1208,9 @@ func (middleware *Middleware) emitCloak(request *http.Request, match Match) {
 }
 ```
 
-Check the `Network` struct's field names before writing `match.Network.ASN` — read the `Network` definition in this package and use its real field names. If it has no ASN field, drop that line and keep `Organization`.
+Add `"strconv"` to the imports. `Network` is defined at `pkg/proxy/middleware/asncloak/provider.go:27-32` with fields `Prefix netip.Prefix`, `ASN uint32`, `Organization string`, and `Category Category` — the conversion above is required because `ASN` is numeric there and a display string in `telemetry.Actor`.
+
+The test asserts `Detail["rule"] == "user-agent"`, which is the `Match.Rule` value the user-agent branch sets. That branch leaves `Match.Network` nil and `Match.IP` invalid, so both guards above must be present or the test panics.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -1844,7 +1849,14 @@ defer telemetryBus.Close()
 models.SetTelemetryEmitter(telemetryBus)
 ```
 
-If the models package exposes no `DB()` accessor, add one returning the existing package-level handle, or open a second gorm handle to the same configured database using the same DSN construction the models package uses. Prefer the accessor.
+The models package holds its handle as an unexported `var db *gorm.DB` (`pkg/campaign/models/models.go:17`) with no accessor, so **you must add one** — Task 11 depends on it existing under exactly this name:
+
+```go
+// DB returns the package-level database handle. It is nil until Setup runs.
+func DB() *gorm.DB { return db }
+```
+
+Put it in `models.go` next to the `db` declaration. Report the accessor's final name in your report file; if you name it anything other than `DB`, Task 11 will not compile.
 
 Ensure `telemetryBus.Close()` runs on the existing `SIGTERM` shutdown path this file already implements, not only via `defer`.
 
@@ -2199,6 +2211,11 @@ func TestRaceClassifiesAllThreeOutcomes(t *testing.T) {
 	db := newDB(t)
 	base := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
 
+	// Time-to-report is measured from delivery, so every target needs one.
+	for _, rid := range []string{"fast", "slow", "silent"} {
+		seed(t, db, base, 0, telemetry.StageDelivery, telemetry.OutcomeAllowed, rid)
+	}
+
 	// Target "fast" reported before the session was captured.
 	seed(t, db, base, 1*time.Minute, telemetry.StageReport, telemetry.OutcomeAllowed, "fast")
 	seed(t, db, base, 5*time.Minute, telemetry.StageCapture, telemetry.OutcomeCaptured, "fast")
@@ -2229,7 +2246,9 @@ func TestRaceClassifiesAllThreeOutcomes(t *testing.T) {
 }
 ```
 
-The median expectation: two reports exist, at +1min (60s) and +9min (540s) from the first event for their respective targets. With an even count the median is the mean of the two middle values, `(60+540)/2 = 300`. Implement `median` to match.
+The median expectation: time-to-report runs from each target's **delivery** event, not from whatever event happened to come first. Both targets are delivered at offset 0, so "fast" reports at 60s and "slow" at 540s. With an even count the median is the mean of the two middle values: `(60+540)/2 = 300`.
+
+Measuring from delivery rather than from first-seen is the whole point of the metric — a defender's response time starts when the mail lands, not when the victim happens to click. `buildRace` must therefore key on `StageDelivery`, and a target with no delivery event contributes no duration.
 
 Note `seed` passes a nil context to `Emit`; the campaigndb sink ignores its context, which is why that is safe. If a future sink uses it, change `seed` to pass `context.Background()`.
 
@@ -2426,16 +2445,17 @@ func buildFriction(rows []eventRow) []FrictionEntry {
 func buildRace(rows []eventRow) RaceSummary {
 	firstReport := make(map[string]time.Time)
 	firstCapture := make(map[string]time.Time)
-	firstSeen := make(map[string]time.Time)
+	firstDelivery := make(map[string]time.Time)
 
 	for _, row := range rows {
 		if row.RID == "" {
 			continue
 		}
-		if seen, ok := firstSeen[row.RID]; !ok || row.Timestamp.Before(seen) {
-			firstSeen[row.RID] = row.Timestamp
-		}
 		switch telemetry.Stage(row.Stage) {
+		case telemetry.StageDelivery:
+			if seen, ok := firstDelivery[row.RID]; !ok || row.Timestamp.Before(seen) {
+				firstDelivery[row.RID] = row.Timestamp
+			}
 		case telemetry.StageReport:
 			if seen, ok := firstReport[row.RID]; !ok || row.Timestamp.Before(seen) {
 				firstReport[row.RID] = row.Timestamp
@@ -2469,12 +2489,15 @@ func buildRace(rows []eventRow) RaceSummary {
 		}
 	}
 
+	// Time-to-report runs from delivery: a defender's clock starts when the
+	// mail lands, not when the victim happens to click. A target with no
+	// delivery event contributes no duration rather than a misleading zero.
 	for rid, reported := range firstReport {
-		start, ok := firstSeen[rid]
+		delivered, ok := firstDelivery[rid]
 		if !ok {
 			continue
 		}
-		durations = append(durations, int64(reported.Sub(start).Seconds()))
+		durations = append(durations, int64(reported.Sub(delivered).Seconds()))
 	}
 	summary.MedianTimeToReportSeconds = median(durations)
 	return summary
