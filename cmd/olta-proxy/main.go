@@ -258,6 +258,7 @@ func main() {
 			log.Error("telemetry bus shutdown: %v", err)
 		}
 	}()
+	campaignEvents.SetEmitter(telemetryBus)
 
 	bl, err := core.NewBlacklist(filepath.Join(*cfg_dir, "blacklist.txt"), db)
 	if err != nil {

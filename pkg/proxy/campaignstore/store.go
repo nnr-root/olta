@@ -12,10 +12,11 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/jinzhu/gorm"
 	_ "github.com/mattn/go-sqlite3"
+	"github.com/s4l1hs/olta/pkg/campaign/secrets"
 	feedclient "github.com/s4l1hs/olta/pkg/feed/client"
 	"github.com/s4l1hs/olta/pkg/proxy/database"
 	sqlitedsn "github.com/s4l1hs/olta/pkg/storage/sqlite"
-	"github.com/s4l1hs/olta/pkg/campaign/secrets"
+	"github.com/s4l1hs/olta/pkg/telemetry"
 )
 
 type BaseRecipient struct {
@@ -66,6 +67,7 @@ type Store struct {
 	db           *gorm.DB
 	feedEnabled  bool
 	feedEndpoint string
+	emitter      telemetry.Emitter
 
 	mu        sync.Mutex
 	ready     *sync.Cond
@@ -94,6 +96,57 @@ func New(path, feedEndpoint string, feedEnabled bool) (*Store, error) {
 	store.ready = sync.NewCond(&store.mu)
 	go store.run()
 	return store, nil
+}
+
+// SetEmitter attaches a telemetry emitter. It must be called before the
+// store begins handling requests. A nil emitter disables emission.
+func (s *Store) SetEmitter(emitter telemetry.Emitter) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.emitter = emitter
+}
+
+// stageForStatus maps a campaign result status to its telemetry stage. The
+// delivery stage is deliberately absent: the campaign service owns it,
+// because the proxy never sees an email being sent.
+func stageForStatus(status string) (telemetry.Stage, telemetry.Outcome, telemetry.Technique, bool) {
+	switch status {
+	case "Email/SMS Opened":
+		return telemetry.StageOpen, telemetry.OutcomeAllowed, telemetry.TechniqueSpearphishingLink, true
+	case "Clicked Link":
+		return telemetry.StageLure, telemetry.OutcomeAllowed, telemetry.TechniqueSpearphishingLink, true
+	case "Submitted Data":
+		return telemetry.StageCredential, telemetry.OutcomeCaptured, telemetry.TechniqueWebPortalCapture, true
+	case "Captured Session":
+		return telemetry.StageCapture, telemetry.OutcomeCaptured, telemetry.TechniqueStealWebSessionCookie, true
+	default:
+		return "", "", "", false
+	}
+}
+
+func (s *Store) emitStage(result Result, status string, browser map[string]string) {
+	s.mu.Lock()
+	emitter := s.emitter
+	s.mu.Unlock()
+	if emitter == nil {
+		return
+	}
+
+	stage, outcome, technique, ok := stageForStatus(status)
+	if !ok {
+		return
+	}
+
+	// Only non-sensitive browser attributes cross into telemetry. The full
+	// browser map and the captured payload stay in the encrypted events row.
+	emitter.Emit(
+		telemetry.New(stage, outcome, technique).
+			WithCampaign(result.CampaignId, result.RId).
+			WithActor(telemetry.Actor{
+				IP:        result.IP,
+				UserAgent: browser["user-agent"],
+			}),
+	)
 }
 
 func (s *Store) enqueue(event queuedEvent) error {
@@ -238,6 +291,7 @@ func (s *Store) updateResult(rid, status string, browser map[string]string, payl
 	}
 	result.IP = "127.0.0.1"
 	result.ModifiedDate = event.Time
+	s.emitStage(result, status, browser)
 	if notification != nil && s.feedEnabled {
 		if err := notification(result); err != nil {
 			return err
