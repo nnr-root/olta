@@ -89,6 +89,17 @@ func (r *Result) NotifySMSSent() error {
 	return err
 }
 
+// medium reports which channel delivered the lure, so telemetry can carry it
+// as detail. SMS reuses the email spearphishing-link technique (Enterprise
+// ATT&CK has no smishing sub-technique), so this is the only place the two
+// channels are told apart.
+func medium(smsTarget bool) string {
+	if smsTarget {
+		return "sms"
+	}
+	return "email"
+}
+
 func (r *Result) createEvent(status string, details interface{}) (*Event, error) {
 	e := &Event{Email: r.Email, Message: status}
 	if details != nil {
@@ -121,7 +132,8 @@ func (r *Result) HandleSMSSent() error {
 
 	EmitTelemetry(
 		telemetry.New(telemetry.StageDelivery, telemetry.OutcomeAllowed, telemetry.TechniqueSpearphishingLink).
-			WithCampaign(r.CampaignId, r.RId),
+			WithCampaign(r.CampaignId, r.RId).
+			WithDetail("medium", medium(r.SMSTarget)),
 	)
 
 	return db.Save(r).Error
@@ -148,7 +160,8 @@ func (r *Result) HandleEmailSent() error {
 
 	EmitTelemetry(
 		telemetry.New(telemetry.StageDelivery, telemetry.OutcomeAllowed, telemetry.TechniqueSpearphishingLink).
-			WithCampaign(r.CampaignId, r.RId),
+			WithCampaign(r.CampaignId, r.RId).
+			WithDetail("medium", medium(r.SMSTarget)),
 	)
 
 	return db.Save(r).Error
@@ -189,7 +202,8 @@ func (r *Result) HandleEmailOpened(details EventDetails) error {
 	EmitTelemetry(
 		telemetry.New(telemetry.StageOpen, telemetry.OutcomeAllowed, telemetry.TechniqueSpearphishingLink).
 			WithCampaign(r.CampaignId, r.RId).
-			WithActor(telemetry.Actor{IP: r.IP}),
+			WithActor(telemetry.Actor{IP: r.IP}).
+			WithDetail("medium", medium(r.SMSTarget)),
 	)
 	// Don't update the status if the user already clicked the link
 	// or submitted data to the campaign
@@ -209,7 +223,8 @@ func (r *Result) HandleSMSOpened(details EventDetails) error {
 	EmitTelemetry(
 		telemetry.New(telemetry.StageOpen, telemetry.OutcomeAllowed, telemetry.TechniqueSpearphishingLink).
 			WithCampaign(r.CampaignId, r.RId).
-			WithActor(telemetry.Actor{IP: r.IP}),
+			WithActor(telemetry.Actor{IP: r.IP}).
+			WithDetail("medium", medium(r.SMSTarget)),
 	)
 	// Don't update the status if the user already clicked the link
 	// or submitted data to the campaign

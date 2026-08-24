@@ -163,6 +163,66 @@ func (s *ModelsSuite) TestHandleEmailOpenedEmitsOpenTelemetry(ch *check.C) {
 	ch.Assert(events[0].Actor.IP, check.Equals, "203.0.113.9")
 }
 
+func (s *ModelsSuite) TestHandleEmailSentEmitsEmailMedium(ch *check.C) {
+	emitter := &captureEmitter{}
+	SetTelemetryEmitter(emitter)
+	defer SetTelemetryEmitter(nil)
+
+	r := &Result{CampaignId: 1, RId: "telemetry-medium-email-sent", BaseRecipient: BaseRecipient{Email: "victim@example.com"}}
+	ch.Assert(db.Save(r).Error, check.Equals, nil)
+
+	ch.Assert(r.HandleEmailSent(), check.Equals, nil)
+
+	events := emitter.all()
+	ch.Assert(len(events), check.Equals, 1)
+	ch.Assert(events[0].Detail["medium"], check.Equals, "email")
+}
+
+func (s *ModelsSuite) TestHandleSMSSentEmitsSMSMedium(ch *check.C) {
+	emitter := &captureEmitter{}
+	SetTelemetryEmitter(emitter)
+	defer SetTelemetryEmitter(nil)
+
+	r := &Result{CampaignId: 1, RId: "telemetry-medium-sms-sent", BaseRecipient: BaseRecipient{Email: "victim@example.com"}}
+	ch.Assert(db.Save(r).Error, check.Equals, nil)
+
+	ch.Assert(r.HandleSMSSent(), check.Equals, nil)
+
+	events := emitter.all()
+	ch.Assert(len(events), check.Equals, 1)
+	ch.Assert(events[0].Detail["medium"], check.Equals, "sms")
+}
+
+func (s *ModelsSuite) TestHandleEmailOpenedEmitsEmailMedium(ch *check.C) {
+	emitter := &captureEmitter{}
+	SetTelemetryEmitter(emitter)
+	defer SetTelemetryEmitter(nil)
+
+	r := &Result{CampaignId: 1, RId: "telemetry-medium-email-opened", BaseRecipient: BaseRecipient{Email: "victim@example.com"}, SMSTarget: false}
+	ch.Assert(db.Save(r).Error, check.Equals, nil)
+
+	ch.Assert(r.HandleEmailOpened(EventDetails{}), check.Equals, nil)
+
+	events := emitter.all()
+	ch.Assert(len(events), check.Equals, 1)
+	ch.Assert(events[0].Detail["medium"], check.Equals, "email")
+}
+
+func (s *ModelsSuite) TestHandleSMSOpenedEmitsSMSMedium(ch *check.C) {
+	emitter := &captureEmitter{}
+	SetTelemetryEmitter(emitter)
+	defer SetTelemetryEmitter(nil)
+
+	r := &Result{CampaignId: 1, RId: "telemetry-medium-sms-opened", BaseRecipient: BaseRecipient{Email: "victim@example.com"}, SMSTarget: true}
+	ch.Assert(db.Save(r).Error, check.Equals, nil)
+
+	ch.Assert(r.HandleSMSOpened(EventDetails{}), check.Equals, nil)
+
+	events := emitter.all()
+	ch.Assert(len(events), check.Equals, 1)
+	ch.Assert(events[0].Detail["medium"], check.Equals, "sms")
+}
+
 func (s *ModelsSuite) TestHandleSMSOpenedEmitsOpenTelemetry(ch *check.C) {
 	emitter := &captureEmitter{}
 	SetTelemetryEmitter(emitter)

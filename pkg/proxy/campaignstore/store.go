@@ -139,14 +139,33 @@ func (s *Store) emitStage(result Result, status string, browser map[string]strin
 
 	// Only non-sensitive browser attributes cross into telemetry. The full
 	// browser map and the captured payload stay in the encrypted events row.
-	emitter.Emit(
-		telemetry.New(stage, outcome, technique).
-			WithCampaign(result.CampaignId, result.RId).
-			WithActor(telemetry.Actor{
-				IP:        result.IP,
-				UserAgent: browser["user-agent"],
-			}),
-	)
+	event := telemetry.New(stage, outcome, technique).
+		WithCampaign(result.CampaignId, result.RId).
+		WithActor(telemetry.Actor{
+			IP:        result.IP,
+			UserAgent: browser["user-agent"],
+		})
+
+	// Every stage but capture carries medium, so engagement reports can
+	// separate SMS from email without misusing an ATT&CK technique ID (see
+	// the design doc's smishing note). Capture is excluded deliberately:
+	// it is not in that list.
+	if stage != telemetry.StageCapture {
+		event = event.WithDetail("medium", medium(result.SMSTarget))
+	}
+
+	emitter.Emit(event)
+}
+
+// medium reports which channel delivered the lure, so callers can attach it
+// as telemetry detail. SMS reuses the email spearphishing-link technique
+// (Enterprise ATT&CK has no smishing sub-technique), so this is the only
+// place the two channels are told apart.
+func medium(smsTarget bool) string {
+	if smsTarget {
+		return "sms"
+	}
+	return "email"
 }
 
 func (s *Store) enqueue(event queuedEvent) error {

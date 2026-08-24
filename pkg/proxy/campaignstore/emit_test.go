@@ -125,6 +125,58 @@ func TestUpdateResultEmitsCorrelatedEvent(t *testing.T) {
 	}
 }
 
+// seedSMSResult is seedResult's SMS-targeted counterpart: same fixture, but
+// with sms_target set so emitStage can derive medium == "sms".
+func seedSMSResult(t *testing.T, store *Store, rid string, campaignID int64) {
+	t.Helper()
+	if _, err := store.db.DB().Exec(
+		`INSERT INTO results (campaign_id, r_id, email, status, sms_target) VALUES (?, ?, ?, ?, 1)`,
+		campaignID, rid, "authorized-test@example.com", "Email/SMS Sent",
+	); err != nil {
+		t.Fatalf("seed sms result: %v", err)
+	}
+}
+
+func TestUpdateResultEmitsEmailMedium(t *testing.T) {
+	store := newTestStore(t)
+	emitter := &captureEmitter{}
+	store.SetEmitter(emitter)
+
+	seedResult(t, store, "rid-medium-email", 7)
+
+	if err := store.updateResult("rid-medium-email", "Clicked Link", nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	events := emitter.all()
+	if len(events) != 1 {
+		t.Fatalf("emitted %d events, want 1", len(events))
+	}
+	if got := events[0].Detail["medium"]; got != "email" {
+		t.Fatalf("medium = %v, want %q", got, "email")
+	}
+}
+
+func TestUpdateResultEmitsSMSMedium(t *testing.T) {
+	store := newTestStore(t)
+	emitter := &captureEmitter{}
+	store.SetEmitter(emitter)
+
+	seedSMSResult(t, store, "rid-medium-sms", 7)
+
+	if err := store.updateResult("rid-medium-sms", "Clicked Link", nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	events := emitter.all()
+	if len(events) != 1 {
+		t.Fatalf("emitted %d events, want 1", len(events))
+	}
+	if got := events[0].Detail["medium"]; got != "sms" {
+		t.Fatalf("medium = %v, want %q", got, "sms")
+	}
+}
+
 func TestNilEmitterIsSafe(t *testing.T) {
 	store := newTestStore(t)
 	seedResult(t, store, "rid-43", 7)
