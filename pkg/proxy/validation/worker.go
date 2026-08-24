@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	"github.com/s4l1hs/olta/pkg/telemetry"
 )
 
 var (
@@ -28,8 +30,13 @@ type WorkerConfig struct {
 	DispatchTimeout   time.Duration
 	Validator         Validator
 	Dispatcher        Dispatcher
-	OnResult          func(Result)
-	OnError           func(error)
+	// Emitter, when set, receives one replay-stage telemetry.Event per
+	// validation result. It is independent of Dispatcher: telemetry now
+	// flows through the shared bus rather than a validator-specific
+	// webhook, so any sink on that bus receives it.
+	Emitter  telemetry.Emitter
+	OnResult func(Result)
+	OnError  func(error)
 }
 
 // Worker owns a bounded, non-blocking input queue and a fixed goroutine pool.
@@ -140,6 +147,7 @@ func (worker *Worker) process(event Event) {
 	if worker.config.OnResult != nil {
 		worker.config.OnResult(result)
 	}
+	worker.emitReplay(result)
 	if worker.config.Dispatcher == nil {
 		return
 	}
@@ -178,6 +186,42 @@ func normalizeResult(result Result, event Event) Result {
 		result.Status = StatusUnknown
 	}
 	return result
+}
+
+// replayOutcome maps a validation status to a replay-stage telemetry
+// outcome. There is no boolean validity field on Result to switch on
+// instead — Status is the only signal.
+func replayOutcome(status Status) telemetry.Outcome {
+	switch status {
+	case StatusValid:
+		// The stolen cookie still works: the session survived.
+		return telemetry.OutcomeAllowed
+	case StatusInvalid:
+		// The session was revoked or expired between capture and replay.
+		return telemetry.OutcomeBlocked
+	default:
+		return telemetry.OutcomeFailed
+	}
+}
+
+// emitReplay records one replay-stage event per validation result.
+// SessionReference is already a truncated SHA-256 digest of the session ID
+// (see baseResult in types.go), never the session ID itself, so it is safe
+// to carry. Identity.Username and TenantID are deliberately excluded: they
+// are recipient identity, allowlisted for the webhook payload but not
+// needed by the resilience report.
+func (worker *Worker) emitReplay(result Result) {
+	if worker.config.Emitter == nil {
+		return
+	}
+	worker.config.Emitter.Emit(
+		telemetry.New(telemetry.StageReplay, replayOutcome(result.Status), telemetry.TechniqueWebSessionCookie).
+			WithActor(telemetry.Actor{Organization: result.Identity.Organization}).
+			WithDetail("session_reference", result.SessionReference).
+			WithDetail("phishlet", result.Phishlet).
+			WithDetail("target_host", result.TargetHost).
+			WithDetail("http_status", result.HTTPStatus),
+	)
 }
 
 func (worker *Worker) recordError(err error) {
