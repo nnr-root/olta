@@ -190,6 +190,103 @@ func TestEventCarriesNoLootAcrossValueShapes(t *testing.T) {
 	}
 }
 
+// TestWithDetailRejectsComposites pins the primary defense. Composites are
+// not traversed and sanitized — they are refused outright, because no
+// key-based rule can see inside them. Both cases below defeated an earlier
+// traversal-based implementation.
+func TestWithDetailRejectsComposites(t *testing.T) {
+	const secret = "STRUCT-SECRET-XYZ"
+
+	// A custom marshaller collapses a keyed secret into an unkeyed scalar,
+	// leaving nothing for a key rule to match.
+	marshaller := sneaky{User: "victim", Pass: secret}
+
+	cases := []struct {
+		name  string
+		key   string
+		value any
+	}{
+		{"json.Marshaler", "identity", marshaller},
+		{"pointer to marshaler", "identity_ptr", &marshaller},
+		{"non-string map keys", "codes", map[int]string{1: secret}},
+		{"header", "request_headers", http.Header{"Authorization": {secret}}},
+		{"form", "form", url.Values{"password": {secret}}},
+		{"slice of maps", "fields", []map[string]any{{"password": secret}}},
+		{"nested map", "payload", map[string]any{"token": secret}},
+	}
+
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			event := New(StageCapture, OutcomeCaptured).WithDetail(testCase.key, testCase.value)
+
+			encoded, err := json.Marshal(event)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(encoded), secret) {
+				t.Fatalf("leaked %q into %s", secret, encoded)
+			}
+
+			stored, ok := event.Detail[testCase.key].(string)
+			if !ok || !strings.HasPrefix(stored, "[") {
+				t.Fatalf("composite was not replaced with a marker: %#v", event.Detail[testCase.key])
+			}
+		})
+	}
+}
+
+// sneaky collapses its fields into a bare JSON string with no key, which is
+// how a json.Marshaler defeats key-name redaction.
+type sneaky struct {
+	User string
+	Pass string
+}
+
+func (s sneaky) MarshalJSON() ([]byte, error) {
+	return json.Marshal(s.User + ":" + s.Pass)
+}
+
+// TestWithDetailDoesNotOverRedact guards the other direction. Substring
+// matching redacted "author", "session_count", and "private_ip", silently
+// destroying legitimate telemetry. Token matching must not.
+func TestWithDetailDoesNotOverRedact(t *testing.T) {
+	cases := map[string]any{
+		"author":         "jane-doe",
+		"authorized_by":  "soc-team",
+		"session_count":  42,
+		"session_length": 900,
+		"private_ip":     "10.0.0.4",
+		"tokenizer":      "wordpiece",
+		"signature_algo": "ES256",
+	}
+
+	for key, value := range cases {
+		t.Run(key, func(t *testing.T) {
+			event := New(StageVerify, OutcomeAllowed).WithDetail(key, value)
+			if event.Detail[key] == redacted {
+				t.Fatalf("over-redacted %q, which is not loot", key)
+			}
+		})
+	}
+}
+
+// TestWithDetailRedactsLootKeys pins the backstop across spellings.
+func TestWithDetailRedactsLootKeys(t *testing.T) {
+	for _, key := range []string{
+		"password", "Passwd", "pwd", "secret", "api_key", "apikey",
+		"Authorization", "x_auth_token", "bearer", "otp_code", "mfa",
+		"Set-Cookie", "session_id", "access_token", "refresh_token",
+		"private_key", "signature", "pin",
+	} {
+		t.Run(key, func(t *testing.T) {
+			event := New(StageCredential, OutcomeCaptured).WithDetail(key, "SECRET-VALUE")
+			if event.Detail[key] != redacted {
+				t.Fatalf("%q was not redacted: %v", key, event.Detail[key])
+			}
+		})
+	}
+}
+
 // TestWithDetailDoesNotShareDetailMap pins the copy-on-write contract.
 // Without it, every event derived from a populated base shares one map, and
 // two goroutines extending that base write it concurrently — a fatal runtime
@@ -250,7 +347,6 @@ package telemetry
 import (
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -344,10 +440,24 @@ func (e Event) WithActor(actor Actor) Event {
 	return e
 }
 
-// WithDetail attaches one stage-specific attribute.
+// WithDetail attaches one stage-specific scalar attribute.
 //
-// Callers must never pass captured credentials, cookies, or tokens. Values
-// are redacted on the way in rather than trusted: see redactValue.
+// Only scalars are accepted. Composite values — maps, slices, structs,
+// pointers — are replaced with a type marker, because no key-name check can
+// make them safe:
+//
+//   - A type implementing json.Marshaler can collapse a secret into an
+//     unkeyed JSON scalar, leaving nothing for a key-based rule to match.
+//     A struct{User, Pass string} whose MarshalJSON emits "user:secret"
+//     under the innocuous key "identity" defeats key matching entirely.
+//   - A map with non-string keys marshals to keys like "1", which match no
+//     rule at all.
+//
+// Both were demonstrated against an earlier traversal-based implementation.
+// Rejecting composites removes the traversal, and with it the whole class.
+// Callers destructure instead, which forces a decision about every field
+// that reaches telemetry — exactly the decision this package exists to make
+// deliberate.
 //
 // Detail is a map, so a plain value-receiver copy would share it with every
 // event derived from the same base. Two goroutines extending one populated
@@ -359,86 +469,61 @@ func (e Event) WithDetail(key string, value any) Event {
 	for k, v := range e.Detail {
 		detail[k] = v
 	}
-	detail[key] = redactValue(key, canonical(value))
+	detail[key] = vetDetail(key, value)
 	e.Detail = detail
 	return e
 }
 
-// lootMarkers are substrings that mark a detail key as carrying loot. Keys
-// are matched by substring, not equality: "set_cookie", "session_id", and
-// "x_auth_token" must all redact, and no fixed list of exact spellings
-// survives contact with real callers.
-var lootMarkers = []string{
-	"password", "passwd", "pwd", "secret", "token", "cookie",
-	"credential", "api_key", "apikey", "auth", "bearer",
-	"session", "otp", "mfa", "signature", "private",
-}
-
-const redacted = "[redacted]"
-
-// canonical collapses an arbitrary value into the shapes redactValue can
-// walk: map[string]any, []any, or a scalar.
-//
-// A Go type switch matches only exact dynamic types, so http.Header and
-// url.Values — named types whose underlying type is map[string][]string —
-// never match a map[string][]string case, and a struct carrying a secret in
-// a JSON-tagged field never matches at all. Round-tripping through JSON
-// erases those distinctions: every map becomes map[string]any, every slice
-// and array becomes []any, pointers are dereferenced, structs become maps
-// keyed by their JSON field names, and json.RawMessage is decoded.
-//
-// A value that cannot be marshalled cannot reach the wire either, so it is
-// replaced with a type marker rather than passed through unexamined.
-func canonical(value any) any {
+// vetDetail redacts by key, then admits only scalars.
+func vetDetail(key string, value any) any {
+	if isLootKey(key) {
+		return redacted
+	}
 	switch value.(type) {
 	case nil, string, bool,
 		int, int8, int16, int32, int64,
 		uint, uint8, uint16, uint32, uint64,
 		float32, float64:
 		return value
-	}
-	encoded, err := json.Marshal(value)
-	if err != nil {
-		return fmt.Sprintf("[unencodable %T]", value)
-	}
-	var decoded any
-	if err := json.Unmarshal(encoded, &decoded); err != nil {
-		return fmt.Sprintf("[unencodable %T]", value)
-	}
-	return decoded
-}
-
-// redactValue strips loot by key name, recursing into the canonical shapes
-// so a nested secret cannot ride along inside a composite value under an
-// innocuous outer key.
-func redactValue(key string, value any) any {
-	if isLootKey(key) {
-		return redacted
-	}
-	switch typed := value.(type) {
-	case map[string]any:
-		out := make(map[string]any, len(typed))
-		for k, v := range typed {
-			out[k] = redactValue(k, v)
-		}
-		return out
-	case []any:
-		out := make([]any, len(typed))
-		for i, v := range typed {
-			// Slice elements inherit the enclosing key: a list under
-			// "cookies" is loot even though its indices have no names.
-			out[i] = redactValue(key, v)
-		}
-		return out
 	default:
-		return value
+		return fmt.Sprintf("[unsupported %T]", value)
 	}
 }
 
+// lootTokens match a whole underscore-delimited segment of a key, so
+// "auth_token" and "x_auth" redact while "author" and "authorized_by" do
+// not. Bare substring matching over-redacted exactly that way, silently
+// destroying legitimate telemetry.
+var lootTokens = map[string]bool{
+	"password": true, "passwd": true, "pwd": true, "pass": true,
+	"secret": true, "token": true, "cookie": true, "cookies": true,
+	"credential": true, "credentials": true, "auth": true,
+	"authorization": true, "bearer": true, "otp": true, "mfa": true,
+	"pin": true, "passcode": true, "signature": true,
+}
+
+// lootPhrases match anywhere in the key. These are compounds unambiguous
+// enough that a false positive is not a realistic worry.
+var lootPhrases = []string{
+	"apikey", "api_key", "privatekey", "private_key",
+	"access_token", "refresh_token", "session_id", "set_cookie",
+}
+
+const redacted = "[redacted]"
+
+// isLootKey reports whether a detail key names something that must never be
+// recorded. It is a backstop, not the primary defense: the primary defense
+// is that WithDetail admits only scalars, so there is nothing to traverse
+// and nowhere for a secret to hide.
 func isLootKey(key string) bool {
 	normalized := normalizeKey(key)
-	for _, marker := range lootMarkers {
-		if strings.Contains(normalized, marker) {
+	for _, phrase := range lootPhrases {
+		if strings.Contains(normalized, phrase) {
+			return true
+		}
+	}
+	for _, token := range strings.Split(normalized, "_") {
+		if lootTokens[token] {
 			return true
 		}
 	}
@@ -682,6 +767,8 @@ package telemetry
 
 import (
 	"context"
+	"fmt"
+	"log"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -727,7 +814,12 @@ type Bus struct {
 	once sync.Once
 	wg   sync.WaitGroup
 
+	// dropped counts events the queue had no room for; failed counts events
+	// a sink rejected or timed out on. They are different losses and an
+	// operator needs to tell them apart: dropped means the bus is
+	// undersized, failed means a sink is broken.
 	dropped atomic.Uint64
+	failed  atomic.Uint64
 }
 
 // NewBus starts the drain goroutine. A queueSize below 1 is raised to 1.
@@ -775,6 +867,15 @@ func (b *Bus) Dropped() uint64 {
 	return b.dropped.Load()
 }
 
+// Failed reports how many sink deliveries returned an error or timed out.
+// A non-zero value means the store of record is incomplete.
+func (b *Bus) Failed() uint64 {
+	if b == nil {
+		return 0
+	}
+	return b.failed.Load()
+}
+
 // Close stops accepting events, drains what is queued, and closes every
 // sink. It is idempotent.
 func (b *Bus) Close() error {
@@ -790,7 +891,10 @@ func (b *Bus) Close() error {
 
 		b.wg.Wait()
 		for _, sink := range b.sinks {
-			if closeErr := sink.Close(); closeErr != nil && err == nil {
+			// Bounded for the same reason sink writes are: a Sink.Close
+			// that blocks on a wedged handle would otherwise hang shutdown
+			// after drain had already finished cleanly.
+			if closeErr := closeSink(sink); closeErr != nil && err == nil {
 				err = closeErr
 			}
 		}
@@ -798,14 +902,35 @@ func (b *Bus) Close() error {
 	return err
 }
 
+func closeSink(sink Sink) error {
+	done := make(chan error, 1)
+	go func() { done <- sink.Close() }()
+
+	select {
+	case closeErr := <-done:
+		return closeErr
+	case <-time.After(sinkTimeout):
+		return fmt.Errorf("telemetry: sink close timed out after %s", sinkTimeout)
+	}
+}
+
 // drain delivers each queued event to every sink. Closing the queue does not
 // discard buffered events: range yields all of them before the loop exits,
 // so Close flushes rather than truncates.
+//
+// A sink failure never stops other sinks or the loop, but it is never
+// silent either. The campaign database is the store of record for an
+// engagement; an event disappearing from it with no trace would leave an
+// operator unable to tell an uneventful campaign from a broken pipeline.
 func (b *Bus) drain() {
 	defer b.wg.Done()
 	for event := range b.queue {
 		for _, sink := range b.sinks {
-			emitTo(sink, event)
+			if err := emitTo(sink, event); err != nil {
+				b.failed.Add(1)
+				log.Printf("telemetry: sink %T dropped event %s (stage %s): %v",
+					sink, event.ID, event.Stage, err)
+			}
 		}
 	}
 }
@@ -819,23 +944,27 @@ func (b *Bus) drain() {
 // wg.Wait() forever, hanging graceful shutdown.
 //
 // Running the call on its own goroutine and abandoning it at the deadline
-// costs at most one leaked goroutine per wedged write, and buys a Close that
-// always returns. That is the right trade for a shutdown path.
-func emitTo(sink Sink, event Event) {
+// buys a drain loop, and therefore a Close, that always makes progress.
+//
+// The cost is honest: each abandoned call leaves its goroutine alive until
+// the sink returns, so a chronically wedged sink leaks one goroutine per
+// event for as long as the condition lasts. That is bounded only by how long
+// the process runs in that state, not by any constant. It is the right trade
+// — a leaked goroutine is recoverable, a hung shutdown is not — but it is
+// not a small bounded cost, and a sink that wedges under load is a bug to
+// fix in the sink.
+func emitTo(sink Sink, event Event) error {
 	ctx, cancel := context.WithTimeout(context.Background(), sinkTimeout)
 	defer cancel()
 
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		// A sink failure must not stop other sinks or the drain loop.
-		// Sinks log their own failures.
-		_ = sink.Emit(ctx, event)
-	}()
+	done := make(chan error, 1)
+	go func() { done <- sink.Emit(ctx, event) }()
 
 	select {
-	case <-done:
+	case err := <-done:
+		return err
 	case <-ctx.Done():
+		return fmt.Errorf("telemetry: sink %T timed out after %s", sink, sinkTimeout)
 	}
 }
 ```
@@ -1061,6 +1190,7 @@ package campaigndb
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"path/filepath"
 	"testing"
 
@@ -1112,6 +1242,7 @@ func TestSinkPersistsEvent(t *testing.T) {
 		Techniques string
 		CampaignID int64
 		Actor      string
+		Detail     string
 	}
 	if err := db.Table("telemetry_events").Where("event_id = ?", event.ID).Scan(&row).Error; err != nil {
 		t.Fatal(err)
@@ -1125,8 +1256,41 @@ func TestSinkPersistsEvent(t *testing.T) {
 	if row.CampaignID != 0 {
 		t.Fatalf("CampaignID = %d, want 0 for an unattributed cloak event", row.CampaignID)
 	}
-	if row.Actor == "" {
-		t.Fatal("actor JSON was not persisted")
+
+	// Round-trip both JSON columns. Asserting only non-emptiness would let a
+	// cross-wiring bug — writing detail into the actor column — pass.
+	var actor telemetry.Actor
+	if err := json.Unmarshal([]byte(row.Actor), &actor); err != nil {
+		t.Fatalf("actor column is not valid JSON: %q", row.Actor)
+	}
+	if actor.IP != "203.0.113.9" || actor.ASN != "AS8075" || actor.Organization != "Microsoft" {
+		t.Fatalf("actor round-trip = %+v", actor)
+	}
+
+	var detail map[string]any
+	if err := json.Unmarshal([]byte(row.Detail), &detail); err != nil {
+		t.Fatalf("detail column is not valid JSON: %q", row.Detail)
+	}
+	if detail["rule"] != "network" {
+		t.Fatalf("detail round-trip = %v", detail)
+	}
+}
+
+func TestSinkStoresEmptyDetailAsEmptyString(t *testing.T) {
+	db := newDB(t)
+	sink := New(db)
+
+	event := telemetry.New(telemetry.StageLure, telemetry.OutcomeAllowed)
+	if err := sink.Emit(context.Background(), event); err != nil {
+		t.Fatal(err)
+	}
+
+	var row struct{ Detail string }
+	if err := db.Table("telemetry_events").Where("event_id = ?", event.ID).Scan(&row).Error; err != nil {
+		t.Fatal(err)
+	}
+	if row.Detail != "" {
+		t.Fatalf("Detail = %q, want empty string rather than %q or null", row.Detail, "{}")
 	}
 }
 
