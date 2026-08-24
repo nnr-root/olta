@@ -280,3 +280,21 @@ func TestWithDetailIsRaceSafeFromSharedBase(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+func TestWithDetailAdmitsNamedScalarTypes(t *testing.T) {
+	type kind string
+	type count int
+	event := New(StageVerify, OutcomeAllowed).
+		WithDetail("kind", kind("browser")).
+		WithDetail("count", count(7)).
+		WithDetail("stage_name", StageCloak)
+	if event.Detail["kind"] != "browser" {
+		t.Fatalf("kind = %#v, want the underlying string", event.Detail["kind"])
+	}
+	if event.Detail["count"] != int64(7) {
+		t.Fatalf("count = %#v, want int64(7)", event.Detail["count"])
+	}
+	if event.Detail["stage_name"] != "cloak" {
+		t.Fatalf("stage_name = %#v", event.Detail["stage_name"])
+	}
+}

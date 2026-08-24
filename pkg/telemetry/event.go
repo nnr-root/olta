@@ -3,17 +3,23 @@
 //
 // An Event records that something happened during an engagement: which
 // kill-chain stage, what the outcome was, which ATT&CK technique it
-// emulates, and who the actor was. An Event never carries captured
-// credentials, cookies, or tokens. Captured material stays in the campaign
-// database behind pkg/campaign/secrets. This separation is what makes the
-// stream safe to forward to a defender's SOC, and it is enforced by
-// TestEventCarriesNoLoot.
+// emulates, and who the actor was. Captured material stays in the campaign
+// database behind pkg/campaign/secrets; telemetry records the fact of a
+// capture, never its contents. That separation is what makes the stream
+// safe to forward to a defender's SOC.
+//
+// The precise guarantee: an Event built through WithDetail carries no loot.
+// WithDetail redacts by key and admits only scalars, and the no-loot tests
+// enforce both. Detail is an exported map because sinks must read it, so a
+// caller that assigns to it directly bypasses that vetting — always build
+// detail through WithDetail.
 package telemetry
 
 import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"reflect"
 	"strings"
 	"time"
 )
@@ -141,16 +147,36 @@ func (e Event) WithDetail(key string, value any) Event {
 }
 
 // vetDetail redacts by key, then admits only scalars.
+//
+// Scalars are matched by kind, not by exact type, so a named type such as
+// telemetry.Stage or validation.Status is admitted rather than silently
+// recorded as "[unsupported]". The value is converted to its base type on
+// the way through, which is strictly safer than storing the named type: it
+// also discards any custom MarshalJSON the named type carries, and a custom
+// marshaller collapsing a value into an unkeyed string is precisely how an
+// earlier implementation was defeated.
+//
+// Matching by kind does not reopen that hole. A named string IS a string —
+// there is no interior for a secret to hide in. Only composites had one,
+// and composites are still refused.
 func vetDetail(key string, value any) any {
 	if isLootKey(key) {
 		return redacted
 	}
-	switch value.(type) {
-	case nil, string, bool,
-		int, int8, int16, int32, int64,
-		uint, uint8, uint16, uint32, uint64,
-		float32, float64:
-		return value
+	if value == nil {
+		return nil
+	}
+	switch reflected := reflect.ValueOf(value); reflected.Kind() {
+	case reflect.String:
+		return reflected.String()
+	case reflect.Bool:
+		return reflected.Bool()
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return reflected.Int()
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		return reflected.Uint()
+	case reflect.Float32, reflect.Float64:
+		return reflected.Float()
 	default:
 		return fmt.Sprintf("[unsupported %T]", value)
 	}
