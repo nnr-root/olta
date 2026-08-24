@@ -42,7 +42,10 @@ package telemetry
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/url"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -127,6 +130,99 @@ func TestEventCarriesNoLoot(t *testing.T) {
 		}
 	}
 }
+
+// TestEventCarriesNoLootAcrossValueShapes covers the bypasses a type-switch
+// allowlist misses. Each case is a shape a proxy handler plausibly produces.
+// These are regression tests for real leaks, not hypotheticals.
+func TestEventCarriesNoLootAcrossValueShapes(t *testing.T) {
+	const secret = "AQABAAAAAAD-SUPER-SECRET-VALUE"
+
+	type credentials struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+
+	cases := []struct {
+		name  string
+		key   string
+		value any
+	}{
+		// A named type over map[string][]string. A type switch never matches
+		// a named type against its underlying type, so http.Header was the
+		// original bypass.
+		{"http.Header", "request_headers", http.Header{"Authorization": {secret}}},
+		{"url.Values", "form", url.Values{"password": {secret}}},
+
+		// Underlying map type that is not one of the switch's exact cases.
+		{"map of string slice", "headers", map[string][]string{"cookie": {secret}}},
+
+		// []map[string]any is not []any.
+		{"slice of maps", "fields", []map[string]any{{"password": secret}}},
+
+		// A struct never matched at all.
+		{"struct", "identity", credentials{Username: "victim", Password: secret}},
+		{"pointer to struct", "identity_ptr", &credentials{Password: secret}},
+
+		// Key spellings that exact-equality matching missed.
+		{"hyphenated key", "Set-Cookie", secret},
+		{"suffixed key", "session_id", secret},
+		{"prefixed key", "x_auth_token", secret},
+		{"short spelling", "pwd", secret},
+		{"bearer", "bearer", secret},
+		{"otp", "otp_code", secret},
+
+		// Loot nested under a wholly innocuous outer key.
+		{"innocuous outer key", "payload", map[string]any{"nested": map[string]any{"token": secret}}},
+		{"innocuous outer, struct inner", "context", credentials{Password: secret}},
+	}
+
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			event := New(StageCapture, OutcomeCaptured).WithDetail(testCase.key, testCase.value)
+			encoded, err := json.Marshal(event)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(encoded), secret) {
+				t.Fatalf("leaked %q into %s", secret, encoded)
+			}
+		})
+	}
+}
+
+// TestWithDetailDoesNotShareDetailMap pins the copy-on-write contract.
+// Without it, every event derived from a populated base shares one map, and
+// two goroutines extending that base write it concurrently — a fatal runtime
+// error that kills the process, not a recoverable request failure.
+func TestWithDetailDoesNotShareDetailMap(t *testing.T) {
+	base := New(StageLure, OutcomeAllowed).WithDetail("stage", "lure")
+
+	first := base.WithDetail("branch", "one")
+	second := base.WithDetail("branch", "two")
+
+	if first.Detail["branch"] != "one" || second.Detail["branch"] != "two" {
+		t.Fatalf("branches share a map: first=%v second=%v", first.Detail, second.Detail)
+	}
+	if _, present := base.Detail["branch"]; present {
+		t.Fatalf("base was mutated by a derived event: %v", base.Detail)
+	}
+}
+
+// Run with -race. Before copy-on-write this failed as a data race, and in
+// production as "fatal error: concurrent map writes".
+func TestWithDetailIsRaceSafeFromSharedBase(t *testing.T) {
+	base := New(StageCapture, OutcomeCaptured).WithDetail("stage", "capture")
+
+	var wg sync.WaitGroup
+	for i := 0; i < 50; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			_ = base.WithDetail("worker", n)
+		}(i)
+	}
+	wg.Wait()
+}
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -154,7 +250,9 @@ package telemetry
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -250,29 +348,71 @@ func (e Event) WithActor(actor Actor) Event {
 //
 // Callers must never pass captured credentials, cookies, or tokens. Values
 // are redacted on the way in rather than trusted: see redactValue.
+//
+// Detail is a map, so a plain value-receiver copy would share it with every
+// event derived from the same base. Two goroutines extending one populated
+// base event would then write the same map concurrently, which is a fatal
+// runtime error rather than a recoverable one. The map is therefore copied
+// on every call, making the builder genuinely value-semantic.
 func (e Event) WithDetail(key string, value any) Event {
-	if e.Detail == nil {
-		e.Detail = make(map[string]any, 4)
+	detail := make(map[string]any, len(e.Detail)+1)
+	for k, v := range e.Detail {
+		detail[k] = v
 	}
-	e.Detail[key] = redactValue(key, value)
+	detail[key] = redactValue(key, canonical(value))
+	e.Detail = detail
 	return e
 }
 
-// lootKeys are detail keys whose values are replaced with a marker. The
-// event still records that the thing existed, which is all the stream needs.
-var lootKeys = map[string]bool{
-	"password": true, "passwd": true, "secret": true, "token": true,
-	"tokens": true, "cookie": true, "cookies": true, "credential": true,
-	"credentials": true, "api_key": true, "apikey": true, "authorization": true,
-	"session": true, "body_tokens": true, "http_tokens": true,
+// lootMarkers are substrings that mark a detail key as carrying loot. Keys
+// are matched by substring, not equality: "set_cookie", "session_id", and
+// "x_auth_token" must all redact, and no fixed list of exact spellings
+// survives contact with real callers.
+var lootMarkers = []string{
+	"password", "passwd", "pwd", "secret", "token", "cookie",
+	"credential", "api_key", "apikey", "auth", "bearer",
+	"session", "otp", "mfa", "signature", "private",
 }
 
 const redacted = "[redacted]"
 
-// redactValue strips loot by key name, recursing into maps and slices so a
-// nested secret cannot ride along inside a composite value.
+// canonical collapses an arbitrary value into the shapes redactValue can
+// walk: map[string]any, []any, or a scalar.
+//
+// A Go type switch matches only exact dynamic types, so http.Header and
+// url.Values — named types whose underlying type is map[string][]string —
+// never match a map[string][]string case, and a struct carrying a secret in
+// a JSON-tagged field never matches at all. Round-tripping through JSON
+// erases those distinctions: every map becomes map[string]any, every slice
+// and array becomes []any, pointers are dereferenced, structs become maps
+// keyed by their JSON field names, and json.RawMessage is decoded.
+//
+// A value that cannot be marshalled cannot reach the wire either, so it is
+// replaced with a type marker rather than passed through unexamined.
+func canonical(value any) any {
+	switch value.(type) {
+	case nil, string, bool,
+		int, int8, int16, int32, int64,
+		uint, uint8, uint16, uint32, uint64,
+		float32, float64:
+		return value
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return fmt.Sprintf("[unencodable %T]", value)
+	}
+	var decoded any
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		return fmt.Sprintf("[unencodable %T]", value)
+	}
+	return decoded
+}
+
+// redactValue strips loot by key name, recursing into the canonical shapes
+// so a nested secret cannot ride along inside a composite value under an
+// innocuous outer key.
 func redactValue(key string, value any) any {
-	if lootKeys[normalizeKey(key)] {
+	if isLootKey(key) {
 		return redacted
 	}
 	switch typed := value.(type) {
@@ -282,21 +422,27 @@ func redactValue(key string, value any) any {
 			out[k] = redactValue(k, v)
 		}
 		return out
-	case map[string]string:
-		out := make(map[string]any, len(typed))
-		for k, v := range typed {
-			out[k] = redactValue(k, v)
-		}
-		return out
 	case []any:
 		out := make([]any, len(typed))
 		for i, v := range typed {
+			// Slice elements inherit the enclosing key: a list under
+			// "cookies" is loot even though its indices have no names.
 			out[i] = redactValue(key, v)
 		}
 		return out
 	default:
 		return value
 	}
+}
+
+func isLootKey(key string) bool {
+	normalized := normalizeKey(key)
+	for _, marker := range lootMarkers {
+		if strings.Contains(normalized, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func normalizeKey(key string) string {
@@ -362,6 +508,7 @@ package telemetry
 
 import (
 	"context"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -461,6 +608,64 @@ func TestBusCloseIsIdempotent(t *testing.T) {
 	}
 	bus.Emit(New(StageReport, OutcomeAllowed)) // must not panic on a closed bus
 }
+
+// TestBusEmitDuringCloseDoesNotPanic covers the dangerous interleaving:
+// Emit checking "closed" and then sending, while Close closes the queue
+// between those two steps. Sending on a closed channel panics
+// unconditionally — a select's default case does not catch it — and that
+// panic would occur on a proxy request goroutine during graceful shutdown.
+//
+// Run with -race -count=20. A sequential close-then-emit test does not
+// exercise this; only concurrent Emit and Close do.
+func TestBusEmitDuringCloseDoesNotPanic(t *testing.T) {
+	for attempt := 0; attempt < 20; attempt++ {
+		bus := NewBus(4, &recordingSink{})
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 500; i++ {
+				bus.Emit(New(StageLure, OutcomeAllowed))
+				runtime.Gosched()
+			}
+		}()
+
+		go func() {
+			defer wg.Done()
+			runtime.Gosched()
+			_ = bus.Close()
+		}()
+
+		wg.Wait() // a panic in either goroutine fails the test binary
+	}
+}
+
+// TestBusCloseReturnsWhenSinkIgnoresContext pins the shutdown guarantee.
+// The campaign database sink ignores its context (gorm v1 predates context
+// support), so Close must still return rather than block on wg.Wait()
+// forever.
+func TestBusCloseReturnsWhenSinkIgnoresContext(t *testing.T) {
+	original := sinkTimeout
+	sinkTimeout = 200 * time.Millisecond
+	defer func() { sinkTimeout = original }()
+
+	release := make(chan struct{})
+	defer close(release)
+
+	bus := NewBus(4, &recordingSink{block: release})
+	bus.Emit(New(StageCapture, OutcomeCaptured))
+
+	done := make(chan error, 1)
+	go func() { done <- bus.Close() }()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close() blocked on a sink that ignores its context")
+	}
+}
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -495,9 +700,10 @@ type Emitter interface {
 	Emit(Event)
 }
 
-// sinkTimeout bounds one sink write so a wedged sink cannot stall the
-// drain goroutine forever.
-const sinkTimeout = 10 * time.Second
+// sinkTimeout bounds one sink write so a wedged sink cannot stall the drain
+// goroutine — and therefore Close — forever. It is a var, not a const, so
+// the shutdown test can shorten it rather than sleeping for the real value.
+var sinkTimeout = 10 * time.Second
 
 // Bus fans one event out to every sink from a dedicated goroutine.
 //
@@ -506,11 +712,20 @@ const sinkTimeout = 10 * time.Second
 // delaying a victim-facing request. This mirrors the non-blocking broadcast
 // already used by the feed hub.
 type Bus struct {
-	sinks  []Sink
-	queue  chan Event
-	closed chan struct{}
-	once   sync.Once
-	wg     sync.WaitGroup
+	sinks []Sink
+	queue chan Event
+
+	// mu makes the closed-check and the queue send atomic with respect to
+	// Close. Without it, Emit can pass its closed-check, Close can then
+	// close the queue, and Emit's send panics on a closed channel — an
+	// unconditional panic that a select's default case does not catch.
+	// Emit holds the read lock (uncontended in the steady state) and Close
+	// takes the write lock, so the two can never interleave.
+	mu     sync.RWMutex
+	closed bool
+
+	once sync.Once
+	wg   sync.WaitGroup
 
 	dropped atomic.Uint64
 }
@@ -522,24 +737,28 @@ func NewBus(queueSize int, sinks ...Sink) *Bus {
 		queueSize = 1
 	}
 	bus := &Bus{
-		sinks:  sinks,
-		queue:  make(chan Event, queueSize),
-		closed: make(chan struct{}),
+		sinks: sinks,
+		queue: make(chan Event, queueSize),
 	}
 	bus.wg.Add(1)
 	go bus.drain()
 	return bus
 }
 
-// Emit queues an event. Safe on a nil or closed bus.
+// Emit queues an event. Safe on a nil or closed bus, and safe to call
+// concurrently with Close.
+//
+// The read lock is held across both the closed-check and the send. It is
+// uncontended except during the instant Close holds the write lock, and the
+// send itself is non-blocking, so Emit remains fire-and-forget.
 func (b *Bus) Emit(event Event) {
 	if b == nil {
 		return
 	}
-	select {
-	case <-b.closed:
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	if b.closed {
 		return
-	default:
 	}
 	select {
 	case b.queue <- event:
@@ -564,8 +783,11 @@ func (b *Bus) Close() error {
 	}
 	var err error
 	b.once.Do(func() {
-		close(b.closed)
+		b.mu.Lock()
+		b.closed = true
 		close(b.queue)
+		b.mu.Unlock()
+
 		b.wg.Wait()
 		for _, sink := range b.sinks {
 			if closeErr := sink.Close(); closeErr != nil && err == nil {
@@ -576,19 +798,47 @@ func (b *Bus) Close() error {
 	return err
 }
 
+// drain delivers each queued event to every sink. Closing the queue does not
+// discard buffered events: range yields all of them before the loop exits,
+// so Close flushes rather than truncates.
 func (b *Bus) drain() {
 	defer b.wg.Done()
 	for event := range b.queue {
 		for _, sink := range b.sinks {
-			ctx, cancel := context.WithTimeout(context.Background(), sinkTimeout)
-			_ = sink.Emit(ctx, event)
-			cancel()
+			emitTo(sink, event)
 		}
 	}
 }
-```
 
-The `_ = sink.Emit(...)` is deliberate: a sink failure must not stop other sinks or the drain loop. Sinks log their own failures.
+// emitTo bounds one sink write in wall-clock time, not merely by context.
+//
+// A context deadline only binds a sink that selects on ctx.Done(). The
+// campaign database sink cannot: gorm v1 predates context support and its
+// calls are synchronous. Passing the context alone would leave a wedged
+// database write able to block drain forever, which in turn blocks Close's
+// wg.Wait() forever, hanging graceful shutdown.
+//
+// Running the call on its own goroutine and abandoning it at the deadline
+// costs at most one leaked goroutine per wedged write, and buys a Close that
+// always returns. That is the right trade for a shutdown path.
+func emitTo(sink Sink, event Event) {
+	ctx, cancel := context.WithTimeout(context.Background(), sinkTimeout)
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		// A sink failure must not stop other sinks or the drain loop.
+		// Sinks log their own failures.
+		_ = sink.Emit(ctx, event)
+	}()
+
+	select {
+	case <-done:
+	case <-ctx.Done():
+	}
+}
+```
 
 - [ ] **Step 4: Run tests to verify they pass**
 
