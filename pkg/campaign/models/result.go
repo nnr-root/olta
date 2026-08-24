@@ -12,6 +12,7 @@ import (
 	"github.com/oschwald/maxminddb-golang"
 	log "github.com/s4l1hs/olta/pkg/campaign/logger"
 	feedclient "github.com/s4l1hs/olta/pkg/feed/client"
+	"github.com/s4l1hs/olta/pkg/telemetry"
 )
 
 type mmCity struct {
@@ -118,6 +119,11 @@ func (r *Result) HandleSMSSent() error {
 		}
 	}
 
+	EmitTelemetry(
+		telemetry.New(telemetry.StageDelivery, telemetry.OutcomeAllowed, telemetry.TechniqueSpearphishingLink).
+			WithCampaign(r.CampaignId, r.RId),
+	)
+
 	return db.Save(r).Error
 }
 
@@ -139,6 +145,11 @@ func (r *Result) HandleEmailSent() error {
 			log.Errorf("Error sending websocket message: %v", err)
 		}
 	}
+
+	EmitTelemetry(
+		telemetry.New(telemetry.StageDelivery, telemetry.OutcomeAllowed, telemetry.TechniqueSpearphishingLink).
+			WithCampaign(r.CampaignId, r.RId),
+	)
 
 	return db.Save(r).Error
 }
@@ -175,6 +186,11 @@ func (r *Result) HandleEmailOpened(details EventDetails) error {
 	if err != nil {
 		return err
 	}
+	EmitTelemetry(
+		telemetry.New(telemetry.StageOpen, telemetry.OutcomeAllowed, telemetry.TechniqueSpearphishingLink).
+			WithCampaign(r.CampaignId, r.RId).
+			WithActor(telemetry.Actor{IP: r.IP}),
+	)
 	// Don't update the status if the user already clicked the link
 	// or submitted data to the campaign
 	if r.Status == EventClicked || r.Status == EventDataSubmit {
@@ -190,6 +206,11 @@ func (r *Result) HandleSMSOpened(details EventDetails) error {
 	if err != nil {
 		return err
 	}
+	EmitTelemetry(
+		telemetry.New(telemetry.StageOpen, telemetry.OutcomeAllowed, telemetry.TechniqueSpearphishingLink).
+			WithCampaign(r.CampaignId, r.RId).
+			WithActor(telemetry.Actor{IP: r.IP}),
+	)
 	// Don't update the status if the user already clicked the link
 	// or submitted data to the campaign
 	if r.Status == EventClicked || r.Status == EventDataSubmit {
@@ -249,6 +270,14 @@ func (r *Result) HandleEmailReport(details EventDetails) error {
 	}
 	r.Reported = true
 	r.ModifiedDate = event.Time
+
+	// The report stage carries no ATT&CK technique: a user reporting a
+	// phish is a defender action, not an adversary behavior.
+	EmitTelemetry(
+		telemetry.New(telemetry.StageReport, telemetry.OutcomeAllowed).
+			WithCampaign(r.CampaignId, r.RId),
+	)
+
 	return db.Save(r).Error
 }
 

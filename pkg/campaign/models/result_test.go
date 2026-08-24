@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"time"
 
+	"github.com/s4l1hs/olta/pkg/telemetry"
 	"gopkg.in/check.v1"
 )
 
@@ -110,4 +111,85 @@ func (s *ModelsSuite) TestDuplicateResults(ch *check.C) {
 	ch.Assert(len(c.Results), check.Equals, 2)
 	ch.Assert(c.Results[0].Email, check.Equals, group.Targets[0].Email)
 	ch.Assert(c.Results[1].Email, check.Equals, group.Targets[2].Email)
+}
+
+func (s *ModelsSuite) TestHandleEmailSentEmitsDeliveryTelemetry(ch *check.C) {
+	emitter := &captureEmitter{}
+	SetTelemetryEmitter(emitter)
+	defer SetTelemetryEmitter(nil)
+
+	r := &Result{CampaignId: 1, RId: "telemetry-email-sent", BaseRecipient: BaseRecipient{Email: "victim@example.com"}}
+	ch.Assert(db.Save(r).Error, check.Equals, nil)
+
+	ch.Assert(r.HandleEmailSent(), check.Equals, nil)
+
+	events := emitter.all()
+	ch.Assert(len(events), check.Equals, 1)
+	ch.Assert(events[0].Stage, check.Equals, telemetry.StageDelivery)
+	ch.Assert(events[0].CampaignID, check.Equals, int64(1))
+	ch.Assert(events[0].RID, check.Equals, "telemetry-email-sent")
+}
+
+func (s *ModelsSuite) TestHandleSMSSentEmitsDeliveryTelemetry(ch *check.C) {
+	emitter := &captureEmitter{}
+	SetTelemetryEmitter(emitter)
+	defer SetTelemetryEmitter(nil)
+
+	r := &Result{CampaignId: 1, RId: "telemetry-sms-sent", BaseRecipient: BaseRecipient{Email: "victim@example.com"}}
+	ch.Assert(db.Save(r).Error, check.Equals, nil)
+
+	ch.Assert(r.HandleSMSSent(), check.Equals, nil)
+
+	events := emitter.all()
+	ch.Assert(len(events), check.Equals, 1)
+	ch.Assert(events[0].Stage, check.Equals, telemetry.StageDelivery)
+	ch.Assert(events[0].CampaignID, check.Equals, int64(1))
+	ch.Assert(events[0].RID, check.Equals, "telemetry-sms-sent")
+}
+
+func (s *ModelsSuite) TestHandleEmailOpenedEmitsOpenTelemetry(ch *check.C) {
+	emitter := &captureEmitter{}
+	SetTelemetryEmitter(emitter)
+	defer SetTelemetryEmitter(nil)
+
+	r := &Result{CampaignId: 1, RId: "telemetry-email-opened", IP: "203.0.113.9", BaseRecipient: BaseRecipient{Email: "victim@example.com"}}
+	ch.Assert(db.Save(r).Error, check.Equals, nil)
+
+	ch.Assert(r.HandleEmailOpened(EventDetails{}), check.Equals, nil)
+
+	events := emitter.all()
+	ch.Assert(len(events), check.Equals, 1)
+	ch.Assert(events[0].Stage, check.Equals, telemetry.StageOpen)
+	ch.Assert(events[0].Actor.IP, check.Equals, "203.0.113.9")
+}
+
+func (s *ModelsSuite) TestHandleSMSOpenedEmitsOpenTelemetry(ch *check.C) {
+	emitter := &captureEmitter{}
+	SetTelemetryEmitter(emitter)
+	defer SetTelemetryEmitter(nil)
+
+	r := &Result{CampaignId: 1, RId: "telemetry-sms-opened", BaseRecipient: BaseRecipient{Email: "victim@example.com"}}
+	ch.Assert(db.Save(r).Error, check.Equals, nil)
+
+	ch.Assert(r.HandleSMSOpened(EventDetails{}), check.Equals, nil)
+
+	events := emitter.all()
+	ch.Assert(len(events), check.Equals, 1)
+	ch.Assert(events[0].Stage, check.Equals, telemetry.StageOpen)
+}
+
+func (s *ModelsSuite) TestHandleEmailReportEmitsReportTelemetryWithNoTechnique(ch *check.C) {
+	emitter := &captureEmitter{}
+	SetTelemetryEmitter(emitter)
+	defer SetTelemetryEmitter(nil)
+
+	r := &Result{CampaignId: 1, RId: "telemetry-reported", BaseRecipient: BaseRecipient{Email: "victim@example.com"}}
+	ch.Assert(db.Save(r).Error, check.Equals, nil)
+
+	ch.Assert(r.HandleEmailReport(EventDetails{}), check.Equals, nil)
+
+	events := emitter.all()
+	ch.Assert(len(events), check.Equals, 1)
+	ch.Assert(events[0].Stage, check.Equals, telemetry.StageReport)
+	ch.Assert(len(events[0].Techniques), check.Equals, 0)
 }

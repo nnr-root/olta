@@ -45,6 +45,8 @@ import (
 	"github.com/s4l1hs/olta/pkg/campaign/webhook"
 	"github.com/s4l1hs/olta/pkg/campaign/worker"
 	"github.com/s4l1hs/olta/pkg/runtimepath"
+	"github.com/s4l1hs/olta/pkg/telemetry"
+	"github.com/s4l1hs/olta/pkg/telemetry/sink/campaigndb"
 )
 
 const (
@@ -137,6 +139,15 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+
+	telemetryBus := telemetry.NewBus(1024, campaigndb.New(models.DB()))
+	models.SetTelemetryEmitter(telemetryBus)
+	defer func() {
+		if err := telemetryBus.Close(); err != nil {
+			log.Errorf("telemetry bus shutdown: %v", err)
+		}
+	}()
+
 	if !middleware.ConfigureStoreFromMasterKey() {
 		log.Warn("session cookies use process-local keys; configure OLTA_MASTER_KEY for restart-safe sessions")
 	}
@@ -193,6 +204,9 @@ func main() {
 	}
 	if *mode == modePhish || *mode == modeAll {
 		phishServer.Shutdown()
+	}
+	if err := telemetryBus.Close(); err != nil {
+		log.Errorf("telemetry bus shutdown: %v", err)
 	}
 
 }
