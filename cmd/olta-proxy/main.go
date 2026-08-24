@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/caddyserver/certmagic"
+	"github.com/jinzhu/gorm"
 	feedclient "github.com/s4l1hs/olta/pkg/feed/client"
 	"github.com/s4l1hs/olta/pkg/proxy/campaignstore"
 	"github.com/s4l1hs/olta/pkg/proxy/core"
@@ -23,6 +24,9 @@ import (
 	"github.com/s4l1hs/olta/pkg/proxy/telemetry"
 	"github.com/s4l1hs/olta/pkg/proxy/validation"
 	"github.com/s4l1hs/olta/pkg/runtimepath"
+	sqlitedsn "github.com/s4l1hs/olta/pkg/storage/sqlite"
+	attacktelemetry "github.com/s4l1hs/olta/pkg/telemetry"
+	"github.com/s4l1hs/olta/pkg/telemetry/sink/campaigndb"
 	"go.uber.org/zap"
 )
 
@@ -237,6 +241,24 @@ func main() {
 		}
 	}()
 
+	telemetryDB, err := gorm.Open("sqlite3", sqlitedsn.ConcurrentDSN(*campaign_db))
+	if err != nil {
+		log.Fatal("open telemetry database: %v", err)
+		return
+	}
+	defer func() {
+		if err := telemetryDB.Close(); err != nil {
+			log.Error("telemetry database shutdown: %v", err)
+		}
+	}()
+
+	telemetryBus := attacktelemetry.NewBus(1024, campaigndb.New(telemetryDB))
+	defer func() {
+		if err := telemetryBus.Close(); err != nil {
+			log.Error("telemetry bus shutdown: %v", err)
+		}
+	}()
+
 	bl, err := core.NewBlacklist(filepath.Join(*cfg_dir, "blacklist.txt"), db)
 	if err != nil {
 		log.Error("blacklist: %s", err)
@@ -337,6 +359,7 @@ func main() {
 			BlockStatus:       *cloaker_block_status,
 			InspectHeaders:    true,
 			TrustProxyHeaders: *cloaker_trust_proxy_headers,
+			Emitter:           telemetryBus,
 		})
 		if err != nil {
 			log.Fatal("cloaker: %v", err)

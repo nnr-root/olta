@@ -10,6 +10,8 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+
+	"github.com/s4l1hs/olta/pkg/telemetry"
 )
 
 // Action controls how a matching request is handled.
@@ -32,6 +34,9 @@ type Config struct {
 	SuspiciousUserAgent []string
 	RequiredHeaders     []string
 	MissingHeaderLimit  int
+
+	// Emitter receives a cloak event for every match. Nil disables emission.
+	Emitter telemetry.Emitter
 }
 
 // Match describes the first rule that classified a request.
@@ -104,8 +109,47 @@ func New(config Config) (*Middleware, error) {
 	return &Middleware{config: config}, nil
 }
 
-// Evaluate returns the first network, user-agent, header, or protocol match.
+// Evaluate returns the first network, user-agent, header, or protocol match,
+// and emits a cloak event when one is found.
 func (middleware *Middleware) Evaluate(request *http.Request) (Match, bool) {
+	match, matched := middleware.evaluate(request)
+	if matched {
+		middleware.emitCloak(request, match)
+	}
+	return match, matched
+}
+
+func (middleware *Middleware) emitCloak(request *http.Request, match Match) {
+	if middleware.config.Emitter == nil {
+		return
+	}
+
+	outcome := telemetry.OutcomeBlocked
+	if middleware.config.Action == ActionRedirect {
+		outcome = telemetry.OutcomeRedirected
+	}
+
+	actor := telemetry.Actor{UserAgent: request.UserAgent()}
+	if match.IP.IsValid() {
+		actor.IP = match.IP.String()
+	}
+	if match.Network != nil {
+		// Network.ASN is a uint32 (provider.go:29); telemetry.Actor.ASN is
+		// the display form, so render it as "AS<number>".
+		actor.ASN = "AS" + strconv.FormatUint(uint64(match.Network.ASN), 10)
+		actor.Organization = match.Network.Organization
+	}
+
+	middleware.config.Emitter.Emit(
+		telemetry.New(telemetry.StageCloak, outcome, telemetry.TechniqueProxy).
+			WithActor(actor).
+			WithDetail("rule", match.Rule).
+			WithDetail("match_detail", match.Detail),
+	)
+}
+
+// evaluate returns the first network, user-agent, header, or protocol match.
+func (middleware *Middleware) evaluate(request *http.Request) (Match, bool) {
 	if middleware == nil || !middleware.config.Enabled || request == nil {
 		return Match{}, false
 	}
