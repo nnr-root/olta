@@ -13,4 +13,4 @@ CREATE TABLE IF NOT EXISTS telemetry_events (
     KEY idx_telemetry_events_campaign_id (campaign_id),
     KEY idx_telemetry_events_rid (rid),
     KEY idx_telemetry_events_timestamp (timestamp)
-);
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
