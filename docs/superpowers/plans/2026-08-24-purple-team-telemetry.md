@@ -980,8 +980,10 @@ CREATE TABLE IF NOT EXISTS telemetry_events (
     KEY idx_telemetry_events_campaign_id (campaign_id),
     KEY idx_telemetry_events_rid (rid),
     KEY idx_telemetry_events_timestamp (timestamp)
-);
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 ```
+
+The `ENGINE`/`CHARSET` clause is required, not decorative. Every table in `mysql/001` carries it, and `mysql/002` set the precedent for new-table migrations. Without it this table inherits the server default — still `latin1` on MySQL 5.7 and many MariaDB builds — so a database upgraded from v5 would end up with different text encoding and a different collation on the `event_id` unique index than a fresh v6 install, while both report schema version 6. The MySQL tests are gated behind `OLTA_TEST_MYSQL_DSN` and will not catch this.
 
 The same table must also be added to `001_initial_olta_schema.sql` for both dialects so a fresh install gets it without replaying migrations. Append the `CREATE TABLE` and its indexes to both 001 files, matching each file's existing style.
 
