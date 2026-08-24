@@ -36,4 +36,5 @@ go.work.sum
 graphify-out/
 .graphifyignore
 AGENTS.md
-CLAUDE.md.superpowers/
+CLAUDE.md
+.superpowers/
