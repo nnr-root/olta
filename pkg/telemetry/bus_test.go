@@ -2,6 +2,7 @@ package telemetry
 
 import (
 	"context"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -100,4 +101,62 @@ func TestBusCloseIsIdempotent(t *testing.T) {
 		t.Fatalf("second Close() = %v", err)
 	}
 	bus.Emit(New(StageReport, OutcomeAllowed)) // must not panic on a closed bus
+}
+
+// TestBusEmitDuringCloseDoesNotPanic covers the dangerous interleaving:
+// Emit checking "closed" and then sending, while Close closes the queue
+// between those two steps. Sending on a closed channel panics
+// unconditionally — a select's default case does not catch it — and that
+// panic would occur on a proxy request goroutine during graceful shutdown.
+//
+// Run with -race -count=20. A sequential close-then-emit test does not
+// exercise this; only concurrent Emit and Close do.
+func TestBusEmitDuringCloseDoesNotPanic(t *testing.T) {
+	for attempt := 0; attempt < 20; attempt++ {
+		bus := NewBus(4, &recordingSink{})
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 500; i++ {
+				bus.Emit(New(StageLure, OutcomeAllowed))
+				runtime.Gosched()
+			}
+		}()
+
+		go func() {
+			defer wg.Done()
+			runtime.Gosched()
+			_ = bus.Close()
+		}()
+
+		wg.Wait() // a panic in either goroutine fails the test binary
+	}
+}
+
+// TestBusCloseReturnsWhenSinkIgnoresContext pins the shutdown guarantee.
+// The campaign database sink ignores its context (gorm v1 predates context
+// support), so Close must still return rather than block on wg.Wait()
+// forever.
+func TestBusCloseReturnsWhenSinkIgnoresContext(t *testing.T) {
+	original := sinkTimeout
+	sinkTimeout = 200 * time.Millisecond
+	defer func() { sinkTimeout = original }()
+
+	release := make(chan struct{})
+	defer close(release)
+
+	bus := NewBus(4, &recordingSink{block: release})
+	bus.Emit(New(StageCapture, OutcomeCaptured))
+
+	done := make(chan error, 1)
+	go func() { done <- bus.Close() }()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close() blocked on a sink that ignores its context")
+	}
 }

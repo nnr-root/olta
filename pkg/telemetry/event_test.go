@@ -2,7 +2,10 @@ package telemetry
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/url"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -86,4 +89,97 @@ func TestEventCarriesNoLoot(t *testing.T) {
 			}
 		}
 	}
+}
+
+// TestEventCarriesNoLootAcrossValueShapes covers the bypasses a type-switch
+// allowlist misses. Each case is a shape a proxy handler plausibly produces.
+// These are regression tests for real leaks, not hypotheticals.
+func TestEventCarriesNoLootAcrossValueShapes(t *testing.T) {
+	const secret = "AQABAAAAAAD-SUPER-SECRET-VALUE"
+
+	type credentials struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+
+	cases := []struct {
+		name  string
+		key   string
+		value any
+	}{
+		// A named type over map[string][]string. A type switch never matches
+		// a named type against its underlying type, so http.Header was the
+		// original bypass.
+		{"http.Header", "request_headers", http.Header{"Authorization": {secret}}},
+		{"url.Values", "form", url.Values{"password": {secret}}},
+
+		// Underlying map type that is not one of the switch's exact cases.
+		{"map of string slice", "headers", map[string][]string{"cookie": {secret}}},
+
+		// []map[string]any is not []any.
+		{"slice of maps", "fields", []map[string]any{{"password": secret}}},
+
+		// A struct never matched at all.
+		{"struct", "identity", credentials{Username: "victim", Password: secret}},
+		{"pointer to struct", "identity_ptr", &credentials{Password: secret}},
+
+		// Key spellings that exact-equality matching missed.
+		{"hyphenated key", "Set-Cookie", secret},
+		{"suffixed key", "session_id", secret},
+		{"prefixed key", "x_auth_token", secret},
+		{"short spelling", "pwd", secret},
+		{"bearer", "bearer", secret},
+		{"otp", "otp_code", secret},
+
+		// Loot nested under a wholly innocuous outer key.
+		{"innocuous outer key", "payload", map[string]any{"nested": map[string]any{"token": secret}}},
+		{"innocuous outer, struct inner", "context", credentials{Password: secret}},
+	}
+
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			event := New(StageCapture, OutcomeCaptured).WithDetail(testCase.key, testCase.value)
+			encoded, err := json.Marshal(event)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(encoded), secret) {
+				t.Fatalf("leaked %q into %s", secret, encoded)
+			}
+		})
+	}
+}
+
+// TestWithDetailDoesNotShareDetailMap pins the copy-on-write contract.
+// Without it, every event derived from a populated base shares one map, and
+// two goroutines extending that base write it concurrently — a fatal runtime
+// error that kills the process, not a recoverable request failure.
+func TestWithDetailDoesNotShareDetailMap(t *testing.T) {
+	base := New(StageLure, OutcomeAllowed).WithDetail("stage", "lure")
+
+	first := base.WithDetail("branch", "one")
+	second := base.WithDetail("branch", "two")
+
+	if first.Detail["branch"] != "one" || second.Detail["branch"] != "two" {
+		t.Fatalf("branches share a map: first=%v second=%v", first.Detail, second.Detail)
+	}
+	if _, present := base.Detail["branch"]; present {
+		t.Fatalf("base was mutated by a derived event: %v", base.Detail)
+	}
+}
+
+// Run with -race. Before copy-on-write this failed as a data race, and in
+// production as "fatal error: concurrent map writes".
+func TestWithDetailIsRaceSafeFromSharedBase(t *testing.T) {
+	base := New(StageCapture, OutcomeCaptured).WithDetail("stage", "capture")
+
+	var wg sync.WaitGroup
+	for i := 0; i < 50; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			_ = base.WithDetail("worker", n)
+		}(i)
+	}
+	wg.Wait()
 }

@@ -13,7 +13,9 @@ package telemetry
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -109,29 +111,71 @@ func (e Event) WithActor(actor Actor) Event {
 //
 // Callers must never pass captured credentials, cookies, or tokens. Values
 // are redacted on the way in rather than trusted: see redactValue.
+//
+// Detail is a map, so a plain value-receiver copy would share it with every
+// event derived from the same base. Two goroutines extending one populated
+// base event would then write the same map concurrently, which is a fatal
+// runtime error rather than a recoverable one. The map is therefore copied
+// on every call, making the builder genuinely value-semantic.
 func (e Event) WithDetail(key string, value any) Event {
-	if e.Detail == nil {
-		e.Detail = make(map[string]any, 4)
+	detail := make(map[string]any, len(e.Detail)+1)
+	for k, v := range e.Detail {
+		detail[k] = v
 	}
-	e.Detail[key] = redactValue(key, value)
+	detail[key] = redactValue(key, canonical(value))
+	e.Detail = detail
 	return e
 }
 
-// lootKeys are detail keys whose values are replaced with a marker. The
-// event still records that the thing existed, which is all the stream needs.
-var lootKeys = map[string]bool{
-	"password": true, "passwd": true, "secret": true, "token": true,
-	"tokens": true, "cookie": true, "cookies": true, "credential": true,
-	"credentials": true, "api_key": true, "apikey": true, "authorization": true,
-	"session": true, "body_tokens": true, "http_tokens": true,
+// lootMarkers are substrings that mark a detail key as carrying loot. Keys
+// are matched by substring, not equality: "set_cookie", "session_id", and
+// "x_auth_token" must all redact, and no fixed list of exact spellings
+// survives contact with real callers.
+var lootMarkers = []string{
+	"password", "passwd", "pwd", "secret", "token", "cookie",
+	"credential", "api_key", "apikey", "auth", "bearer",
+	"session", "otp", "mfa", "signature", "private",
 }
 
 const redacted = "[redacted]"
 
-// redactValue strips loot by key name, recursing into maps and slices so a
-// nested secret cannot ride along inside a composite value.
+// canonical collapses an arbitrary value into the shapes redactValue can
+// walk: map[string]any, []any, or a scalar.
+//
+// A Go type switch matches only exact dynamic types, so http.Header and
+// url.Values — named types whose underlying type is map[string][]string —
+// never match a map[string][]string case, and a struct carrying a secret in
+// a JSON-tagged field never matches at all. Round-tripping through JSON
+// erases those distinctions: every map becomes map[string]any, every slice
+// and array becomes []any, pointers are dereferenced, structs become maps
+// keyed by their JSON field names, and json.RawMessage is decoded.
+//
+// A value that cannot be marshalled cannot reach the wire either, so it is
+// replaced with a type marker rather than passed through unexamined.
+func canonical(value any) any {
+	switch value.(type) {
+	case nil, string, bool,
+		int, int8, int16, int32, int64,
+		uint, uint8, uint16, uint32, uint64,
+		float32, float64:
+		return value
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return fmt.Sprintf("[unencodable %T]", value)
+	}
+	var decoded any
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		return fmt.Sprintf("[unencodable %T]", value)
+	}
+	return decoded
+}
+
+// redactValue strips loot by key name, recursing into the canonical shapes
+// so a nested secret cannot ride along inside a composite value under an
+// innocuous outer key.
 func redactValue(key string, value any) any {
-	if lootKeys[normalizeKey(key)] {
+	if isLootKey(key) {
 		return redacted
 	}
 	switch typed := value.(type) {
@@ -141,21 +185,27 @@ func redactValue(key string, value any) any {
 			out[k] = redactValue(k, v)
 		}
 		return out
-	case map[string]string:
-		out := make(map[string]any, len(typed))
-		for k, v := range typed {
-			out[k] = redactValue(k, v)
-		}
-		return out
 	case []any:
 		out := make([]any, len(typed))
 		for i, v := range typed {
+			// Slice elements inherit the enclosing key: a list under
+			// "cookies" is loot even though its indices have no names.
 			out[i] = redactValue(key, v)
 		}
 		return out
 	default:
 		return value
 	}
+}
+
+func isLootKey(key string) bool {
+	normalized := normalizeKey(key)
+	for _, marker := range lootMarkers {
+		if strings.Contains(normalized, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func normalizeKey(key string) string {
