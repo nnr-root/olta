@@ -150,6 +150,103 @@ func TestEventCarriesNoLootAcrossValueShapes(t *testing.T) {
 	}
 }
 
+// TestWithDetailRejectsComposites pins the primary defense. Composites are
+// not traversed and sanitized — they are refused outright, because no
+// key-based rule can see inside them. Both cases below defeated an earlier
+// traversal-based implementation.
+func TestWithDetailRejectsComposites(t *testing.T) {
+	const secret = "STRUCT-SECRET-XYZ"
+
+	// A custom marshaller collapses a keyed secret into an unkeyed scalar,
+	// leaving nothing for a key rule to match.
+	marshaller := sneaky{User: "victim", Pass: secret}
+
+	cases := []struct {
+		name  string
+		key   string
+		value any
+	}{
+		{"json.Marshaler", "identity", marshaller},
+		{"pointer to marshaler", "identity_ptr", &marshaller},
+		{"non-string map keys", "codes", map[int]string{1: secret}},
+		{"header", "request_headers", http.Header{"Authorization": {secret}}},
+		{"form", "form", url.Values{"password": {secret}}},
+		{"slice of maps", "fields", []map[string]any{{"password": secret}}},
+		{"nested map", "payload", map[string]any{"token": secret}},
+	}
+
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			event := New(StageCapture, OutcomeCaptured).WithDetail(testCase.key, testCase.value)
+
+			encoded, err := json.Marshal(event)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(encoded), secret) {
+				t.Fatalf("leaked %q into %s", secret, encoded)
+			}
+
+			stored, ok := event.Detail[testCase.key].(string)
+			if !ok || !strings.HasPrefix(stored, "[") {
+				t.Fatalf("composite was not replaced with a marker: %#v", event.Detail[testCase.key])
+			}
+		})
+	}
+}
+
+// sneaky collapses its fields into a bare JSON string with no key, which is
+// how a json.Marshaler defeats key-name redaction.
+type sneaky struct {
+	User string
+	Pass string
+}
+
+func (s sneaky) MarshalJSON() ([]byte, error) {
+	return json.Marshal(s.User + ":" + s.Pass)
+}
+
+// TestWithDetailDoesNotOverRedact guards the other direction. Substring
+// matching redacted "author", "session_count", and "private_ip", silently
+// destroying legitimate telemetry. Token matching must not.
+func TestWithDetailDoesNotOverRedact(t *testing.T) {
+	cases := map[string]any{
+		"author":         "jane-doe",
+		"authorized_by":  "soc-team",
+		"session_count":  42,
+		"session_length": 900,
+		"private_ip":     "10.0.0.4",
+		"tokenizer":      "wordpiece",
+		"signature_algo": "ES256",
+	}
+
+	for key, value := range cases {
+		t.Run(key, func(t *testing.T) {
+			event := New(StageVerify, OutcomeAllowed).WithDetail(key, value)
+			if event.Detail[key] == redacted {
+				t.Fatalf("over-redacted %q, which is not loot", key)
+			}
+		})
+	}
+}
+
+// TestWithDetailRedactsLootKeys pins the backstop across spellings.
+func TestWithDetailRedactsLootKeys(t *testing.T) {
+	for _, key := range []string{
+		"password", "Passwd", "pwd", "secret", "api_key", "apikey",
+		"Authorization", "x_auth_token", "bearer", "otp_code", "mfa",
+		"Set-Cookie", "session_id", "access_token", "refresh_token",
+		"private_key", "signature", "pin",
+	} {
+		t.Run(key, func(t *testing.T) {
+			event := New(StageCredential, OutcomeCaptured).WithDetail(key, "SECRET-VALUE")
+			if event.Detail[key] != redacted {
+				t.Fatalf("%q was not redacted: %v", key, event.Detail[key])
+			}
+		})
+	}
+}
+
 // TestWithDetailDoesNotShareDetailMap pins the copy-on-write contract.
 // Without it, every event derived from a populated base shares one map, and
 // two goroutines extending that base write it concurrently — a fatal runtime

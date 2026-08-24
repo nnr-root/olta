@@ -3,6 +3,7 @@ package campaigndb
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"path/filepath"
 	"testing"
 
@@ -54,6 +55,7 @@ func TestSinkPersistsEvent(t *testing.T) {
 		Techniques string
 		CampaignID int64
 		Actor      string
+		Detail     string
 	}
 	if err := db.Table("telemetry_events").Where("event_id = ?", event.ID).Scan(&row).Error; err != nil {
 		t.Fatal(err)
@@ -67,8 +69,41 @@ func TestSinkPersistsEvent(t *testing.T) {
 	if row.CampaignID != 0 {
 		t.Fatalf("CampaignID = %d, want 0 for an unattributed cloak event", row.CampaignID)
 	}
-	if row.Actor == "" {
-		t.Fatal("actor JSON was not persisted")
+
+	// Round-trip both JSON columns. Asserting only non-emptiness would let a
+	// cross-wiring bug — writing detail into the actor column — pass.
+	var actor telemetry.Actor
+	if err := json.Unmarshal([]byte(row.Actor), &actor); err != nil {
+		t.Fatalf("actor column is not valid JSON: %q", row.Actor)
+	}
+	if actor.IP != "203.0.113.9" || actor.ASN != "AS8075" || actor.Organization != "Microsoft" {
+		t.Fatalf("actor round-trip = %+v", actor)
+	}
+
+	var detail map[string]any
+	if err := json.Unmarshal([]byte(row.Detail), &detail); err != nil {
+		t.Fatalf("detail column is not valid JSON: %q", row.Detail)
+	}
+	if detail["rule"] != "network" {
+		t.Fatalf("detail round-trip = %v", detail)
+	}
+}
+
+func TestSinkStoresEmptyDetailAsEmptyString(t *testing.T) {
+	db := newDB(t)
+	sink := New(db)
+
+	event := telemetry.New(telemetry.StageLure, telemetry.OutcomeAllowed)
+	if err := sink.Emit(context.Background(), event); err != nil {
+		t.Fatal(err)
+	}
+
+	var row struct{ Detail string }
+	if err := db.Table("telemetry_events").Where("event_id = ?", event.ID).Scan(&row).Error; err != nil {
+		t.Fatal(err)
+	}
+	if row.Detail != "" {
+		t.Fatalf("Detail = %q, want empty string rather than %q or null", row.Detail, "{}")
 	}
 }
 

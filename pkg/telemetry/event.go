@@ -13,7 +13,6 @@ package telemetry
 import (
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -107,10 +106,24 @@ func (e Event) WithActor(actor Actor) Event {
 	return e
 }
 
-// WithDetail attaches one stage-specific attribute.
+// WithDetail attaches one stage-specific scalar attribute.
 //
-// Callers must never pass captured credentials, cookies, or tokens. Values
-// are redacted on the way in rather than trusted: see redactValue.
+// Only scalars are accepted. Composite values — maps, slices, structs,
+// pointers — are replaced with a type marker, because no key-name check can
+// make them safe:
+//
+//   - A type implementing json.Marshaler can collapse a secret into an
+//     unkeyed JSON scalar, leaving nothing for a key-based rule to match.
+//     A struct{User, Pass string} whose MarshalJSON emits "user:secret"
+//     under the innocuous key "identity" defeats key matching entirely.
+//   - A map with non-string keys marshals to keys like "1", which match no
+//     rule at all.
+//
+// Both were demonstrated against an earlier traversal-based implementation.
+// Rejecting composites removes the traversal, and with it the whole class.
+// Callers destructure instead, which forces a decision about every field
+// that reaches telemetry — exactly the decision this package exists to make
+// deliberate.
 //
 // Detail is a map, so a plain value-receiver copy would share it with every
 // event derived from the same base. Two goroutines extending one populated
@@ -122,86 +135,77 @@ func (e Event) WithDetail(key string, value any) Event {
 	for k, v := range e.Detail {
 		detail[k] = v
 	}
-	detail[key] = redactValue(key, canonical(value))
+	detail[key] = vetDetail(key, value)
 	e.Detail = detail
 	return e
 }
 
-// lootMarkers are substrings that mark a detail key as carrying loot. Keys
-// are matched by substring, not equality: "set_cookie", "session_id", and
-// "x_auth_token" must all redact, and no fixed list of exact spellings
-// survives contact with real callers.
-var lootMarkers = []string{
-	"password", "passwd", "pwd", "secret", "token", "cookie",
-	"credential", "api_key", "apikey", "auth", "bearer",
-	"session", "otp", "mfa", "signature", "private",
-}
-
-const redacted = "[redacted]"
-
-// canonical collapses an arbitrary value into the shapes redactValue can
-// walk: map[string]any, []any, or a scalar.
-//
-// A Go type switch matches only exact dynamic types, so http.Header and
-// url.Values — named types whose underlying type is map[string][]string —
-// never match a map[string][]string case, and a struct carrying a secret in
-// a JSON-tagged field never matches at all. Round-tripping through JSON
-// erases those distinctions: every map becomes map[string]any, every slice
-// and array becomes []any, pointers are dereferenced, structs become maps
-// keyed by their JSON field names, and json.RawMessage is decoded.
-//
-// A value that cannot be marshalled cannot reach the wire either, so it is
-// replaced with a type marker rather than passed through unexamined.
-func canonical(value any) any {
+// vetDetail redacts by key, then admits only scalars.
+func vetDetail(key string, value any) any {
+	if isLootKey(key) {
+		return redacted
+	}
 	switch value.(type) {
 	case nil, string, bool,
 		int, int8, int16, int32, int64,
 		uint, uint8, uint16, uint32, uint64,
 		float32, float64:
 		return value
-	}
-	encoded, err := json.Marshal(value)
-	if err != nil {
-		return fmt.Sprintf("[unencodable %T]", value)
-	}
-	var decoded any
-	if err := json.Unmarshal(encoded, &decoded); err != nil {
-		return fmt.Sprintf("[unencodable %T]", value)
-	}
-	return decoded
-}
-
-// redactValue strips loot by key name, recursing into the canonical shapes
-// so a nested secret cannot ride along inside a composite value under an
-// innocuous outer key.
-func redactValue(key string, value any) any {
-	if isLootKey(key) {
-		return redacted
-	}
-	switch typed := value.(type) {
-	case map[string]any:
-		out := make(map[string]any, len(typed))
-		for k, v := range typed {
-			out[k] = redactValue(k, v)
-		}
-		return out
-	case []any:
-		out := make([]any, len(typed))
-		for i, v := range typed {
-			// Slice elements inherit the enclosing key: a list under
-			// "cookies" is loot even though its indices have no names.
-			out[i] = redactValue(key, v)
-		}
-		return out
 	default:
-		return value
+		return fmt.Sprintf("[unsupported %T]", value)
 	}
 }
 
+// lootTokens match a whole underscore-delimited segment of a key, so
+// "auth_token" and "x_auth" redact while "author" and "authorized_by" do
+// not. Bare substring matching over-redacted exactly that way, silently
+// destroying legitimate telemetry.
+//
+// "signature" is deliberately absent from this set, for the same reason
+// "session" is: as a segment it would also catch legitimate compounds like
+// "signature_algo" and "signature_scheme". A bare "signature" key still
+// redacts, via lootExactKeys below.
+var lootTokens = map[string]bool{
+	"password": true, "passwd": true, "pwd": true, "pass": true,
+	"secret": true, "token": true, "cookie": true, "cookies": true,
+	"credential": true, "credentials": true, "auth": true,
+	"authorization": true, "bearer": true, "otp": true, "mfa": true,
+	"pin": true, "passcode": true,
+}
+
+// lootExactKeys match only the whole normalized key, never a segment of a
+// compound key. Unlike "auth" or "token", "signature" shows up in
+// legitimate compound telemetry keys, so it belongs here rather than in
+// lootTokens.
+var lootExactKeys = map[string]bool{
+	"signature": true,
+}
+
+// lootPhrases match anywhere in the key. These are compounds unambiguous
+// enough that a false positive is not a realistic worry.
+var lootPhrases = []string{
+	"apikey", "api_key", "privatekey", "private_key",
+	"access_token", "refresh_token", "session_id", "set_cookie",
+}
+
+const redacted = "[redacted]"
+
+// isLootKey reports whether a detail key names something that must never be
+// recorded. It is a backstop, not the primary defense: the primary defense
+// is that WithDetail admits only scalars, so there is nothing to traverse
+// and nowhere for a secret to hide.
 func isLootKey(key string) bool {
 	normalized := normalizeKey(key)
-	for _, marker := range lootMarkers {
-		if strings.Contains(normalized, marker) {
+	if lootExactKeys[normalized] {
+		return true
+	}
+	for _, phrase := range lootPhrases {
+		if strings.Contains(normalized, phrase) {
+			return true
+		}
+	}
+	for _, token := range strings.Split(normalized, "_") {
+		if lootTokens[token] {
 			return true
 		}
 	}

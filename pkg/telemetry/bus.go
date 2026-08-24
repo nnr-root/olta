@@ -2,6 +2,8 @@ package telemetry
 
 import (
 	"context"
+	"fmt"
+	"log"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -47,7 +49,12 @@ type Bus struct {
 	once sync.Once
 	wg   sync.WaitGroup
 
+	// dropped counts events the queue had no room for; failed counts events
+	// a sink rejected or timed out on. They are different losses and an
+	// operator needs to tell them apart: dropped means the bus is
+	// undersized, failed means a sink is broken.
 	dropped atomic.Uint64
+	failed  atomic.Uint64
 }
 
 // NewBus starts the drain goroutine. A queueSize below 1 is raised to 1.
@@ -95,6 +102,15 @@ func (b *Bus) Dropped() uint64 {
 	return b.dropped.Load()
 }
 
+// Failed reports how many sink deliveries returned an error or timed out.
+// A non-zero value means the store of record is incomplete.
+func (b *Bus) Failed() uint64 {
+	if b == nil {
+		return 0
+	}
+	return b.failed.Load()
+}
+
 // Close stops accepting events, drains what is queued, and closes every
 // sink. It is idempotent.
 func (b *Bus) Close() error {
@@ -110,7 +126,10 @@ func (b *Bus) Close() error {
 
 		b.wg.Wait()
 		for _, sink := range b.sinks {
-			if closeErr := sink.Close(); closeErr != nil && err == nil {
+			// Bounded for the same reason sink writes are: a Sink.Close
+			// that blocks on a wedged handle would otherwise hang shutdown
+			// after drain had already finished cleanly.
+			if closeErr := closeSink(sink); closeErr != nil && err == nil {
 				err = closeErr
 			}
 		}
@@ -118,14 +137,35 @@ func (b *Bus) Close() error {
 	return err
 }
 
+func closeSink(sink Sink) error {
+	done := make(chan error, 1)
+	go func() { done <- sink.Close() }()
+
+	select {
+	case closeErr := <-done:
+		return closeErr
+	case <-time.After(sinkTimeout):
+		return fmt.Errorf("telemetry: sink close timed out after %s", sinkTimeout)
+	}
+}
+
 // drain delivers each queued event to every sink. Closing the queue does not
 // discard buffered events: range yields all of them before the loop exits,
 // so Close flushes rather than truncates.
+//
+// A sink failure never stops other sinks or the loop, but it is never
+// silent either. The campaign database is the store of record for an
+// engagement; an event disappearing from it with no trace would leave an
+// operator unable to tell an uneventful campaign from a broken pipeline.
 func (b *Bus) drain() {
 	defer b.wg.Done()
 	for event := range b.queue {
 		for _, sink := range b.sinks {
-			emitTo(sink, event)
+			if err := emitTo(sink, event); err != nil {
+				b.failed.Add(1)
+				log.Printf("telemetry: sink %T dropped event %s (stage %s): %v",
+					sink, event.ID, event.Stage, err)
+			}
 		}
 	}
 }
@@ -139,22 +179,26 @@ func (b *Bus) drain() {
 // wg.Wait() forever, hanging graceful shutdown.
 //
 // Running the call on its own goroutine and abandoning it at the deadline
-// costs at most one leaked goroutine per wedged write, and buys a Close that
-// always returns. That is the right trade for a shutdown path.
-func emitTo(sink Sink, event Event) {
+// buys a drain loop, and therefore a Close, that always makes progress.
+//
+// The cost is honest: each abandoned call leaves its goroutine alive until
+// the sink returns, so a chronically wedged sink leaks one goroutine per
+// event for as long as the condition lasts. That is bounded only by how long
+// the process runs in that state, not by any constant. It is the right trade
+// — a leaked goroutine is recoverable, a hung shutdown is not — but it is
+// not a small bounded cost, and a sink that wedges under load is a bug to
+// fix in the sink.
+func emitTo(sink Sink, event Event) error {
 	ctx, cancel := context.WithTimeout(context.Background(), sinkTimeout)
 	defer cancel()
 
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		// A sink failure must not stop other sinks or the drain loop.
-		// Sinks log their own failures.
-		_ = sink.Emit(ctx, event)
-	}()
+	done := make(chan error, 1)
+	go func() { done <- sink.Emit(ctx, event) }()
 
 	select {
-	case <-done:
+	case err := <-done:
+		return err
 	case <-ctx.Done():
+		return fmt.Errorf("telemetry: sink %T timed out after %s", sink, sinkTimeout)
 	}
 }
