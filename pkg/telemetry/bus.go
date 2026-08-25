@@ -27,6 +27,14 @@ type Emitter interface {
 // the shutdown test can shorten it rather than sleeping for the real value.
 var sinkTimeout = 10 * time.Second
 
+// shutdownTimeout bounds Close() itself, independent of queue depth or sink
+// count. Without it, a wedged sink turns "drain everything, then close"
+// into queueSize × len(sinks) × sinkTimeout in the worst case — with the
+// production defaults (a 1024-deep queue and up to 4 sinks) that is roughly
+// 11 hours, which is not a graceful shutdown, it is a hang with a deadline.
+// A var, not a const, so the shutdown test can shorten it.
+var shutdownTimeout = 30 * time.Second
+
 // Bus fans one event out to every sink from a dedicated goroutine.
 //
 // Emit never blocks and never fails. When the queue is full the event is
@@ -50,11 +58,33 @@ type Bus struct {
 	wg   sync.WaitGroup
 
 	// dropped counts events the queue had no room for; failed counts events
-	// a sink rejected or timed out on. They are different losses and an
-	// operator needs to tell them apart: dropped means the bus is
-	// undersized, failed means a sink is broken.
-	dropped atomic.Uint64
-	failed  atomic.Uint64
+	// a sink rejected or timed out on; undelivered counts events Close gave
+	// up on entirely because the overall shutdown deadline passed before
+	// drain reached them. Three different losses, three different causes:
+	// dropped means the bus is undersized, failed means a sink is broken,
+	// undelivered means shutdown itself ran out of time.
+	dropped     atomic.Uint64
+	failed      atomic.Uint64
+	undelivered atomic.Uint64
+
+	// abandon is closed by Close once shutdownTimeout passes without drain
+	// finishing. drain checks it before starting each event's delivery and,
+	// once closed, stops calling sinks and just counts and discards what is
+	// left — so the abandoned drain goroutine still terminates promptly
+	// in the background instead of continuing to hammer a wedged sink.
+	abandon chan struct{}
+
+	// allSinksClosed is closed once closeSinks has actually run to
+	// completion, on whichever path got there (the healthy path inside
+	// Close, or the background goroutine Close spawns on abandonment).
+	// Nothing in the package depends on it — Close's own return already
+	// carries the healthy-path result — but it gives tests a real
+	// happens-before edge onto "every sink is done being touched by this
+	// Bus," instead of polling a sink's own state, which is one goroutine
+	// too shallow: it observes the inner per-sink Close call completing,
+	// not the outer closeSink/closeSinks call (and its read of the
+	// package-level sinkTimeout var) that wraps it.
+	allSinksClosed chan struct{}
 }
 
 // NewBus starts the drain goroutine. A queueSize below 1 is raised to 1.
@@ -64,8 +94,10 @@ func NewBus(queueSize int, sinks ...Sink) *Bus {
 		queueSize = 1
 	}
 	bus := &Bus{
-		sinks: sinks,
-		queue: make(chan Event, queueSize),
+		sinks:          sinks,
+		queue:          make(chan Event, queueSize),
+		abandon:        make(chan struct{}),
+		allSinksClosed: make(chan struct{}),
 	}
 	bus.wg.Add(1)
 	go bus.drain()
@@ -111,8 +143,24 @@ func (b *Bus) Failed() uint64 {
 	return b.failed.Load()
 }
 
-// Close stops accepting events, drains what is queued, and closes every
-// sink. It is idempotent.
+// Undelivered reports how many queued events Close abandoned because the
+// overall shutdown deadline (shutdownTimeout) passed before drain reached
+// them. A non-zero value means shutdown gave up early, not that delivery
+// was attempted and failed — see Failed for that.
+func (b *Bus) Undelivered() uint64 {
+	if b == nil {
+		return 0
+	}
+	return b.undelivered.Load()
+}
+
+// Close stops accepting events and drains what is queued, up to an overall
+// shutdownTimeout. A healthy bus flushes everything and closes every sink
+// well within that budget. If drain has not finished by the deadline, Close
+// abandons it and returns: the remaining events are counted in Undelivered
+// rather than delivered, and sinks are closed in the background once the
+// abandoned drain goroutine actually stops touching them, so Close never
+// races a sink's Emit against its own Close call. Close is idempotent.
 func (b *Bus) Close() error {
 	if b == nil {
 		return nil
@@ -124,16 +172,39 @@ func (b *Bus) Close() error {
 		close(b.queue)
 		b.mu.Unlock()
 
-		b.wg.Wait()
-		for _, sink := range b.sinks {
-			// Bounded for the same reason sink writes are: a Sink.Close
-			// that blocks on a wedged handle would otherwise hang shutdown
-			// after drain had already finished cleanly.
-			if closeErr := closeSink(sink); closeErr != nil && err == nil {
-				err = closeErr
-			}
+		drained := make(chan struct{})
+		go func() {
+			b.wg.Wait()
+			close(drained)
+		}()
+
+		select {
+		case <-drained:
+			err = b.closeSinks()
+			close(b.allSinksClosed)
+		case <-time.After(shutdownTimeout):
+			log.Printf("telemetry: bus shutdown exceeded %s; abandoning drain, some events will be undelivered", shutdownTimeout)
+			close(b.abandon)
+			go func() {
+				<-drained
+				_ = b.closeSinks()
+				close(b.allSinksClosed)
+			}()
 		}
 	})
+	return err
+}
+
+// closeSinks closes every sink, bounded per sink by sinkTimeout for the
+// same reason sink writes are: a Sink.Close that blocks on a wedged handle
+// would otherwise hang shutdown after drain had already finished cleanly.
+func (b *Bus) closeSinks() error {
+	var err error
+	for _, sink := range b.sinks {
+		if closeErr := closeSink(sink); closeErr != nil && err == nil {
+			err = closeErr
+		}
+	}
 	return err
 }
 
@@ -149,25 +220,54 @@ func closeSink(sink Sink) error {
 	}
 }
 
-// drain delivers each queued event to every sink. Closing the queue does not
-// discard buffered events: range yields all of them before the loop exits,
-// so Close flushes rather than truncates.
+// drain delivers each queued event to every sink, one event at a time, in
+// queue order. Closing the queue does not discard buffered events: range
+// yields all of them before the loop exits, so a healthy Close flushes
+// rather than truncates.
+//
+// Once Close abandons the drain (shutdownTimeout elapsed), drain stops
+// calling sinks and instead counts and discards whatever is left, so this
+// goroutine still terminates promptly on its own rather than continuing to
+// hammer a wedged sink in the background indefinitely.
+func (b *Bus) drain() {
+	defer b.wg.Done()
+	for event := range b.queue {
+		select {
+		case <-b.abandon:
+			b.undelivered.Add(1)
+			continue
+		default:
+		}
+		b.deliver(event)
+	}
+}
+
+// deliver fans one event out to every sink concurrently and waits for all
+// of them, so the per-event cost is the slowest sink's timeout rather than
+// the sum of every sink's timeout — turning queueDepth × len(sinks) ×
+// sinkTimeout into queueDepth × sinkTimeout in the worst case. Events are
+// still processed one at a time in queue order: the next event's delivery
+// does not start until every sink has finished (or timed out on) this one,
+// so per-sink ordering is unaffected by the fan-out.
 //
 // A sink failure never stops other sinks or the loop, but it is never
 // silent either. The campaign database is the store of record for an
 // engagement; an event disappearing from it with no trace would leave an
 // operator unable to tell an uneventful campaign from a broken pipeline.
-func (b *Bus) drain() {
-	defer b.wg.Done()
-	for event := range b.queue {
-		for _, sink := range b.sinks {
+func (b *Bus) deliver(event Event) {
+	var wg sync.WaitGroup
+	wg.Add(len(b.sinks))
+	for _, sink := range b.sinks {
+		go func(sink Sink) {
+			defer wg.Done()
 			if err := emitTo(sink, event); err != nil {
 				b.failed.Add(1)
 				log.Printf("telemetry: sink %T dropped event %s (stage %s): %v",
 					sink, event.ID, event.Stage, err)
 			}
-		}
+		}(sink)
 	}
+	wg.Wait()
 }
 
 // emitTo bounds one sink write in wall-clock time, not merely by context.
