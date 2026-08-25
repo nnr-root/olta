@@ -42,6 +42,7 @@ import (
 	log "github.com/s4l1hs/olta/pkg/campaign/logger"
 	"github.com/s4l1hs/olta/pkg/campaign/middleware"
 	"github.com/s4l1hs/olta/pkg/campaign/models"
+	"github.com/s4l1hs/olta/pkg/campaign/resilience"
 	"github.com/s4l1hs/olta/pkg/campaign/webhook"
 	"github.com/s4l1hs/olta/pkg/campaign/worker"
 	"github.com/s4l1hs/olta/pkg/runtimepath"
@@ -176,6 +177,11 @@ func main() {
 		}
 		adminOptions = append(adminOptions, controllers.WithWorker(campaignWorker))
 	}
+	adminOptions = append(adminOptions, controllers.WithTelemetryFeatures(resilience.Features{
+		Cloaker:          conf.Telemetry.Cloaker,
+		Verify:           conf.Telemetry.Verify,
+		SessionValidator: conf.Telemetry.SessionValidator,
+	}))
 	adminConfig := conf.AdminConf
 	adminServer := controllers.NewAdminServer(adminConfig, adminOptions...)
 	middleware.Store.Options.Secure = adminConfig.UseTLS
