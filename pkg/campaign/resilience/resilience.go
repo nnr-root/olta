@@ -40,10 +40,29 @@ type FrictionEntry struct {
 
 // RaceSummary answers whether the human layer beat the attacker.
 type RaceSummary struct {
+	// Delivered is the denominator: every RID with a delivery event. The
+	// three buckets below always sum to this so the report never implies a
+	// smaller population than the one actually engaged.
+	Delivered                 int   `json:"delivered"`
 	ReportedBeforeCapture     int   `json:"reported_before_capture"`
 	ReportedAfterCapture      int   `json:"reported_after_capture"`
 	NeverReported             int   `json:"never_reported"`
 	MedianTimeToReportSeconds int64 `json:"median_time_to_report_seconds"`
+	// HasMedianTimeToReport distinguishes "no target has reported yet" from
+	// a genuine zero-second median: both would otherwise render as 0.
+	HasMedianTimeToReport bool `json:"has_median_time_to_report"`
+}
+
+// Window bounds the unattributed (campaign_id = 0) cloak and verify events
+// folded into a campaign's report. Attributed rows need no bound: they are
+// already scoped by campaign_id. Cloak/verify events fire before lure
+// validation establishes a recipient, so they can never be attributed to a
+// campaign directly -- the window is the only correlation available, and it
+// is an approximation, not a guarantee: two campaigns running concurrently
+// on the same proxy install can still share a window.
+type Window struct {
+	Start time.Time
+	End   time.Time
 }
 
 // Report is the full per-campaign resilience view.
@@ -53,7 +72,20 @@ type Report struct {
 	Funnel     []FunnelStage   `json:"funnel"`
 	Friction   []FrictionEntry `json:"friction"`
 	Race       RaceSummary     `json:"race"`
+	// UnattributedScoped is true when the unattributed cloak/verify events
+	// folded into Funnel and Friction were bounded to the campaign window.
+	// FrictionScope is the human-readable caveat the dashboard must render
+	// alongside Defensive Friction: a time window narrows unattributed
+	// traffic to the campaign's active period, but it cannot prove the
+	// traffic came from this campaign rather than another one running on
+	// the same install at the same time.
+	UnattributedScoped bool   `json:"unattributed_scoped"`
+	FrictionScope      string `json:"friction_scope"`
 }
+
+const frictionScopeCaption = "Cloak and verify counts include unattributed proxy traffic " +
+	"(no recipient was resolved yet) recorded during this campaign's time window. " +
+	"They may include traffic from other campaigns running concurrently on the same install."
 
 // funnelOrder is the kill chain in sequence, with the technique each stage
 // emulates. It mirrors the mapping table in the design spec.
@@ -87,16 +119,26 @@ type eventRow struct {
 
 // Compute builds the report for one campaign.
 //
-// Cloak events are unattributed by design (they fire before lure
-// validation), so they are read across the whole table rather than filtered
-// by campaign. Every other stage is campaign-scoped.
-func Compute(db *gorm.DB, campaignID int64, enabled Features) (Report, error) {
-	report := Report{CampaignID: campaignID, Features: enabled}
+// Cloak and verify events are unattributed by design (they fire before lure
+// validation establishes a recipient), so they cannot be filtered by
+// campaign_id. Instead they are bounded to window, the campaign's active
+// period, which the caller derives from the campaign row. resilience stays
+// a pure query layer over telemetry_events: it does not query the
+// campaigns table itself. Every other stage is already campaign-scoped and
+// left unbounded by time.
+func Compute(db *gorm.DB, campaignID int64, window Window, enabled Features) (Report, error) {
+	report := Report{
+		CampaignID:         campaignID,
+		Features:           enabled,
+		UnattributedScoped: true,
+		FrictionScope:      frictionScopeCaption,
+	}
 
 	var rows []eventRow
 	query := db.Table("telemetry_events").
 		Select("stage, outcome, rid, timestamp, actor, campaign_id").
-		Where("campaign_id = ? OR campaign_id = 0", campaignID)
+		Where("campaign_id = ? OR (campaign_id = 0 AND timestamp >= ? AND timestamp <= ?)",
+			campaignID, window.Start, window.End)
 	if err := query.Scan(&rows).Error; err != nil {
 		return Report{}, err
 	}
@@ -127,10 +169,14 @@ func buildFunnel(rows []eventRow, enabled Features) []FunnelStage {
 		if distinct[stage] == nil {
 			distinct[stage] = make(map[string]bool)
 		}
-		// Cloak and verify events have no RID, so each row counts once.
+		// Cloak and verify events have no RID, so they are keyed on actor
+		// identity instead. Keying on timestamp (as an earlier version of
+		// this function did) is wrong: nanosecond precision means it
+		// essentially never collides, so one browser retrying 40 blocked
+		// sub-resources reads as 40 distinct targets instead of one.
 		key := row.RID
 		if key == "" {
-			key = row.Timestamp.Format(time.RFC3339Nano) + row.Actor
+			key = actorIdentity(row.Actor)
 		}
 		distinct[stage][key] = true
 	}
@@ -145,6 +191,30 @@ func buildFunnel(rows []eventRow, enabled Features) []FunnelStage {
 		})
 	}
 	return funnel
+}
+
+// actorIdentity derives a stable key for an unattributed (no-RID) event's
+// source, so repeated requests from one actor count as one target rather
+// than one per request. IP is the most specific signal available; when it
+// is absent, ASN+Organization narrows to the same network; when even those
+// are absent, the raw actor JSON is used so identical unknown actors still
+// collapse together while distinct unknown actors do not collide with each
+// other by chance.
+func actorIdentity(actorJSON string) string {
+	if actorJSON == "" {
+		return ""
+	}
+	var actor telemetry.Actor
+	if err := json.Unmarshal([]byte(actorJSON), &actor); err != nil {
+		return actorJSON
+	}
+	if actor.IP != "" {
+		return "ip:" + actor.IP
+	}
+	if actor.ASN != "" || actor.Organization != "" {
+		return "asn:" + actor.ASN + "|org:" + actor.Organization
+	}
+	return actorJSON
 }
 
 func buildFriction(rows []eventRow) []FrictionEntry {
@@ -209,24 +279,27 @@ func buildRace(rows []eventRow) RaceSummary {
 	}
 
 	var summary RaceSummary
+	// Delivered is the denominator for the whole race: every RID that ever
+	// received a delivery event belongs in exactly one bucket below. An
+	// earlier version of this function only classified RIDs that appeared
+	// in firstCapture or firstReport, silently dropping targets who were
+	// delivered to but never engaged at all -- with 100 delivered and only
+	// 10 captured, that undercounted "never reported" by the 90 who never
+	// showed up in either map, understating the true human-detection
+	// failure rate.
+	summary.Delivered = len(firstDelivery)
 	durations := make([]int64, 0, len(firstReport))
 
-	for rid, captured := range firstCapture {
-		reported, ok := firstReport[rid]
+	for rid := range firstDelivery {
+		reported, wasReported := firstReport[rid]
+		captured, wasCaptured := firstCapture[rid]
 		switch {
-		case !ok:
+		case !wasReported:
 			summary.NeverReported++
-		case reported.Before(captured):
+		case !wasCaptured || reported.Before(captured):
 			summary.ReportedBeforeCapture++
 		default:
 			summary.ReportedAfterCapture++
-		}
-	}
-	// Targets who reported without ever being captured also count as wins.
-	for rid, reported := range firstReport {
-		if _, captured := firstCapture[rid]; !captured {
-			summary.ReportedBeforeCapture++
-			_ = reported
 		}
 	}
 
@@ -241,6 +314,10 @@ func buildRace(rows []eventRow) RaceSummary {
 		durations = append(durations, int64(reported.Sub(delivered).Seconds()))
 	}
 	summary.MedianTimeToReportSeconds = median(durations)
+	// A nil/empty durations slice and a genuine zero-second median both
+	// resolve to 0 from median(); HasMedianTimeToReport is how the caller
+	// tells them apart instead of treating 0 as falsy.
+	summary.HasMedianTimeToReport = len(durations) > 0
 	return summary
 }
 

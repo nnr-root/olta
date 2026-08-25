@@ -3,6 +3,7 @@ package api
 import (
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/gorilla/mux"
 	ctx "github.com/s4l1hs/olta/pkg/campaign/context"
@@ -98,15 +99,40 @@ func (as *Server) resilienceReport(w http.ResponseWriter, r *http.Request) (resi
 		return resilience.Report{}, false
 	}
 
-	if _, err := models.GetCampaign(campaignID, ctx.Get(r, "user_id").(int64)); err != nil {
+	campaign, err := models.GetCampaign(campaignID, ctx.Get(r, "user_id").(int64))
+	if err != nil {
 		JSONResponse(w, models.Response{Success: false, Message: "Campaign not found"}, http.StatusNotFound)
 		return resilience.Report{}, false
 	}
 
-	report, err := resilience.Compute(models.DB(), campaignID, as.telemetryFeatures)
+	report, err := resilience.Compute(models.DB(), campaignID, campaignWindow(campaign), as.telemetryFeatures)
 	if err != nil {
 		JSONResponse(w, models.Response{Success: false, Message: err.Error()}, http.StatusInternalServerError)
 		return resilience.Report{}, false
 	}
 	return report, true
+}
+
+// campaignWindow derives the active period used to bound unattributed
+// (campaign_id = 0) cloak/verify events: the resilience package is a pure
+// query layer over telemetry_events and does not read the campaigns table
+// itself, so this is the one place that translates a campaign row into a
+// resilience.Window.
+//
+// Start is the campaign's launch date. LaunchDate defaults to CreatedDate
+// at creation time (see PostCampaign) whenever no explicit launch date was
+// given, so it is never zero for a campaign that has actually been posted.
+//
+// End is the campaign's completed date when the campaign has finished, or
+// time.Now() for an in-flight campaign. CompletedDate is the zero value
+// until a campaign completes, so using it unconditionally would give an
+// in-flight campaign an upper bound in year 1 -- silently excluding every
+// unattributed event ever recorded, rather than the intended "everything up
+// to now".
+func campaignWindow(campaign models.Campaign) resilience.Window {
+	end := campaign.CompletedDate
+	if end.IsZero() {
+		end = time.Now()
+	}
+	return resilience.Window{Start: campaign.LaunchDate, End: end}
 }
