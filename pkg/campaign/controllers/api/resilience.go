@@ -3,6 +3,7 @@ package api
 import (
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gorilla/mux"
@@ -43,34 +44,76 @@ type navigatorTechnique struct {
 	Enabled     bool   `json:"enabled"`
 }
 
+// techniqueAggregate accumulates every funnel stage that maps to the same
+// ATT&CK technique. Delivery, Open, and Lure all map to T1566.002, and
+// Navigator applies a layer's techniques[] entries sequentially, so
+// emitting one entry per (stage, technique) pair -- as an earlier version
+// of this handler did -- means only the last-processed stage survives on
+// screen: Delivery and Open are present in the JSON but invisible after
+// Navigator loads it.
+type techniqueAggregate struct {
+	score    int
+	measured bool
+	comments []string
+}
+
 // ResilienceNavigator returns an ATT&CK Navigator layer for one campaign.
 // Score is the number of distinct targets that reached the stage emulating
-// the technique, so an unexercised technique scores zero.
+// the technique, so an unexercised technique scores zero. Every distinct
+// techniqueID appears exactly once: when multiple stages share a
+// technique, score is the maximum target count across those stages, and
+// comment names each contributing stage and its count so no data is
+// hidden behind the aggregate.
 func (as *Server) ResilienceNavigator(w http.ResponseWriter, r *http.Request) {
 	report, ok := as.resilienceReport(w, r)
 	if !ok {
 		return
 	}
 
-	techniques := make([]navigatorTechnique, 0, len(report.Funnel))
+	// order preserves first-seen technique order (the funnel's kill-chain
+	// order) so the layer is stable and readable rather than shuffled by
+	// map iteration.
+	order := make([]string, 0, len(report.Funnel))
+	aggregates := make(map[string]*techniqueAggregate, len(report.Funnel))
 	for _, stage := range report.Funnel {
 		for _, technique := range stage.Techniques {
-			comment := string(stage.Stage)
-			color := "#8ec843" // exercised but nothing got through
-			if !stage.Measured {
-				comment += " (not measured)"
-				color = "#d3d3d3"
-			} else if stage.Targets > 0 {
-				color = "#e60d0d" // targets reached this stage
+			id := string(technique)
+			agg, seen := aggregates[id]
+			if !seen {
+				agg = &techniqueAggregate{}
+				aggregates[id] = agg
+				order = append(order, id)
 			}
-			techniques = append(techniques, navigatorTechnique{
-				TechniqueID: string(technique),
-				Score:       stage.Targets,
-				Color:       color,
-				Comment:     comment,
-				Enabled:     stage.Measured,
-			})
+			if stage.Targets > agg.score {
+				agg.score = stage.Targets
+			}
+			agg.measured = agg.measured || stage.Measured
+			comment := string(stage.Stage) + ": "
+			if stage.Measured {
+				comment += strconv.Itoa(stage.Targets)
+			} else {
+				comment += "not measured"
+			}
+			agg.comments = append(agg.comments, comment)
 		}
+	}
+
+	techniques := make([]navigatorTechnique, 0, len(order))
+	for _, id := range order {
+		agg := aggregates[id]
+		color := "#8ec843" // exercised but nothing got through
+		if !agg.measured {
+			color = "#d3d3d3"
+		} else if agg.score > 0 {
+			color = "#e60d0d" // targets reached this stage
+		}
+		techniques = append(techniques, navigatorTechnique{
+			TechniqueID: id,
+			Score:       agg.score,
+			Color:       color,
+			Comment:     strings.Join(agg.comments, "; "),
+			Enabled:     agg.measured,
+		})
 	}
 
 	JSONResponse(w, navigatorLayer{

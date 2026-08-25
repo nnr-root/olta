@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/s4l1hs/olta/pkg/campaign/models"
@@ -111,6 +112,56 @@ func TestNavigatorLayerIsWellFormed(t *testing.T) {
 	for _, technique := range layer.Techniques {
 		if technique.TechniqueID == "" {
 			t.Fatal("a technique entry has an empty techniqueID")
+		}
+	}
+}
+
+// TestNavigatorLayerAggregatesSharedTechniques is the regression test for
+// B4: Delivery, Open, and Lure all map to T1566.002, and an earlier version
+// of ResilienceNavigator emitted one entry per (stage, technique) pair.
+// Navigator applies techniques[] entries sequentially, so only the
+// last-processed stage survived on screen -- Delivery and Open were present
+// in the JSON but invisible after Navigator loaded it. Every distinct
+// techniqueID must now appear exactly once, and the shared T1566.002 entry
+// must name all three contributing stages so none of them is hidden.
+func TestNavigatorLayerAggregatesSharedTechniques(t *testing.T) {
+	ctx := setupTest(t)
+	createTestData(t)
+
+	request := httptest.NewRequest(http.MethodGet, "/api/campaigns/1/resilience/navigator", nil)
+	request.Header.Set("Authorization", fmt.Sprintf("Bearer %s", ctx.apiKey))
+	recorder := httptest.NewRecorder()
+	ctx.apiServer.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+
+	var layer struct {
+		Techniques []struct {
+			TechniqueID string `json:"techniqueID"`
+			Comment     string `json:"comment"`
+		} `json:"techniques"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &layer); err != nil {
+		t.Fatal(err)
+	}
+
+	seen := map[string]string{}
+	for _, technique := range layer.Techniques {
+		if previous, duplicate := seen[technique.TechniqueID]; duplicate {
+			t.Fatalf("techniqueID %q appears more than once: comments %q and %q", technique.TechniqueID, previous, technique.Comment)
+		}
+		seen[technique.TechniqueID] = technique.Comment
+	}
+
+	comment, ok := seen["T1566.002"]
+	if !ok {
+		t.Fatal("layer has no T1566.002 entry")
+	}
+	for _, stage := range []string{"delivery", "open", "lure"} {
+		if !strings.Contains(comment, stage) {
+			t.Fatalf("T1566.002 comment = %q, want it to mention stage %q", comment, stage)
 		}
 	}
 }
