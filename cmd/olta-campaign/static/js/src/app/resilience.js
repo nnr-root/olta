@@ -7,8 +7,14 @@
 // polling timer.
 
 // humanDuration formats a second count as a short, readable duration.
-function humanDuration(seconds) {
-    if (!seconds || seconds < 0) {
+//
+// hasValue distinguishes "no target has reported yet" from a genuine
+// zero-second median: median(nil) and a real 0-second median both resolve
+// to the number 0 from the API, and treating 0 as falsy (as an earlier
+// version of this function did via `!seconds`) rendered both as "n/a",
+// silently discarding the real "someone reported instantly" case.
+function humanDuration(seconds, hasValue) {
+    if (!hasValue || seconds < 0) {
         return "n/a"
     }
     if (seconds < 60) {
@@ -50,13 +56,34 @@ function renderFunnel(funnel) {
         '<tbody>' + rows + '</tbody></table>'
 }
 
+// renderFrictionScope builds the caption required under Defensive Friction:
+// cloak/verify events are unattributed by design (they fire before lure
+// validation resolves a recipient), so the server can only bound them to
+// the campaign's time window, not prove they came from this campaign
+// specifically. frictionScope is server-authored plain text (see
+// pkg/campaign/resilience.frictionScopeCaption) but is still escaped like
+// any other interpolated value.
+function renderFrictionScope(frictionScope) {
+    if (!frictionScope) {
+        return ""
+    }
+    return '<p class="text-muted"><small>' + escapeHtml(frictionScope) + '</small></p>'
+}
+
 // renderFriction shows cloaker enforcement grouped by network owner. A high
 // count from a security vendor's ASN is evidence the target's stack
 // detonated the link. organization and asn come from a remote cloud IP-range
 // feed, so both are escaped like any other untrusted value.
-function renderFriction(friction) {
+//
+// frictionScope is rendered as a caption under the heading on every code
+// path, including the empty-friction one: the caveat is about what the
+// counts mean when they exist, not something to skip when there happen to
+// be none this time.
+function renderFriction(friction, frictionScope) {
     if (!friction || friction.length === 0) {
-        return '<h4>Defensive Friction</h4><p class="text-muted">No cloaker enforcement recorded.</p>'
+        return '<h4>Defensive Friction</h4>' +
+            renderFrictionScope(frictionScope) +
+            '<p class="text-muted">No cloaker enforcement recorded.</p>'
     }
     var rows = ""
     $.each(friction, function (i, entry) {
@@ -67,16 +94,24 @@ function renderFriction(friction) {
             '</tr>'
     })
     return '<h4>Defensive Friction</h4>' +
+        renderFrictionScope(frictionScope) +
         '<table class="table table-condensed table-hover">' +
         '<thead><tr><th>Organization</th><th>ASN</th><th class="text-right">Blocked</th></tr></thead>' +
         '<tbody>' + rows + '</tbody></table>'
 }
 
-// renderRace answers whether the human layer beat the attacker.
+// renderRace answers whether the human layer beat the attacker. Delivered is
+// the denominator: every delivered target falls into exactly one of the
+// three buckets below, so it is rendered up front rather than left implicit
+// -- an earlier version of the underlying report only classified targets
+// that were captured or reported, silently omitting delivered targets who
+// never engaged at all from the count a reader could see.
 function renderRace(race) {
     race = race || {}
     return '<h4>Report vs. Capture</h4>' +
         '<table class="table table-condensed">' +
+        '<tr><td>Delivered</td><td class="text-right">' +
+        escapeHtml(String(race.delivered || 0)) + '</td></tr>' +
         '<tr><td>Reported before capture</td><td class="text-right"><strong>' +
         escapeHtml(String(race.reported_before_capture || 0)) + '</strong></td></tr>' +
         '<tr><td>Reported after capture</td><td class="text-right">' +
@@ -84,7 +119,7 @@ function renderRace(race) {
         '<tr><td>Never reported</td><td class="text-right">' +
         escapeHtml(String(race.never_reported || 0)) + '</td></tr>' +
         '<tr><td>Median time to report</td><td class="text-right">' +
-        escapeHtml(humanDuration(race.median_time_to_report_seconds)) + '</td></tr>' +
+        escapeHtml(humanDuration(race.median_time_to_report_seconds, race.has_median_time_to_report)) + '</td></tr>' +
         '</table>'
 }
 
@@ -141,7 +176,7 @@ function loadResilience(campaignId) {
             report = report || {}
             $("#resilience-panel").html(
                 renderFunnel(report.funnel) +
-                renderFriction(report.friction) +
+                renderFriction(report.friction, report.friction_scope) +
                 renderRace(report.race) +
                 renderNavigatorLink()
             )
