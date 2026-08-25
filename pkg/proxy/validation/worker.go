@@ -16,12 +16,6 @@ var (
 	ErrDuplicateEvent = errors.New("session validation event already queued")
 )
 
-// Dispatcher receives sanitized results. Implementations must not receive the
-// original Event and therefore cannot access captured cookies.
-type Dispatcher interface {
-	Dispatch(context.Context, Result) error
-}
-
 // WorkerConfig controls queue capacity, concurrency, and time limits.
 type WorkerConfig struct {
 	Workers           int
@@ -29,11 +23,9 @@ type WorkerConfig struct {
 	ValidationTimeout time.Duration
 	DispatchTimeout   time.Duration
 	Validator         Validator
-	Dispatcher        Dispatcher
 	// Emitter, when set, receives one replay-stage telemetry.Event per
-	// validation result. It is independent of Dispatcher: telemetry now
-	// flows through the shared bus rather than a validator-specific
-	// webhook, so any sink on that bus receives it.
+	// validation result. Telemetry flows through the shared bus rather than
+	// a validator-specific webhook, so any sink on that bus receives it.
 	Emitter  telemetry.Emitter
 	OnResult func(Result)
 	OnError  func(error)
@@ -148,15 +140,6 @@ func (worker *Worker) process(event Event) {
 		worker.config.OnResult(result)
 	}
 	worker.emitReplay(result)
-	if worker.config.Dispatcher == nil {
-		return
-	}
-	dispatchContext, cancelDispatch := context.WithTimeout(context.Background(), worker.config.DispatchTimeout)
-	err := worker.config.Dispatcher.Dispatch(dispatchContext, result)
-	cancelDispatch()
-	if err != nil {
-		worker.recordError(err)
-	}
 }
 
 func normalizeResult(result Result, event Event) Result {
