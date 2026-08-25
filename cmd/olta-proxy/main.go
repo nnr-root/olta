@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/caddyserver/certmagic"
-	"github.com/jinzhu/gorm"
 	feedclient "github.com/s4l1hs/olta/pkg/feed/client"
 	"github.com/s4l1hs/olta/pkg/proxy/campaignstore"
 	"github.com/s4l1hs/olta/pkg/proxy/core"
@@ -23,9 +22,7 @@ import (
 	"github.com/s4l1hs/olta/pkg/proxy/middleware/jsinspect"
 	"github.com/s4l1hs/olta/pkg/proxy/validation"
 	"github.com/s4l1hs/olta/pkg/runtimepath"
-	sqlitedsn "github.com/s4l1hs/olta/pkg/storage/sqlite"
 	"github.com/s4l1hs/olta/pkg/telemetry"
-	"github.com/s4l1hs/olta/pkg/telemetry/sink/campaigndb"
 	feedsink "github.com/s4l1hs/olta/pkg/telemetry/sink/feed"
 	"github.com/s4l1hs/olta/pkg/telemetry/sink/jsonl"
 	"github.com/s4l1hs/olta/pkg/telemetry/sink/webhook"
@@ -190,21 +187,26 @@ func main() {
 		}
 	}()
 
-	telemetryDB, err := gorm.Open("sqlite3", sqlitedsn.ConcurrentDSN(*campaign_db))
+	// campaignEvents is created before the telemetry bus (and therefore
+	// before the sinks that make it up) because the campaigndb sink now
+	// writes through the Store's own queue instead of a second database
+	// connection: the sink needs the Store, so the Store has to exist
+	// first. See campaignstore.Store.TelemetrySink.
+	campaignEvents, err := campaignstore.New(*campaign_db, *feed_url, *feed_enabled)
 	if err != nil {
-		log.Fatal("open telemetry database: %v", err)
+		log.Fatal("campaign event store: %v", err)
 		return
 	}
 	defer func() {
-		if err := telemetryDB.Close(); err != nil {
-			log.Error("telemetry database shutdown: %v", err)
+		if err := campaignEvents.Close(); err != nil {
+			log.Error("campaign event store shutdown: %v", err)
 		}
 	}()
 
 	// -webhook-url now feeds the shared bus, so every stage reaches it —
 	// delivery through replay — not only session-validation results as
 	// before.
-	sinks := []telemetry.Sink{campaigndb.New(telemetryDB)}
+	sinks := []telemetry.Sink{campaignEvents.TelemetrySink()}
 	if strings.TrimSpace(*webhook_url) != "" {
 		webhookSink, err := webhook.New(*webhook_url, nil)
 		if err != nil {
@@ -230,6 +232,7 @@ func main() {
 			log.Error("telemetry bus shutdown: %v", err)
 		}
 	}()
+	campaignEvents.SetEmitter(telemetryBus)
 
 	var sessionValidator *validation.Worker
 	if *enable_session_validator {
@@ -264,18 +267,6 @@ func main() {
 		defer unsubscribe()
 		log.Info("asynchronous session validator enabled with replay telemetry")
 	}
-
-	campaignEvents, err := campaignstore.New(*campaign_db, *feed_url, *feed_enabled)
-	if err != nil {
-		log.Fatal("campaign event store: %v", err)
-		return
-	}
-	defer func() {
-		if err := campaignEvents.Close(); err != nil {
-			log.Error("campaign event store shutdown: %v", err)
-		}
-	}()
-	campaignEvents.SetEmitter(telemetryBus)
 
 	bl, err := core.NewBlacklist(filepath.Join(*cfg_dir, "blacklist.txt"), db)
 	if err != nil {

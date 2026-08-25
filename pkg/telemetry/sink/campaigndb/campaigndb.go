@@ -41,6 +41,16 @@ func New(db *gorm.DB) *Sink { return &Sink{db: db} }
 // predates context support; it is accepted to satisfy telemetry.Sink and to
 // leave room for a context-aware driver later.
 func (s *Sink) Emit(_ context.Context, event telemetry.Event) error {
+	return Insert(s.db, event)
+}
+
+// Insert writes one event through the given handle using this package's row
+// mapping. It exists so a caller that must serialize writes through its own
+// queue — campaignstore's telemetry sink, which owns the Store's single
+// writer goroutine against the campaign database — can reuse the mapping
+// without duplicating it or going through a second Sink that would own (and
+// therefore contend on) its own handle.
+func Insert(db *gorm.DB, event telemetry.Event) error {
 	actor, err := json.Marshal(event.Actor)
 	if err != nil {
 		return err
@@ -53,7 +63,7 @@ func (s *Sink) Emit(_ context.Context, event telemetry.Event) error {
 		}
 		detail = string(encoded)
 	}
-	return s.db.Create(&row{
+	return db.Create(&row{
 		EventID:    event.ID,
 		Timestamp:  event.Timestamp,
 		Stage:      string(event.Stage),
