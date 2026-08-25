@@ -908,6 +908,10 @@ function load() {
                     });
                 }
                 updateMap(campaign.results)
+                // Load the purple-team resilience report once, here in load()
+                // rather than in poll() - it is a point-in-time summary, not
+                // a live view, so it is not refreshed on the polling timer.
+                loadResilience(campaign.id)
             }
         })
         .error(function () {
