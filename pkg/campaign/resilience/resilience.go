@@ -149,6 +149,11 @@ func Compute(db *gorm.DB, campaignID int64, window Window, enabled Features) (Re
 	return report, nil
 }
 
+// measured decides a stage's configured measured-state from Features alone.
+// It is the floor, not the final word: buildFunnel upgrades a stale false
+// to true when the row set itself proves the feature ran. It can never
+// upgrade a false when there is no such proof, and it never downgrades a
+// true -- an enabled feature can legitimately see zero matching events.
 func measured(stage telemetry.Stage, enabled Features) bool {
 	switch stage {
 	case telemetry.StageCloak:
@@ -183,11 +188,26 @@ func buildFunnel(rows []eventRow, enabled Features) []FunnelStage {
 
 	funnel := make([]FunnelStage, 0, len(funnelOrder))
 	for _, entry := range funnelOrder {
+		stageMeasured := measured(entry.stage, enabled)
+		// Self-correction: config false is only a claim, and it can go
+		// stale in either direction relative to how olta-proxy was
+		// actually launched. But one or more events for this stage is
+		// hard proof the feature ran -- asncloak only emits a cloak
+		// event when the cloaker matched a request, jsinspect only
+		// emits verify when browser verification is on, and the
+		// validation worker only emits replay when the session
+		// validator is on. So a stale false self-corrects to true on
+		// that evidence. Absence proves nothing (an enabled feature can
+		// simply never match), so a configured true is never
+		// downgraded, and a false with no events stays false.
+		if !stageMeasured && len(distinct[entry.stage]) > 0 {
+			stageMeasured = true
+		}
 		funnel = append(funnel, FunnelStage{
 			Stage:      entry.stage,
 			Techniques: entry.techniques,
 			Targets:    len(distinct[entry.stage]),
-			Measured:   measured(entry.stage, enabled),
+			Measured:   stageMeasured,
 		})
 	}
 	return funnel

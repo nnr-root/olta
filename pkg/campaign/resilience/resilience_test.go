@@ -347,3 +347,109 @@ func TestRaceClassifiesFullDeliveredPopulation(t *testing.T) {
 		t.Fatalf("buckets sum to %d, want Delivered = %d", sum, report.Race.Delivered)
 	}
 }
+
+// funnelStage finds a stage's row in the funnel, failing the test if it is
+// missing rather than letting callers silently skip an assertion.
+func funnelStage(t *testing.T, report Report, stage telemetry.Stage) FunnelStage {
+	t.Helper()
+	for _, s := range report.Funnel {
+		if s.Stage == stage {
+			return s
+		}
+	}
+	t.Fatalf("%s stage missing from the funnel", stage)
+	return FunnelStage{}
+}
+
+// TestMeasuredUpgradesFromEventsWhenConfigStale is the regression test for
+// the self-correction fix: config says the cloaker was off, but a cloak
+// event exists in the report's row set. Only asncloak emits a cloak event,
+// and only when the cloaker is running -- so the event is hard proof the
+// config's "false" is stale, and the stage must be upgraded to measured
+// rather than rendered as "Not measured" while real data sits right there.
+func TestMeasuredUpgradesFromEventsWhenConfigStale(t *testing.T) {
+	db := newDB(t)
+	base := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+
+	event := telemetry.New(telemetry.StageCloak, telemetry.OutcomeBlocked).
+		WithActor(telemetry.Actor{IP: "3.3.3.3", ASN: "AS8075", Organization: "Microsoft"})
+	event.Timestamp = base
+	if err := campaigndb.New(db).Emit(nil, event); err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := Compute(db, 1, wideWindow(base), Features{Cloaker: false, Verify: true, SessionValidator: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	stage := funnelStage(t, report, telemetry.StageCloak)
+	if !stage.Measured {
+		t.Fatal("cloak stage reported as not measured despite an observed cloak event proving the feature ran")
+	}
+	if stage.Targets != 1 {
+		t.Fatalf("cloak targets = %d, want 1", stage.Targets)
+	}
+	// Features must still reflect what was configured, not the upgrade.
+	if report.Features.Cloaker {
+		t.Fatal("Features.Cloaker was mutated by the upgrade; it must keep reporting what was configured")
+	}
+}
+
+// TestMeasuredStaysFalseWhenConfigFalseAndNoEvents pins the unchanged half
+// of the fix: absence of events proves nothing, so config false with no
+// corroborating evidence must still render as "Not measured".
+func TestMeasuredStaysFalseWhenConfigFalseAndNoEvents(t *testing.T) {
+	db := newDB(t)
+	base := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+
+	report, err := Compute(db, 1, wideWindow(base), Features{Cloaker: false, Verify: true, SessionValidator: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	stage := funnelStage(t, report, telemetry.StageCloak)
+	if stage.Measured {
+		t.Fatal("cloak stage reported as measured with config false and no events to corroborate it")
+	}
+}
+
+// TestMeasuredStaysTrueWhenConfigTrueAndNoEvents pins the operator-trust
+// direction: config true is taken at face value even with zero matching
+// events, since a feature can be enabled and simply never match anything.
+// Absence must never downgrade a configured true.
+func TestMeasuredStaysTrueWhenConfigTrueAndNoEvents(t *testing.T) {
+	db := newDB(t)
+	base := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+
+	report, err := Compute(db, 1, wideWindow(base), allFeatures())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	stage := funnelStage(t, report, telemetry.StageCloak)
+	if !stage.Measured {
+		t.Fatal("cloak stage reported as not measured despite config true (absence must never downgrade)")
+	}
+	if stage.Targets != 0 {
+		t.Fatalf("cloak targets = %d, want 0", stage.Targets)
+	}
+}
+
+// TestNonOptionalStageAlwaysMeasured confirms the upgrade logic is scoped
+// to the three optional stages: delivery has no on/off feature flag, so it
+// must always report measured regardless of Features.
+func TestNonOptionalStageAlwaysMeasured(t *testing.T) {
+	db := newDB(t)
+	base := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+
+	report, err := Compute(db, 1, wideWindow(base), Features{Cloaker: false, Verify: false, SessionValidator: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	stage := funnelStage(t, report, telemetry.StageDelivery)
+	if !stage.Measured {
+		t.Fatal("delivery stage reported as not measured; delivery has no optional feature flag")
+	}
+}

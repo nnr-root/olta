@@ -38,11 +38,24 @@ type PhishServer struct {
 // enabled for this engagement, so the campaign resilience report knows
 // which kill-chain stages actually had a watcher.
 //
-// These three booleans MUST match how olta-proxy was launched
+// These three booleans SHOULD match how olta-proxy was launched
 // (-enable-cloaker, -enable-js-inspect, -enable-session-validator
-// respectively). A mismatch makes the resilience report claim a stage was
-// measured when nothing was watching it, or unmeasured when something was
-// — either way the report becomes a false record of the engagement.
+// respectively), but they are a floor, not the final word: the resilience
+// report (pkg/campaign/resilience) treats a false here as a claim that can
+// be corrected by observed evidence, not a fact taken on faith. asncloak,
+// jsinspect, and the session validation worker only ever emit an event for
+// their stage when the corresponding proxy feature is actually running, so
+// even one such event in the report's row set is hard proof the feature was
+// on. If that happens while the matching field here is false, the stage is
+// upgraded to measured automatically -- a stale false self-corrects.
+//
+// A stale true does NOT self-correct: absence of events proves nothing (an
+// enabled feature can simply never match anything), so a field left true
+// after olta-proxy was actually launched without that flag will make the
+// report claim a stage was measured and clean when nothing was watching it.
+// That direction remains the operator's responsibility -- keep these three
+// booleans set to true only when the matching -enable-* flag is actually
+// passed to olta-proxy.
 type TelemetryFeatures struct {
 	// Cloaker must match olta-proxy's -enable-cloaker flag.
 	Cloaker bool `json:"cloaker"`
