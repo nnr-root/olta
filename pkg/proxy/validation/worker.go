@@ -21,14 +21,12 @@ type WorkerConfig struct {
 	Workers           int
 	QueueSize         int
 	ValidationTimeout time.Duration
-	DispatchTimeout   time.Duration
 	Validator         Validator
 	// Emitter, when set, receives one replay-stage telemetry.Event per
 	// validation result. Telemetry flows through the shared bus rather than
 	// a validator-specific webhook, so any sink on that bus receives it.
 	Emitter  telemetry.Emitter
 	OnResult func(Result)
-	OnError  func(error)
 }
 
 // Worker owns a bounded, non-blocking input queue and a fixed goroutine pool.
@@ -42,9 +40,6 @@ type Worker struct {
 	shutdown  chan struct{}
 	wg        sync.WaitGroup
 	closeOnce sync.Once
-
-	errorMu sync.Mutex
-	lastErr error
 }
 
 // NewWorker starts a validation worker pool.
@@ -58,13 +53,10 @@ func NewWorker(config WorkerConfig) (*Worker, error) {
 	if config.ValidationTimeout == 0 {
 		config.ValidationTimeout = 10 * time.Second
 	}
-	if config.DispatchTimeout == 0 {
-		config.DispatchTimeout = 5 * time.Second
-	}
 	if config.Workers < 1 || config.QueueSize < 1 {
 		return nil, fmt.Errorf("session validator workers and queue size must be positive")
 	}
-	if config.ValidationTimeout <= 0 || config.DispatchTimeout <= 0 {
+	if config.ValidationTimeout <= 0 {
 		return nil, fmt.Errorf("session validator timeouts must be positive")
 	}
 	if config.Validator == nil {
@@ -207,19 +199,13 @@ func (worker *Worker) emitReplay(result Result) {
 	)
 }
 
-func (worker *Worker) recordError(err error) {
-	worker.errorMu.Lock()
-	worker.lastErr = err
-	worker.errorMu.Unlock()
-	if worker.config.OnError != nil {
-		worker.config.OnError(err)
-	}
-}
-
-// Close stops new events, drains queued work, and waits for workers.
-func (worker *Worker) Close() error {
+// Close stops new events, drains queued work, and waits for workers. It
+// cannot fail: nothing on the shutdown path performs I/O of its own, and
+// worker.process errors are per-job results delivered through OnResult, not
+// worker-level failures, so there is nothing for Close to report.
+func (worker *Worker) Close() {
 	if worker == nil {
-		return nil
+		return
 	}
 	worker.closeOnce.Do(func() {
 		worker.acceptMu.Lock()
@@ -228,7 +214,4 @@ func (worker *Worker) Close() error {
 		close(worker.shutdown)
 		worker.wg.Wait()
 	})
-	worker.errorMu.Lock()
-	defer worker.errorMu.Unlock()
-	return worker.lastErr
 }

@@ -241,19 +241,12 @@ func main() {
 			OnResult: func(result validation.Result) {
 				log.Info("session validator: %s session %s for %s", result.Status, result.SessionReference, result.TargetHost)
 			},
-			OnError: func(err error) {
-				log.Error("session validator: %v", err)
-			},
 		})
 		if err != nil {
 			log.Fatal("session validator: %v", err)
 			return
 		}
-		defer func() {
-			if err := sessionValidator.Close(); err != nil {
-				log.Error("session validator shutdown: %v", err)
-			}
-		}()
+		defer sessionValidator.Close()
 		unsubscribe := db.SubscribeSessionCaptures(func(session *database.Session) {
 			event, eventErr := validation.NewEvent(session)
 			if eventErr != nil {

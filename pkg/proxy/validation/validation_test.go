@@ -59,9 +59,7 @@ func TestWorkerQueuesWithoutBlockingAndDrains(t *testing.T) {
 	}
 
 	close(validator.release)
-	if err := worker.Close(); err != nil {
-		t.Fatalf("Close() error = %v", err)
-	}
+	worker.Close()
 	close(results)
 	count := 0
 	for range results {
@@ -153,9 +151,7 @@ func TestWorkerEmitsReplayTelemetryPerResult(t *testing.T) {
 			case <-time.After(time.Second):
 				t.Fatal("validator did not complete")
 			}
-			if err := worker.Close(); err != nil {
-				t.Fatalf("Close() error = %v", err)
-			}
+			worker.Close()
 
 			events := emitter.all()
 			if len(events) != 1 {
@@ -193,9 +189,7 @@ func TestWorkerIsSafeWithNoEmitter(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("validator did not complete")
 	}
-	if err := worker.Close(); err != nil {
-		t.Fatalf("Close() error = %v", err)
-	}
+	worker.Close()
 	// Reaching here without a panic is the assertion.
 }
 
