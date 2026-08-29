@@ -49,7 +49,7 @@ Promote `pkg/proxy/telemetry` to `pkg/telemetry`, shared by all three services.
 
 ```go
 type Event struct {
-    ID         string       // ULID
+    ID         string       // 128-bit random hex, 32 chars
     Timestamp  time.Time
     Stage      Stage        // delivery|open|lure|cloak|verify|credential|capture|replay|report
     Outcome    Outcome      // allowed|blocked|redirected|captured|failed
@@ -60,6 +60,8 @@ type Event struct {
     Detail     map[string]any
 }
 ```
+
+The ID is a 128-bit `crypto/rand` value hex-encoded to 32 characters, not a ULID. A ULID would add a module dependency for time-sortability that the indexed `timestamp` column already provides, so the trade was not worth it. Chronological ordering comes from `timestamp`, never from the ID.
 
 `CampaignID` and `RID` are optional, and that is the load-bearing decision. Cloak and verify events fire before lure validation establishes a recipient identity. Allowing unattributed events is what makes those two stages representable at all, and it is the specific thing approach A could not do.
 
@@ -86,6 +88,8 @@ This is what makes the stream safe to forward to a client's SOC, so it is enforc
 | report | `pkg/campaign/imap/monitor.go:175` `HandleEmailReport` | *defender signal, no technique* |
 
 Six of the nine fire at call sites that already exist and need only a one-line emit: delivery, open, lure, credential, capture, and report. Two are genuinely new instrumentation — cloak and verify. One rewires an existing dispatcher — replay.
+
+**SMS campaigns reuse T1566.002 rather than getting their own technique.** Enterprise ATT&CK has no smishing sub-technique; the nearest match, T1660 Phishing, belongs to the Mobile matrix, and mixing matrices would invalidate the Navigator layer in section 6, which declares `domain: "enterprise-attack"`. T1566.002 is defensible for an SMS-delivered phishing link — the technique describes the link, not the transport. To keep engagement reports able to separate the two channels without misusing a technique ID, every delivery, open, lure, and credential event carries `medium` in its detail, valued `"email"` or `"sms"`. The `SMSTarget` flag already on each result supplies it.
 
 The three that make the layer purple rather than red are cloak, verify, and report: the first two record what pushed back, and the third records that a human noticed.
 
@@ -122,7 +126,7 @@ Wiring: `cmd/olta-proxy/main.go` constructs a bus from flags and passes an `Emit
 
 New table `telemetry_events`, added as campaign migration **006** for both SQLite and MySQL, bumping `migrations.CurrentVersion` from 5 to 6 (`pkg/campaign/migrations/migrations.go:11`). Migration 005 is the in-flight secret-storage work and is not disturbed.
 
-Columns: `id`, `event_id` (ULID, unique), `timestamp`, `stage`, `outcome`, `techniques`, `campaign_id` (nullable), `rid` (nullable), `actor` (JSON), `detail` (JSON). Indexed on `campaign_id`, `rid`, and `timestamp`.
+Columns: `id`, `event_id` (32-char random hex, unique), `timestamp`, `stage`, `outcome`, `techniques`, `campaign_id` (nullable), `rid` (nullable), `actor` (JSON), `detail` (JSON). Indexed on `campaign_id`, `rid`, and `timestamp`.
 
 ### 6. The resilience report
 

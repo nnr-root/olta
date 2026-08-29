@@ -13,6 +13,11 @@
     },
     "feed_enabled": false,
     "feed_url": "ws://localhost:1337/ws/publish",
+    "telemetry": {
+        "cloaker": false,
+        "verify": false,
+        "session_validator": false
+    },
     "db_name": "sqlite3",
     "db_path": "olta-campaign.db",
     "contact_address": "",

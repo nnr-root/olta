@@ -34,18 +34,37 @@ type PhishServer struct {
 	TrustedProxies []string `json:"trusted_proxies"`
 }
 
+// TelemetryFeatures records which optional olta-proxy capabilities were
+// enabled for this engagement, so the campaign resilience report knows
+// which kill-chain stages actually had a watcher.
+//
+// These three booleans MUST match how olta-proxy was launched
+// (-enable-cloaker, -enable-js-inspect, -enable-session-validator
+// respectively). A mismatch makes the resilience report claim a stage was
+// measured when nothing was watching it, or unmeasured when something was
+// — either way the report becomes a false record of the engagement.
+type TelemetryFeatures struct {
+	// Cloaker must match olta-proxy's -enable-cloaker flag.
+	Cloaker bool `json:"cloaker"`
+	// Verify must match olta-proxy's -enable-js-inspect flag.
+	Verify bool `json:"verify"`
+	// SessionValidator must match olta-proxy's -enable-session-validator flag.
+	SessionValidator bool `json:"session_validator"`
+}
+
 // Config represents the configuration information.
 type Config struct {
-	AdminConf      AdminServer `json:"admin_server"`
-	PhishConf      PhishServer `json:"phish_server"`
-	DBName         string      `json:"db_name"`
-	DBPath         string      `json:"db_path"`
-	DBSSLCaPath    string      `json:"db_sslca_path"`
-	TestFlag       bool        `json:"test_flag"`
-	ContactAddress string      `json:"contact_address"`
-	Logging        *log.Config `json:"logging"`
-	FeedEnabled    bool        `json:"feed_enabled"`
-	FeedURL        string      `json:"feed_url"`
+	AdminConf      AdminServer       `json:"admin_server"`
+	PhishConf      PhishServer       `json:"phish_server"`
+	DBName         string            `json:"db_name"`
+	DBPath         string            `json:"db_path"`
+	DBSSLCaPath    string            `json:"db_sslca_path"`
+	TestFlag       bool              `json:"test_flag"`
+	ContactAddress string            `json:"contact_address"`
+	Logging        *log.Config       `json:"logging"`
+	FeedEnabled    bool              `json:"feed_enabled"`
+	FeedURL        string            `json:"feed_url"`
+	Telemetry      TelemetryFeatures `json:"telemetry"`
 }
 
 // Version contains the current Olta Campaign version.

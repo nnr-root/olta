@@ -7,6 +7,7 @@ import (
 	mid "github.com/s4l1hs/olta/pkg/campaign/middleware"
 	"github.com/s4l1hs/olta/pkg/campaign/middleware/ratelimit"
 	"github.com/s4l1hs/olta/pkg/campaign/models"
+	"github.com/s4l1hs/olta/pkg/campaign/resilience"
 	"github.com/s4l1hs/olta/pkg/campaign/smsworker"
 	"github.com/s4l1hs/olta/pkg/campaign/worker"
 )
@@ -25,6 +26,7 @@ type Server struct {
 	limiter                 *ratelimit.PostLimiter
 	allowedOrigins          []string
 	allowInsecureSiteImport bool
+	telemetryFeatures       resilience.Features
 }
 
 // NewServer returns a new instance of the API handler with the provided
@@ -78,6 +80,13 @@ func WithInsecureSiteImport(allowed bool) ServerOption {
 	return func(as *Server) { as.allowInsecureSiteImport = allowed }
 }
 
+// WithTelemetryFeatures sets which optional olta-proxy capabilities were
+// enabled for this engagement, so the resilience report can distinguish an
+// unmeasured stage from one that was measured and saw nothing.
+func WithTelemetryFeatures(features resilience.Features) ServerOption {
+	return func(as *Server) { as.telemetryFeatures = features }
+}
+
 // Close releases background resources owned by the API handler.
 func (as *Server) Close() {
 	as.limiter.Close()
@@ -99,6 +108,8 @@ func (as *Server) registerRoutes() {
 	router.HandleFunc("/campaigns/{id:[0-9]+}/results", as.CampaignResults)
 	router.HandleFunc("/campaigns/{id:[0-9]+}/summary", as.CampaignSummary)
 	router.HandleFunc("/campaigns/{id:[0-9]+}/complete", as.CampaignComplete)
+	router.HandleFunc("/campaigns/{id:[0-9]+}/resilience", as.Resilience).Methods("GET")
+	router.HandleFunc("/campaigns/{id:[0-9]+}/resilience/navigator", as.ResilienceNavigator).Methods("GET")
 	router.HandleFunc("/groups/", as.Groups)
 	router.HandleFunc("/groups/summary", as.GroupsSummary)
 	router.HandleFunc("/groups/{id:[0-9]+}", as.Group)

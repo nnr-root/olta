@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	"github.com/s4l1hs/olta/pkg/telemetry"
 )
 
 var (
@@ -14,22 +16,17 @@ var (
 	ErrDuplicateEvent = errors.New("session validation event already queued")
 )
 
-// Dispatcher receives sanitized results. Implementations must not receive the
-// original Event and therefore cannot access captured cookies.
-type Dispatcher interface {
-	Dispatch(context.Context, Result) error
-}
-
 // WorkerConfig controls queue capacity, concurrency, and time limits.
 type WorkerConfig struct {
 	Workers           int
 	QueueSize         int
 	ValidationTimeout time.Duration
-	DispatchTimeout   time.Duration
 	Validator         Validator
-	Dispatcher        Dispatcher
-	OnResult          func(Result)
-	OnError           func(error)
+	// Emitter, when set, receives one replay-stage telemetry.Event per
+	// validation result. Telemetry flows through the shared bus rather than
+	// a validator-specific webhook, so any sink on that bus receives it.
+	Emitter  telemetry.Emitter
+	OnResult func(Result)
 }
 
 // Worker owns a bounded, non-blocking input queue and a fixed goroutine pool.
@@ -43,9 +40,6 @@ type Worker struct {
 	shutdown  chan struct{}
 	wg        sync.WaitGroup
 	closeOnce sync.Once
-
-	errorMu sync.Mutex
-	lastErr error
 }
 
 // NewWorker starts a validation worker pool.
@@ -59,13 +53,10 @@ func NewWorker(config WorkerConfig) (*Worker, error) {
 	if config.ValidationTimeout == 0 {
 		config.ValidationTimeout = 10 * time.Second
 	}
-	if config.DispatchTimeout == 0 {
-		config.DispatchTimeout = 5 * time.Second
-	}
 	if config.Workers < 1 || config.QueueSize < 1 {
 		return nil, fmt.Errorf("session validator workers and queue size must be positive")
 	}
-	if config.ValidationTimeout <= 0 || config.DispatchTimeout <= 0 {
+	if config.ValidationTimeout <= 0 {
 		return nil, fmt.Errorf("session validator timeouts must be positive")
 	}
 	if config.Validator == nil {
@@ -140,15 +131,7 @@ func (worker *Worker) process(event Event) {
 	if worker.config.OnResult != nil {
 		worker.config.OnResult(result)
 	}
-	if worker.config.Dispatcher == nil {
-		return
-	}
-	dispatchContext, cancelDispatch := context.WithTimeout(context.Background(), worker.config.DispatchTimeout)
-	err := worker.config.Dispatcher.Dispatch(dispatchContext, result)
-	cancelDispatch()
-	if err != nil {
-		worker.recordError(err)
-	}
+	worker.emitReplay(result)
 }
 
 func normalizeResult(result Result, event Event) Result {
@@ -180,19 +163,49 @@ func normalizeResult(result Result, event Event) Result {
 	return result
 }
 
-func (worker *Worker) recordError(err error) {
-	worker.errorMu.Lock()
-	worker.lastErr = err
-	worker.errorMu.Unlock()
-	if worker.config.OnError != nil {
-		worker.config.OnError(err)
+// replayOutcome maps a validation status to a replay-stage telemetry
+// outcome. There is no boolean validity field on Result to switch on
+// instead — Status is the only signal.
+func replayOutcome(status Status) telemetry.Outcome {
+	switch status {
+	case StatusValid:
+		// The stolen cookie still works: the session survived.
+		return telemetry.OutcomeAllowed
+	case StatusInvalid:
+		// The session was revoked or expired between capture and replay.
+		return telemetry.OutcomeBlocked
+	default:
+		return telemetry.OutcomeFailed
 	}
 }
 
-// Close stops new events, drains queued work, and waits for workers.
-func (worker *Worker) Close() error {
+// emitReplay records one replay-stage event per validation result.
+// SessionReference is already a truncated SHA-256 digest of the session ID
+// (see baseResult in types.go), never the session ID itself, so it is safe
+// to carry. Identity.Username and TenantID are deliberately excluded: they
+// are recipient identity, allowlisted for the webhook payload but not
+// needed by the resilience report.
+func (worker *Worker) emitReplay(result Result) {
+	if worker.config.Emitter == nil {
+		return
+	}
+	worker.config.Emitter.Emit(
+		telemetry.New(telemetry.StageReplay, replayOutcome(result.Status), telemetry.TechniqueWebSessionCookie).
+			WithActor(telemetry.Actor{Organization: result.Identity.Organization}).
+			WithDetail("session_reference", result.SessionReference).
+			WithDetail("phishlet", result.Phishlet).
+			WithDetail("target_host", result.TargetHost).
+			WithDetail("http_status", result.HTTPStatus),
+	)
+}
+
+// Close stops new events, drains queued work, and waits for workers. It
+// cannot fail: nothing on the shutdown path performs I/O of its own, and
+// worker.process errors are per-job results delivered through OnResult, not
+// worker-level failures, so there is nothing for Close to report.
+func (worker *Worker) Close() {
 	if worker == nil {
-		return nil
+		return
 	}
 	worker.closeOnce.Do(func() {
 		worker.acceptMu.Lock()
@@ -201,7 +214,4 @@ func (worker *Worker) Close() error {
 		close(worker.shutdown)
 		worker.wg.Wait()
 	})
-	worker.errorMu.Lock()
-	defer worker.errorMu.Unlock()
-	return worker.lastErr
 }

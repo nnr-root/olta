@@ -2,7 +2,6 @@ package validation_test
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -12,8 +11,8 @@ import (
 	"time"
 
 	"github.com/s4l1hs/olta/pkg/proxy/database"
-	"github.com/s4l1hs/olta/pkg/proxy/telemetry"
 	"github.com/s4l1hs/olta/pkg/proxy/validation"
+	"github.com/s4l1hs/olta/pkg/telemetry"
 )
 
 type blockingValidator struct {
@@ -60,9 +59,7 @@ func TestWorkerQueuesWithoutBlockingAndDrains(t *testing.T) {
 	}
 
 	close(validator.release)
-	if err := worker.Close(); err != nil {
-		t.Fatalf("Close() error = %v", err)
-	}
+	worker.Close()
 	close(results)
 	count := 0
 	for range results {
@@ -98,43 +95,108 @@ func TestHTTPValidatorSendsCookiesAndExtractsMetadata(t *testing.T) {
 	}
 }
 
-func TestPayloadFormattingOmitsSessionSecrets(t *testing.T) {
-	result := validation.Result{
-		Timestamp:        time.Date(2026, 8, 9, 12, 0, 0, 0, time.UTC),
-		SessionReference: "abc123def456",
-		Phishlet:         "o365",
-		TargetHost:       "login.example.test",
-		Identity: validation.Identity{
-			Username:     "analyst@example.test",
-			TenantID:     "tenant-42",
-			Organization: "SOC Lab",
-		},
-		Status:     validation.StatusValid,
-		HTTPStatus: http.StatusOK,
-		Detail:     "target accepted the captured session",
+type capturingEmitter struct {
+	mu     sync.Mutex
+	events []telemetry.Event
+}
+
+func (e *capturingEmitter) Emit(event telemetry.Event) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.events = append(e.events, event)
+}
+
+func (e *capturingEmitter) all() []telemetry.Event {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return append([]telemetry.Event(nil), e.events...)
+}
+
+type statusValidator struct{ status validation.Status }
+
+func (v statusValidator) Validate(_ context.Context, event validation.Event) validation.Result {
+	return validation.Result{Status: v.status, Identity: event.Identity}
+}
+
+func TestWorkerEmitsReplayTelemetryPerResult(t *testing.T) {
+	cases := []struct {
+		name    string
+		status  validation.Status
+		outcome telemetry.Outcome
+	}{
+		{"valid session survives replay", validation.StatusValid, telemetry.OutcomeAllowed},
+		{"invalid session was blocked", validation.StatusInvalid, telemetry.OutcomeBlocked},
+		{"error maps to failed", validation.StatusError, telemetry.OutcomeFailed},
 	}
-	for _, provider := range []telemetry.Provider{telemetry.ProviderGeneric, telemetry.ProviderSlack, telemetry.ProviderDiscord} {
-		t.Run(string(provider), func(t *testing.T) {
-			payload, err := telemetry.FormatPayload(provider, result)
+
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			emitter := &capturingEmitter{}
+			done := make(chan struct{})
+			worker, err := validation.NewWorker(validation.WorkerConfig{
+				Workers:   1,
+				QueueSize: 1,
+				Validator: statusValidator{status: testCase.status},
+				Emitter:   emitter,
+				OnResult:  func(validation.Result) { close(done) },
+			})
 			if err != nil {
-				t.Fatalf("FormatPayload() error = %v", err)
+				t.Fatalf("NewWorker() error = %v", err)
 			}
-			var decoded interface{}
-			if err := json.Unmarshal(payload, &decoded); err != nil {
-				t.Fatalf("payload is not JSON: %v", err)
+			if err := worker.Enqueue(testEvent("replay-" + string(testCase.status))); err != nil {
+				t.Fatalf("Enqueue() error = %v", err)
 			}
-			text := string(payload)
-			if !strings.Contains(text, "analyst@example.test") || !strings.Contains(text, "valid") {
-				t.Errorf("payload missing identity/status: %s", text)
+			select {
+			case <-done:
+			case <-time.After(time.Second):
+				t.Fatal("validator did not complete")
 			}
-			for _, secretMarker := range []string{"secret-value", "cookie", "token"} {
-				if strings.Contains(strings.ToLower(text), secretMarker) {
-					t.Errorf("payload contains secret marker %q: %s", secretMarker, text)
-				}
+			worker.Close()
+
+			events := emitter.all()
+			if len(events) != 1 {
+				t.Fatalf("emitted %d events, want 1", len(events))
+			}
+			if events[0].Stage != telemetry.StageReplay {
+				t.Fatalf("Stage = %q, want replay", events[0].Stage)
+			}
+			if events[0].Outcome != testCase.outcome {
+				t.Fatalf("Outcome = %q, want %q", events[0].Outcome, testCase.outcome)
+			}
+			if events[0].Techniques[0] != telemetry.TechniqueWebSessionCookie {
+				t.Fatalf("Techniques = %v, want [%q]", events[0].Techniques, telemetry.TechniqueWebSessionCookie)
 			}
 		})
 	}
 }
+
+func TestWorkerIsSafeWithNoEmitter(t *testing.T) {
+	done := make(chan struct{})
+	worker, err := validation.NewWorker(validation.WorkerConfig{
+		Workers:   1,
+		QueueSize: 1,
+		Validator: statusValidator{status: validation.StatusValid},
+		OnResult:  func(validation.Result) { close(done) },
+	})
+	if err != nil {
+		t.Fatalf("NewWorker() error = %v", err)
+	}
+	if err := worker.Enqueue(testEvent("no-emitter")); err != nil {
+		t.Fatalf("Enqueue() error = %v", err)
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("validator did not complete")
+	}
+	worker.Close()
+	// Reaching here without a panic is the assertion.
+}
+
+// Webhook payload formatting moved to pkg/telemetry/sink/webhook along with
+// the dispatcher it used to belong to (see webhook_test.go's
+// TestSinkPostsEvent and TestSinkCarriesNoLoot for the equivalent coverage
+// against telemetry.Event, which is what the payload builder takes now).
 
 func TestNewEventExtractsAllowlistedMetadata(t *testing.T) {
 	event, err := validation.NewEvent(&database.Session{

@@ -42,9 +42,12 @@ import (
 	log "github.com/s4l1hs/olta/pkg/campaign/logger"
 	"github.com/s4l1hs/olta/pkg/campaign/middleware"
 	"github.com/s4l1hs/olta/pkg/campaign/models"
+	"github.com/s4l1hs/olta/pkg/campaign/resilience"
 	"github.com/s4l1hs/olta/pkg/campaign/webhook"
 	"github.com/s4l1hs/olta/pkg/campaign/worker"
 	"github.com/s4l1hs/olta/pkg/runtimepath"
+	"github.com/s4l1hs/olta/pkg/telemetry"
+	"github.com/s4l1hs/olta/pkg/telemetry/sink/campaigndb"
 )
 
 const (
@@ -137,6 +140,15 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+
+	telemetryBus := telemetry.NewBus(1024, campaigndb.New(models.DB()))
+	models.SetTelemetryEmitter(telemetryBus)
+	defer func() {
+		if err := telemetryBus.Close(); err != nil {
+			log.Errorf("telemetry bus shutdown: %v", err)
+		}
+	}()
+
 	if !middleware.ConfigureStoreFromMasterKey() {
 		log.Warn("session cookies use process-local keys; configure OLTA_MASTER_KEY for restart-safe sessions")
 	}
@@ -165,6 +177,11 @@ func main() {
 		}
 		adminOptions = append(adminOptions, controllers.WithWorker(campaignWorker))
 	}
+	adminOptions = append(adminOptions, controllers.WithTelemetryFeatures(resilience.Features{
+		Cloaker:          conf.Telemetry.Cloaker,
+		Verify:           conf.Telemetry.Verify,
+		SessionValidator: conf.Telemetry.SessionValidator,
+	}))
 	adminConfig := conf.AdminConf
 	adminServer := controllers.NewAdminServer(adminConfig, adminOptions...)
 	middleware.Store.Options.Secure = adminConfig.UseTLS
@@ -193,6 +210,9 @@ func main() {
 	}
 	if *mode == modePhish || *mode == modeAll {
 		phishServer.Shutdown()
+	}
+	if err := telemetryBus.Close(); err != nil {
+		log.Errorf("telemetry bus shutdown: %v", err)
 	}
 
 }

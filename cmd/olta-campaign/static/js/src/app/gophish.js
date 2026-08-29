@@ -106,6 +106,14 @@ var api = {
         results: function (id) {
             return query("/campaigns/" + id + "/results", "GET", {}, true)
         },
+        // resilience() - Queries the API for GET /campaigns/:id/resilience
+        resilience: function (id) {
+            return query("/campaigns/" + id + "/resilience", "GET", {}, true)
+        },
+        // resilienceNavigator() - Queries the API for GET /campaigns/:id/resilience/navigator
+        resilienceNavigator: function (id) {
+            return query("/campaigns/" + id + "/resilience/navigator", "GET", {}, true)
+        },
         // complete() - Completes a campaign at POST /campaigns/:id/complete
         complete: function (id) {
             return query("/campaigns/" + id + "/complete", "GET", {}, true)

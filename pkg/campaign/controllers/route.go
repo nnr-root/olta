@@ -25,6 +25,7 @@ import (
 	mid "github.com/s4l1hs/olta/pkg/campaign/middleware"
 	"github.com/s4l1hs/olta/pkg/campaign/middleware/ratelimit"
 	"github.com/s4l1hs/olta/pkg/campaign/models"
+	"github.com/s4l1hs/olta/pkg/campaign/resilience"
 	"github.com/s4l1hs/olta/pkg/campaign/secrets"
 	"github.com/s4l1hs/olta/pkg/campaign/smsworker"
 	"github.com/s4l1hs/olta/pkg/campaign/util"
@@ -38,11 +39,12 @@ type AdminServerOption func(*AdminServer)
 // AdminServer is an HTTP server that implements the administrative Gophish
 // handlers, including the dashboard and REST API.
 type AdminServer struct {
-	server    *http.Server
-	worker    worker.Worker
-	smsworker smsworker.Worker
-	config    config.AdminServer
-	limiter   *ratelimit.PostLimiter
+	server            *http.Server
+	worker            worker.Worker
+	smsworker         smsworker.Worker
+	config            config.AdminServer
+	limiter           *ratelimit.PostLimiter
+	telemetryFeatures resilience.Features
 }
 
 var defaultTLSConfig = &tls.Config{
@@ -77,6 +79,16 @@ func WithWorker(w worker.Worker) AdminServerOption {
 func WithSmsWorker(s smsworker.Worker) AdminServerOption {
 	return func(as *AdminServer) {
 		as.smsworker = s
+	}
+}
+
+// WithTelemetryFeatures sets which optional olta-proxy capabilities were
+// enabled for this engagement. It is threaded through to the API server so
+// the resilience report can tell an unmeasured stage from a measured one
+// that saw nothing.
+func WithTelemetryFeatures(features resilience.Features) AdminServerOption {
+	return func(as *AdminServer) {
+		as.telemetryFeatures = features
 	}
 }
 
@@ -179,6 +191,7 @@ func (as *AdminServer) registerRoutes() {
 		api.WithLimiter(as.limiter),
 		api.WithAllowedOrigins(as.config.AllowedAPIOrigins),
 		api.WithInsecureSiteImport(as.config.AllowInsecureSiteImport),
+		api.WithTelemetryFeatures(as.telemetryFeatures),
 	)
 	router.PathPrefix("/api/").Handler(api)
 

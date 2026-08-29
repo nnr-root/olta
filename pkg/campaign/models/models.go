@@ -17,6 +17,9 @@ import (
 var db *gorm.DB
 var conf *config.Config
 
+// DB returns the package-level database handle. It is nil until Setup runs.
+func DB() *gorm.DB { return db }
+
 const MaxDatabaseConnectionAttempts int = 10
 
 // DefaultAdminUsername is the default username for the administrative user

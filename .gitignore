@@ -37,3 +37,7 @@ graphify-out/
 .graphifyignore
 AGENTS.md
 CLAUDE.md
+.superpowers/
+
+# Node dependencies (dashboard build tooling)
+node_modules/

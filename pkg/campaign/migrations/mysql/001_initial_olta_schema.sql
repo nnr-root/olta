@@ -251,6 +251,23 @@ CREATE TABLE IF NOT EXISTS `imap` (
     `ignore_cert_errors` BOOLEAN
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+CREATE TABLE IF NOT EXISTS `telemetry_events` (
+    `id` BIGINT PRIMARY KEY AUTO_INCREMENT,
+    `event_id` VARCHAR(32) NOT NULL,
+    `timestamp` DATETIME NOT NULL,
+    `stage` VARCHAR(32) NOT NULL,
+    `outcome` VARCHAR(32) NOT NULL,
+    `techniques` VARCHAR(255),
+    `campaign_id` BIGINT,
+    `rid` VARCHAR(255),
+    `actor` TEXT,
+    `detail` TEXT,
+    UNIQUE INDEX `idx_telemetry_events_event_id` (`event_id`),
+    INDEX `idx_telemetry_events_campaign_id` (`campaign_id`),
+    INDEX `idx_telemetry_events_rid` (`rid`),
+    INDEX `idx_telemetry_events_timestamp` (`timestamp`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 INSERT IGNORE INTO `roles` (`slug`, `name`, `description`) VALUES
     ('admin', 'Admin', 'Olta system administrator with full permissions'),
     ('user', 'User', 'Olta user with campaign and object permissions');
