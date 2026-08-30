@@ -8,7 +8,7 @@ import (
 )
 
 const (
-	VERSION = "3.2.0"
+	VERSION = "1.0.0-Alpha"
 )
 
 func putAsciiArt(s string) {
@@ -64,7 +64,15 @@ func printOneliner1() {
 	handleClr := color.New(color.FgHiBlue)
 	versionClr := color.New(color.FgGreen)
 	textClr := color.New(color.FgHiBlack)
-	spc := strings.Repeat(" ", 10-len(VERSION))
+	// Pad so the "version" label lines up for short version strings, but
+	// never let the count go negative: VERSION grew from "3.2.0" (5 chars)
+	// to "1.0.0-Alpha" (11 chars), which previously would have made
+	// strings.Repeat panic (10-11 = -1).
+	padWidth := 10 - len(VERSION)
+	if padWidth < 1 {
+		padWidth = 1
+	}
+	spc := strings.Repeat(" ", padWidth)
 	txt := textClr.Sprintf("      by Kuba Gretzky (") + handleClr.Sprintf("@mrgretzky") + textClr.Sprintf(")") + spc + textClr.Sprintf("version ") + versionClr.Sprintf("%s", VERSION)
 	fmt.Fprintf(color.Output, "%s", txt)
 }

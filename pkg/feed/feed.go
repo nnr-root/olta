@@ -237,6 +237,13 @@ func (c *Client) readPump(publish bool) {
 
 const DefaultListenAddress = "localhost:1337"
 
+// Version is the Olta Feed component's build version. It is kept as a single
+// documented package-level constant so cmd/olta-feed can report it without
+// hardcoding the version string a second time. Keep this aligned with the
+// other Olta component versions (cmd/olta-campaign/VERSION and
+// pkg/proxy/core.VERSION) when bumping the product version.
+const Version = "1.0.0-Alpha"
+
 // Handler creates the Olta Feed static and WebSocket routes.
 func Handler(assetDir string, options ...Option) http.Handler {
 	config := newConfig(options...)
