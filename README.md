@@ -4,12 +4,16 @@
 
 - [Olta](#olta)
   * [Olta v1 Architecture](#olta-v1-architecture)
+  * [Releases](#releases)
   * [A Word About Sponsorship](#a-word-about-sponsorship)
   * [Credits](#credits)
   * [Prerequisites](#prerequisites)
   * [Disclaimer](#disclaimer)
   * [Why?](#why)
   * [Background](#background)
+  * [Purple-Team Telemetry & Resilience Reporting](#purple-team-telemetry--resilience-reporting)
+  * [Evasion & Detonation Engineering](#evasion--detonation-engineering)
+  * [Social Engineering Toolkit](#social-engineering-toolkit)
   * [Infrastructure Layout](#infrastructure-layout)
   * [setup.sh](#setupsh)
   * [Cloudflare Turnstile Setup](#cloudflare-turnstile-setup)
@@ -21,10 +25,8 @@
   * [Live Feed Setup](#live-feed-setup)
   * [A Word About Phishlets](#a-word-about-phishlets)  
   * [A Word About The Evilginx3 Update](#a-word-about-the-evilginx3-update)
-  * [Debugging](#debugging)
   * [Installation Notes](#installation-notes)
   * [A Note About Campaign Testing And Tracking](#a-note-about-campaign-testing-and-tracking)
-  * [A Note About The Blacklist and Tracking](#a-note-about-the-blacklist-and-tracking)  
   * [Changes to GoPhish](#changes-to-gophish)
   * [Changelog](#changelog)
   * [Issues and Support](#issues-and-support)
@@ -33,7 +35,7 @@
 
 # Olta
 
-Combination of [evilginx3](https://github.com/kgretzky/evilginx2) and [GoPhish](https://github.com/gophish/gophish).
+Combination of [evilginx3](https://github.com/kgretzky/evilginx2) and [GoPhish](https://github.com/gophish/gophish), extended with a purple-team telemetry layer that turns captured engagement data into a defensive resilience report. Current version: `1.0.0-Alpha`.
 
 ## Olta v1 Architecture
 
@@ -52,6 +54,12 @@ go build -o build/olta-feed ./cmd/olta-feed
 ```
 
 Campaign database schemas are embedded in the campaign package. A fresh SQLite or MySQL database is initialized directly from the unified Olta schema in `pkg/campaign/migrations`; no runtime migration directory or historical migration replay is required. Existing databases must already match the final pre-Olta schema before they can be baselined as schema version 1.
+
+## Releases
+
+`build/` is a local output directory, not a distribution channel — it is `.gitignore`d and nothing under it is tracked in this repository. To produce a release build, run the three `go build` commands above from the repository root; each produces a single static binary for the host platform and Go toolchain in use.
+
+Published releases attach the resulting `olta-proxy`, `olta-campaign`, and `olta-feed` binaries (plus any platform variants) as GitHub release artifacts, together with their checksums, rather than committing binaries into version control. Shipping unverifiable, pre-built binaries inside a security tool's repository is a supply-chain smell — nobody can confirm what a committed binary actually contains — so build-from-source-and-attach-to-the-release is the only distribution path this repository endorses.
 
 # A Word About Sponsorship
 
@@ -84,6 +92,106 @@ As a penetration tester or red teamer, you may have heard of `evilginx3` as a pr
 In this setup, `GoPhish` is used to send emails and provide a dashboard for `evilginx3` campaign statistics, but it is not used for any landing pages. Your phishing links sent from `GoPhish` will point to an `evilginx3` lure path and `evilginx3` will be used for landing pages. This provides the ability to still bypass `2FA/MFA` with `evilginx3`, without losing those precious stats. Realtime campaign event notifications have been provided with a local websocket/http server I have developed and full usable `JSON` strings containing tokens/cookies from `evilginx3` are displayed directly in the `GoPhish` GUI (and feed):
 
 ![Olta campaign session timeline](images/campaign-session-timeline.png)
+
+## Purple-Team Telemetry & Resilience Reporting
+
+Olta is not only an offensive simulation tool — it is built to hand an authorized client's SOC the same visibility into an engagement that a real attacker would have denied them. This is the platform's newest and most differentiating capability: a shared, ATT&CK-tagged event stream (`pkg/telemetry`) fed by all three services, and a per-campaign resilience report (`pkg/campaign/resilience`) computed from it.
+
+### The event bus and the kill-chain stages
+
+Every decision point in an engagement emits one canonical `Event` (`pkg/telemetry/event.go`) onto a nine-stage, MITRE ATT&CK-tagged kill chain:
+
+| Stage | Technique | Meaning |
+|---|---|---|
+| `delivery` | T1566.002 Spearphishing Link | Message sent to a target |
+| `open` | T1566.002 | Message opened |
+| `lure` | T1566.002 | Phishing link clicked |
+| `cloak` | T1090 Proxy | Cloaker matched and allowed/blocked/redirected the request |
+| `verify` | T1497 Virtualization/Sandbox Evasion | Client-side browser assertion evaluated |
+| `credential` | T1056.003 Web Portal Capture | Credentials submitted through the proxied page |
+| `capture` | T1539 Steal Web Session Cookie | Session cookie/token captured |
+| `replay` | T1550.004 Web Session Cookie | Captured session validated for continued replayability |
+| `report` | *(defender signal, no technique)* | A human reported the phish via the IMAP monitor |
+
+`CampaignID` and `RID` are optional on an `Event`: the `cloak` and `verify` stages fire from the proxy before lure validation ever establishes who the recipient is, so they are recorded unattributed rather than dropped.
+
+Events are published through a `Bus` (`pkg/telemetry/bus.go`) that fans each event out to every configured sink from a dedicated goroutine. Emission never blocks or fails the request path — a full queue drops and counts the event rather than stalling a victim-facing HTTP response, the same non-blocking discipline already used by `campaignstore`'s database queue and the feed hub's broadcast.
+
+Four sinks consume the stream, any combination of which can be wired in:
+
+- **`campaigndb`** — the store of record, writing to a new `telemetry_events` table (campaign schema migration 6) through the existing `campaignstore` queue.
+- **`webhook`** — the existing Slack/Discord/generic JSON dispatcher, generalized from validation-only alerts to any `Event`.
+- **`feed`** — publishes a versioned `telemetry.v1` message to the live `olta-feed` WebSocket for real-time operator visibility.
+- **`jsonl`** — appends newline-delimited JSON to an owner-only (`0600`), append-only file, set with the `-telemetry-file` flag on `olta-proxy`.
+
+### The no-loot invariant
+
+**An `Event` never carries captured credentials, cookies, or session tokens.** Captured material stays in the campaign database behind the `pkg/campaign/secrets` AES-GCM layer; telemetry only ever records the *fact* of a capture — which stage, what outcome, which technique, when, and a non-sensitive actor (IP, ASN, organization, user agent, country, TLS client profile). That separation is what makes the stream safe to hand directly to a client's SOC.
+
+This is enforced structurally, not by convention. `Event.WithDetail` — the only way to attach stage-specific detail — admits scalars only (`string`, `bool`, any integer or float kind); maps, slices, structs, and pointers are rejected outright and replaced with a type marker. The reasoning is explicit in the code: a composite value can hide a secret behind a custom `MarshalJSON` that collapses it into an innocuous-looking unkeyed string, or behind a non-string map key that no key-based rule would ever match — both were demonstrated against an earlier, traversal-based implementation. Refusing composites removes the traversal entirely, and with it that whole class of bypass. On top of that, `WithDetail` still redacts by key as a backstop (`password`, `token`, `secret`, `cookie`, `credential`, `auth`, `otp`, `mfa`, `api_key`, `session_id`, `set_cookie`, and related tokens all redact to `[redacted]`).
+
+### The resilience engine
+
+`GET /api/campaigns/{id}/resilience` computes a `resilience.Report` for one campaign:
+
+- **Kill-chain funnel** — for each of the eight attacker-side stages (`delivery` through `replay`), the number of distinct targets that reached it, labeled with its ATT&CK technique. A stage is counted by distinct `RID`, or by a derived actor identity (IP, then ASN/organization) for the unattributed `cloak`/`verify` stages, so one browser retrying dozens of blocked requests still counts as one target.
+- **Defensive friction** — cloaker `blocked`/`redirected` decisions grouped by network owner and ASN. A burst of requests from a security vendor's or cloud provider's ASN shortly after delivery is direct evidence the target's own security stack detonated the link — a real finding about the client's defenses, derived from data the proxy already collects and previously discarded.
+- **The report-vs-capture race** — for every target that was delivered to (the fixed denominator), whether they reported the phish before their session was captured, after it was captured, or never reported at all, plus the median time-to-report measured from delivery (not from click — a defender's clock starts when the message lands). This is the headline defensive metric: it measures whether the human layer beat the attacker, using only data Olta already collects, and it is honest about what it cannot see — Olta has no visibility into a client's SIEM and does not claim to.
+
+A companion `GET /api/campaigns/{id}/resilience/navigator` endpoint exports the same technique/outcome data as a MITRE ATT&CK Navigator layer (`domain: "enterprise-attack"`, layer/navigator/ATT&CK versions embedded) that loads without manual editing.
+
+**Be aware of the report's honest limits.** Three funnel stages depend on optional proxy features: `cloak` requires `-enable-cloaker`, `verify` requires `-enable-js-inspect`, and `replay` requires `-enable-session-validator`. When a feature was disabled, its stage renders as **"not measured"**, never as zero — a disabled stage reporting zero would misleadingly read as "nothing was blocked" when the truth is "nothing was watching." Separately, unattributed `cloak`/`verify` events (no RID resolved yet) are folded into a campaign's report by bounding them to the campaign's active time window (launch date through completion, or now for an in-flight campaign) rather than by a hard campaign ID — this is an approximation, and it may include cloak/verify traffic from other campaigns running concurrently on the same proxy install during that same window.
+
+### Telemetry configuration
+
+`cmd/olta-campaign/config.json` carries a `telemetry` block:
+
+```json
+"telemetry": {
+    "cloaker": false,
+    "verify": false,
+    "session_validator": false
+}
+```
+
+These three flags should mirror exactly how `olta-proxy` was actually launched (`-enable-cloaker`, `-enable-js-inspect`, `-enable-session-validator`), because they are what the resilience report uses as its baseline "was this stage even measured" claim. The two directions of drift are not symmetric: a stale `false` self-corrects, because one or more observed events for that stage is hard proof the feature ran (the cloaker only emits a `cloak` event when it matched a request, `jsinspect` only emits `verify` when browser verification is on) — so the report upgrades that stage to measured on its own. A stale `true`, by contrast, never self-corrects: the absence of events proves nothing, since an enabled feature can legitimately see zero matches, so a `true` that no longer matches reality stays wrong until an operator fixes it. Keeping this block in sync with the actual `olta-proxy` flags remains the operator's responsibility.
+
+## Evasion & Detonation Engineering
+
+### uTLS client profiles
+
+Outbound proxy connections are transported through a uTLS-backed client (`pkg/proxy/transport/utls`) that presents a real browser's ClientHello fingerprint instead of Go's default `crypto/tls` signature. Four profiles are available via the `-client-profile` flag on `olta-proxy` (default `Chrome`):
+
+- `Chrome` — current Chrome ClientHello
+- `Firefox` — current Firefox ClientHello
+- `Safari` — uTLS's current iOS Safari ClientHello
+- `Random` — rotates between the modern browser presets on every new connection
+
+### Smart cloaking & IP sync
+
+`pkg/proxy/middleware/asncloak` classifies inbound requests against cloud provider and known security-crawler network ranges using a lock-free, immutable radix trie for IPv4/IPv6 CIDR and ASN longest-prefix matching — a lookup examines at most 32 trie nodes for IPv4 or 128 for IPv6, with no locks on the hot path. The CHANGELOG reports this local matching benchmarked at sub-microsecond latency with zero allocations. Matches can trigger a 302 redirect (default, to a configurable safe URL) or a 403/404 block, and are combined with suspicious-user-agent and required-browser-header heuristics.
+
+The bundled default table covers Microsoft Azure, AWS, Google Cloud, DigitalOcean, Proofpoint, and Palo Alto Cortex Xpanse ranges, and is kept current by a background synchronizer (`pkg/proxy/middleware/asncloak/sync.go`) that periodically pulls the official AWS (`ip-ranges.amazonaws.com`), Google Cloud (`gstatic.com/ipranges`), and Microsoft Azure published ranges, plus a continuity fallback list for Palo Alto's scanning ranges when its documentation endpoint is unreachable. Updates publish atomically through a lock-free pointer swap, so lookups never block on a refresh in progress. Enabled by default via `-enable-ip-sync`, with a 12-hour refresh interval configurable through `-ip-sync-interval`.
+
+### JS environment inspection
+
+`pkg/proxy/middleware/jsinspect` injects a small client-side script that asserts whether the visiting browser looks automated: WebDriver/`navigator.webdriver` presence, headless indicators, a software (rather than hardware) WebGL renderer detected via regex against known software-renderer signatures (SwiftShader, LLVMpipe, Mesa), and canvas-fingerprint consistency across repeated draws. A suspicious assertion can trigger the same redirect-or-block enforcement as the cloaker. Enabled via `-enable-js-inspect`, with the injection/report endpoint configurable through `-js-inspect-endpoint`.
+
+## Social Engineering Toolkit
+
+### Quishing (QR code phishing)
+
+`pkg/campaign/quishing` generates QR codes entirely in memory — no temporary files touch disk. A `Generate` call returns a Base64-encoded PNG payload, a ready-to-use `data:` URI, and inline MIME attachment data in one pass, with configurable image size, foreground/background color, and Low/Medium/High error correction. `{{.QRCode}}` and `{{.RIdQR}}` email template tags and an authenticated `POST /api/quishing/preview` dashboard endpoint expose it. See [QR Code Generator](#qr-code-generator) below for the walkthrough.
+
+### Browser-in-the-Browser (BITB) and OAuth consent
+
+`pkg/campaign/bitb` renders a simulated browser window — draggable chrome, a fake address bar, and HTTP/HTTPS status indicators — themed to match Windows 11 (light/dark), macOS (light/dark), or Linux/Ubuntu GNOME, either explicitly or auto-detected from the visiting client's platform. `{{.BITBFrame}}` and `{{.BITBFrameTheme}}` template helpers embed it directly into a phishing page.
+
+`pkg/campaign/oauthconsent` renders matching OAuth 2.0 / OpenID Connect consent UI components — application and publisher branding, the requested scope list, redirect URI metadata, and accept/cancel event hooks — exposed through the `{{.OAuthConsent}}` template helper. Both components ship their CSS/JS as embedded assets served from the single campaign binary under `/static/components/`, so no separate static file deployment step is required.
+
+### Multilingual spintax and role routing
+
+`pkg/campaign/personalizer` combines three pieces: a concurrency-safe nested spintax evaluator that expands `{a|b|c}`-style variation while preserving Go template actions and ordinary HTML/CSS braces (benchmarked in the CHANGELOG at roughly 496 ns/op on Apple M2 hardware); an embedded scenario library across four locales — `en`, `tr`, `de`, `es` — and four categories (student, general HR, finance, IT), selectable at runtime via `--custom-templates-dir` overrides; and role-based routing that maps a recipient's department/position/role metadata to the matching category, falling back to general HR when nothing matches. Multi-variant campaign templates additionally support deterministic round-robin A/B assignment with per-variant delivery, open, click, submission, and capture metrics.
 
 ## Infrastructure Layout
 
