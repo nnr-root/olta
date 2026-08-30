@@ -41,3 +41,7 @@ CLAUDE.md
 
 # Node dependencies (dashboard build tooling)
 node_modules/
+
+# Local build output (prebuilt binaries are published as GitHub release
+# artifacts with checksums, not committed to the repository)
+build/
