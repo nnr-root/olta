@@ -184,7 +184,7 @@ func (s *HttpServer) turnstilePage(writer http.ResponseWriter, request *http.Req
 		return
 	} else {
 		// Check if the session is valid
-		if s, ok := eproxy.sessions[session]; ok {
+		if s, ok := eproxy.getSession(session); ok {
 			// Check if client_id is in the URL
 			clientID := request.URL.Query().Get("client_id")
 			if clientID == "" {
