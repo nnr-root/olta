@@ -688,12 +688,53 @@ function renderSessionStatusCell(status, rid) {
         '</select>'
 }
 
+// --- in-progress edit protection -------------------------------------
+//
+// poll() rebuilds the results table wholesale (resultsTable.clear() then
+// draw()), which destroys the row markup. That is fine for read-only rows,
+// but the tag input saves on BLUR: if a poll removes the element while an
+// operator is mid-edit, the element is never blurred, the blur handler never
+// fires, and whatever they typed is silently lost. Unsaved notes go the same
+// way, since notes only persist on an explicit Save.
+//
+// So a poll cycle that lands during an edit is skipped. Note this must NOT
+// reuse doPoll: refresh() returns early on !doPoll WITHOUT rescheduling,
+// because doPoll means "this campaign is finished, stop forever". An edit
+// pause has to skip one cycle and keep the loop alive.
+
+// dirtySessionNotes holds rids whose notes textarea has been typed into but
+// not yet saved. Notes have no blur-to-save, so focus alone is not enough.
+var dirtySessionNotes = {}
+
+// A pause must never become permanent. If an operator leaves a half-typed
+// note and walks away, the table would otherwise stop updating for the rest
+// of the engagement -- a worse failure than the one this guards against.
+// After this many consecutive skipped cycles, refresh anyway.
+var maxSkippedRefreshCycles = 5
+var skippedRefreshCycles = 0
+
+function sessionEditInProgress() {
+    var active = document.activeElement
+    if (active && $(active).is('.session-tag-input, .session-notes-textarea, .session-status-select')) {
+        return true
+    }
+    for (var rid in dirtySessionNotes) {
+        if (Object.prototype.hasOwnProperty.call(dirtySessionNotes, rid)) {
+            return true
+        }
+    }
+    return false
+}
+
 // saveSessionTag persists a partial tag/notes/status edit for one session.
 // fields carries only the field(s) that changed -- see api.campaignId.
 // sessionTag in gophish.js for why that matters.
 function saveSessionTag(rid, fields) {
     api.campaignId.sessionTag(campaign.id, rid, fields)
         .success(function () {
+            // The edit is committed, so it no longer needs protecting from
+            // the poll cycle.
+            delete dirtySessionNotes[rid]
             refreshSessionTagFilter()
         })
         .error(function () {
@@ -959,6 +1000,12 @@ function load() {
                         status: $(this).val()
                     })
                 })
+                // Notes have no blur-to-save, so typing alone must protect
+                // the row from the next poll; the flag is released when the
+                // save succeeds.
+                $('#resultsTable').on('input', '.session-notes-textarea', function () {
+                    dirtySessionNotes[$(this).data('rid')] = true
+                })
                 $('#resultsTable').on('click', '.session-notes-save', function () {
                     var rid = $(this).data('rid')
                     var textarea = $(this).siblings('.session-notes-textarea')
@@ -1076,6 +1123,16 @@ function refresh() {
     if (!doPoll) {
         return;
     }
+    // Skip this cycle rather than clobber an in-progress edit, but keep the
+    // loop running so the table resumes updating once the edit is committed
+    // or abandoned.
+    if (sessionEditInProgress() && skippedRefreshCycles < maxSkippedRefreshCycles) {
+        skippedRefreshCycles++
+        clearTimeout(setRefresh)
+        setRefresh = setTimeout(refresh, 60000)
+        return;
+    }
+    skippedRefreshCycles = 0
     $("#refresh_message").show()
     $("#refresh_btn").hide()
     poll()
