@@ -76,6 +76,27 @@
             </div>
         </div>
         <div class="row">
+            <h2>Live Telemetry</h2>
+            <div id="live-feed-panel">
+                <table id="liveFeedTable" class="table table-condensed table-striped">
+                    <thead>
+                        <tr>
+                            <th>Time</th>
+                            <th>Stage</th>
+                            <th>Outcome</th>
+                            <th>Technique</th>
+                            <th>Target</th>
+                        </tr>
+                    </thead>
+                    <tbody id="liveFeedBody">
+                        <tr id="liveFeedEmpty">
+                            <td colspan="5" class="text-muted">Waiting for live events&hellip;</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+        <div class="row">
             <h2>Details</h2>
             <table id="resultsTable" class="table">
                 <thead>
@@ -98,6 +119,7 @@
     <div id="flashes" class="row"></div>
 </div>
 {{end}} {{define "scripts"}}
+<script src="/js/dist/app/live_feed.min.js"></script>
 <script src="/js/dist/app/campaign_results.min.js"></script>
 <script src="/js/dist/app/resilience.min.js"></script>
 {{end}}

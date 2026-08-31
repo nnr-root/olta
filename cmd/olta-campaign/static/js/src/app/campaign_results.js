@@ -912,6 +912,11 @@ function load() {
                 // rather than in poll() - it is a point-in-time summary, not
                 // a live view, so it is not refreshed on the polling timer.
                 loadResilience(campaign.id)
+                // Open the live telemetry feed once the campaign is
+                // resolved. Unlike poll()/refresh(), this is not on a
+                // timer: the SSE connection stays open and pushes events
+                // as they happen.
+                startLiveFeed(campaign.id)
             }
         })
         .error(function () {

@@ -56,6 +56,7 @@ scripts = function () {
             app_directory + 'campaigns.js',
             app_directory + 'dashboard.js',
             app_directory + 'groups.js',
+            app_directory + 'live_feed.js',
             app_directory + 'personalizer_preview.js',
             app_directory + 'qr_code.js',
             app_directory + 'resilience.js',

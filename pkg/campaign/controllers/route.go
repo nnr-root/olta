@@ -45,6 +45,7 @@ type AdminServer struct {
 	config            config.AdminServer
 	limiter           *ratelimit.PostLimiter
 	telemetryFeatures resilience.Features
+	liveFeed          *LiveFeedHub
 }
 
 var defaultTLSConfig = &tls.Config{
@@ -92,6 +93,17 @@ func WithTelemetryFeatures(features resilience.Features) AdminServerOption {
 	}
 }
 
+// WithLiveFeed configures the campaign dashboard's live telemetry
+// subscription against the given olta-feed endpoint. When enabled is
+// false, or feedURL is empty, the dashboard's live feed panel still works,
+// it just never has anything in it -- olta-feed being disabled or simply
+// not running is the expected common case, not an error state.
+func WithLiveFeed(feedURL string, enabled bool) AdminServerOption {
+	return func(as *AdminServer) {
+		as.liveFeed = NewLiveFeedHub(feedURL, enabled)
+	}
+}
+
 // NewAdminServer returns a new instance of the AdminServer with the
 // provided config and options applied.
 func NewAdminServer(config config.AdminServer, options ...AdminServerOption) *AdminServer {
@@ -112,6 +124,7 @@ func NewAdminServer(config config.AdminServer, options ...AdminServerOption) *Ad
 		server:    defaultServer,
 		limiter:   defaultLimiter,
 		config:    config,
+		liveFeed:  NewLiveFeedHub("", false),
 	}
 	for _, opt := range options {
 		opt(as)
@@ -128,6 +141,7 @@ func (as *AdminServer) Start() {
 	if as.smsworker != nil {
 		go as.smsworker.Start()
 	}
+	as.liveFeed.Start()
 	if as.config.UseTLS {
 		// Only support TLS 1.2 and above - ref #1691, #1689
 		as.server.TLSConfig = defaultTLSConfig
@@ -153,6 +167,7 @@ func logServerError(err error) {
 // Shutdown attempts to gracefully shutdown the server.
 func (as *AdminServer) Shutdown() error {
 	as.limiter.Close()
+	as.liveFeed.Shutdown()
 	if as.worker != nil {
 		if err := as.worker.Shutdown(); err != nil {
 			log.Errorf("email worker shutdown: %v", err)
@@ -174,6 +189,7 @@ func (as *AdminServer) registerRoutes() {
 	router.HandleFunc("/reset_password", mid.Use(as.ResetPassword, mid.RequireLogin))
 	router.HandleFunc("/campaigns", mid.Use(as.Campaigns, mid.RequireLogin))
 	router.HandleFunc("/campaigns/{id:[0-9]+}", mid.Use(as.CampaignID, mid.RequireLogin))
+	router.HandleFunc("/campaigns/{id:[0-9]+}/feed", mid.Use(as.CampaignLiveFeed, mid.RequireLogin))
 	router.HandleFunc("/sms_campaigns", mid.Use(as.SMSCampaigns, mid.RequireLogin))
 	router.HandleFunc("/sms_campaigns/{id:[0-9]+}", mid.Use(as.SMSCampaignID, mid.RequireLogin))
 	router.HandleFunc("/templates", mid.Use(as.Templates, mid.RequireLogin))
@@ -216,9 +232,24 @@ func (as *AdminServer) registerRoutes() {
 	adminHandler := csrfHandler(router)
 	adminHandler = mid.Use(adminHandler.ServeHTTP, mid.CSRFExceptions, mid.GetContext, mid.ApplySecurityHeaders)
 
-	// Setup GZIP compression
+	// Setup GZIP compression. The live feed's Server-Sent Events route is
+	// exempt: gziphandler withholds WriteHeader and small writes until it
+	// has enough bytes buffered to decide whether the response is worth
+	// compressing (see NYTimes/gziphandler's minSize buffering), which is
+	// exactly wrong for a stream of small, infrequent events -- on a quiet
+	// connection it would withhold every one of them indefinitely instead
+	// of delivering them as they arrive. Every other admin route is
+	// compressed as before.
 	gzipWrapper, _ := gziphandler.NewGzipLevelHandler(gzip.BestCompression)
-	adminHandler = gzipWrapper(adminHandler)
+	uncompressedHandler := adminHandler
+	compressedHandler := gzipWrapper(adminHandler)
+	adminHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if liveFeedPathPattern.MatchString(r.URL.Path) {
+			uncompressedHandler.ServeHTTP(w, r)
+			return
+		}
+		compressedHandler.ServeHTTP(w, r)
+	})
 
 	// Honor forwarding headers only from explicitly trusted reverse proxies.
 	adminHandler = mid.TrustedProxyHeaders(as.config.TrustedProxies, adminHandler)

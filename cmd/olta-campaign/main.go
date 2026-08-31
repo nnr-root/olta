@@ -182,6 +182,7 @@ func main() {
 		Verify:           conf.Telemetry.Verify,
 		SessionValidator: conf.Telemetry.SessionValidator,
 	}))
+	adminOptions = append(adminOptions, controllers.WithLiveFeed(conf.FeedURL, conf.FeedEnabled))
 	adminConfig := conf.AdminConf
 	adminServer := controllers.NewAdminServer(adminConfig, adminOptions...)
 	middleware.Store.Options.Secure = adminConfig.UseTLS
