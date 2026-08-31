@@ -498,3 +498,207 @@ func TestStartupInitializationEventStaysOutOfFunnel(t *testing.T) {
 		t.Fatalf("Friction = %+v, want empty (the initialization event carries no organization/ASN and is not StageCloak)", report.Friction)
 	}
 }
+
+// webauthnEvent emits one StageWebAuthn observation from an actor at the
+// given IP, with the given capability/ceremony detail. It mirrors how
+// jsinspect.emitWebAuthn constructs the real event.
+func webauthnEvent(t *testing.T, db *gorm.DB, base time.Time, offset time.Duration, ip string, platformAvailable, ceremonyObserved bool) {
+	t.Helper()
+	event := telemetry.New(telemetry.StageWebAuthn, telemetry.OutcomeAllowed).
+		WithActor(telemetry.Actor{IP: ip}).
+		WithDetail("webauthn_supported", true).
+		WithDetail("platform_authenticator_available", platformAvailable).
+		WithDetail("conditional_mediation_supported", true).
+		WithDetail("conditional_mediation_available", platformAvailable).
+		WithDetail("webauthn_ceremony_observed", ceremonyObserved)
+	event.Timestamp = base.Add(offset)
+	if err := campaigndb.New(db).Emit(nil, event); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// credentialEvent emits a RID-attributed StageCredential (or StageCapture)
+// event carrying the given actor IP, mirroring how campaignstore actually
+// emits these post-lure events.
+func credentialEvent(t *testing.T, db *gorm.DB, base time.Time, offset time.Duration, stage telemetry.Stage, rid, ip string) {
+	t.Helper()
+	event := telemetry.New(stage, telemetry.OutcomeCaptured).
+		WithCampaign(1, rid).
+		WithActor(telemetry.Actor{IP: ip})
+	event.Timestamp = base.Add(offset)
+	if err := campaigndb.New(db).Emit(nil, event); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestPasskeyDefenseNotMeasuredWhenJSInspectDisabled is the "not measured"
+// pinning test for the passkey metric: with -enable-js-inspect off and no
+// StageWebAuthn events to prove otherwise, every count must stay at its
+// zero value AND Measured must be false, so a report consumer renders "not
+// measured" rather than "0% of targets had a passkey".
+func TestPasskeyDefenseNotMeasuredWhenJSInspectDisabled(t *testing.T) {
+	db := newDB(t)
+	base := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+
+	// One ordinary event so the report isn't otherwise empty.
+	seed(t, db, base, 0, telemetry.StageDelivery, telemetry.OutcomeAllowed, "target-1")
+
+	report, err := Compute(db, 1, wideWindow(base), Features{Cloaker: true, Verify: false, SessionValidator: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Passkey.Measured {
+		t.Fatal("Passkey.Measured = true with Verify disabled and no corroborating events")
+	}
+	if report.Passkey.RanScriptTargets != 0 || report.Passkey.PlatformAuthenticatorAvailable != 0 ||
+		report.Passkey.CeremonyInitiated != 0 || report.Passkey.PushedToWeakerFactor != 0 {
+		t.Fatalf("Passkey = %+v, want every count zero when not measured", report.Passkey)
+	}
+}
+
+// TestPasskeyDefenseMeasuredUpgradesFromEvents mirrors
+// TestMeasuredUpgradesFromEventsWhenConfigStale for the passkey metric:
+// config says Verify was off, but a StageWebAuthn event exists, which only
+// jsinspect emits and only on its non-suspicious path -- hard proof the
+// config's "false" is stale.
+func TestPasskeyDefenseMeasuredUpgradesFromEvents(t *testing.T) {
+	db := newDB(t)
+	base := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+
+	webauthnEvent(t, db, base, 0, "10.0.0.1", true, false)
+
+	report, err := Compute(db, 1, wideWindow(base), Features{Cloaker: true, Verify: false, SessionValidator: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !report.Passkey.Measured {
+		t.Fatal("Passkey.Measured = false despite an observed StageWebAuthn event proving jsinspect ran")
+	}
+	if report.Passkey.RanScriptTargets != 1 {
+		t.Fatalf("RanScriptTargets = %d, want 1", report.Passkey.RanScriptTargets)
+	}
+	// Features itself must still reflect what was configured.
+	if report.Features.Verify {
+		t.Fatal("Features.Verify was mutated by the upgrade; it must keep reporting what was configured")
+	}
+}
+
+// TestPasskeyDefenseCountsCapabilityAndDedupsRepeatedAssertions covers the
+// core counting logic: RanScriptTargets is the distinct-client denominator,
+// PlatformAuthenticatorAvailable and CeremonyInitiated are subsets of it,
+// and a client that sends multiple assertions over time (the initial
+// synchronous send plus async follow-ups, as jsinspect's script does) must
+// still count once, with its capability/ceremony signal OR-merged across
+// every assertion it sent rather than only reflecting the last one seen.
+func TestPasskeyDefenseCountsCapabilityAndDedupsRepeatedAssertions(t *testing.T) {
+	db := newDB(t)
+	base := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+
+	// Client A: initial send reports no capability yet (still resolving),
+	// a later follow-up reports platform authenticator available. Same
+	// client, two rows -- must collapse to one target with capability=true.
+	webauthnEvent(t, db, base, 0, "10.0.0.1", false, false)
+	webauthnEvent(t, db, base, time.Second, "10.0.0.1", true, false)
+
+	// Client B: capability available from the first send, and later
+	// initiates a ceremony.
+	webauthnEvent(t, db, base, 0, "10.0.0.2", true, false)
+	webauthnEvent(t, db, base, time.Second, "10.0.0.2", true, true)
+
+	// Client C: no capability, no ceremony, ran the script only.
+	webauthnEvent(t, db, base, 0, "10.0.0.3", false, false)
+
+	report, err := Compute(db, 1, wideWindow(base), allFeatures())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !report.Passkey.Measured {
+		t.Fatal("Passkey.Measured = false, want true (Verify enabled)")
+	}
+	if report.Passkey.RanScriptTargets != 3 {
+		t.Fatalf("RanScriptTargets = %d, want 3 (five rows, three distinct clients)", report.Passkey.RanScriptTargets)
+	}
+	if report.Passkey.PlatformAuthenticatorAvailable != 2 {
+		t.Fatalf("PlatformAuthenticatorAvailable = %d, want 2 (clients A and B)", report.Passkey.PlatformAuthenticatorAvailable)
+	}
+	if report.Passkey.CeremonyInitiated != 1 {
+		t.Fatalf("CeremonyInitiated = %d, want 1 (client B only)", report.Passkey.CeremonyInitiated)
+	}
+}
+
+// TestPasskeyDefensePushedToWeakerFactor is the regression pin for the
+// headline finding: a client that showed passkey capability but still
+// reached credential submission or session capture was pushed to a weaker
+// factor. It must be counted only when BOTH signals are present for the
+// SAME client (correlated by IP, since StageWebAuthn has no RID), and a
+// capable client who never reached credential/capture must not be counted
+// as pushed to anything.
+func TestPasskeyDefensePushedToWeakerFactor(t *testing.T) {
+	db := newDB(t)
+	base := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+
+	// Capable client who was pushed to a weaker factor: same IP shows up
+	// on both the pre-lure webauthn observation and the post-lure,
+	// RID-attributed credential submission.
+	webauthnEvent(t, db, base, 0, "10.0.0.1", true, false)
+	credentialEvent(t, db, base, time.Minute, telemetry.StageCredential, "victim-a", "10.0.0.1")
+
+	// Capable client who was NOT pushed to a weaker factor: the passkey
+	// rollout's actual save. Must not appear in PushedToWeakerFactor.
+	webauthnEvent(t, db, base, 0, "10.0.0.2", true, false)
+
+	// Incapable client who reached capture anyway: expected, unremarkable,
+	// and must not inflate PushedToWeakerFactor (no capability signal).
+	webauthnEvent(t, db, base, 0, "10.0.0.3", false, false)
+	credentialEvent(t, db, base, time.Minute, telemetry.StageCapture, "victim-c", "10.0.0.3")
+
+	report, err := Compute(db, 1, wideWindow(base), allFeatures())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Passkey.RanScriptTargets != 3 {
+		t.Fatalf("RanScriptTargets = %d, want 3", report.Passkey.RanScriptTargets)
+	}
+	if report.Passkey.PlatformAuthenticatorAvailable != 2 {
+		t.Fatalf("PlatformAuthenticatorAvailable = %d, want 2", report.Passkey.PlatformAuthenticatorAvailable)
+	}
+	if report.Passkey.PushedToWeakerFactor != 1 {
+		t.Fatalf("PushedToWeakerFactor = %d, want 1 (only the capable client who also reached credential submission)", report.Passkey.PushedToWeakerFactor)
+	}
+}
+
+// TestWebAuthnEventStaysOutOfFunnel is StageWebAuthn's version of
+// TestStartupInitializationEventStaysOutOfFunnel: the funnel must keep
+// exactly 8 stages (see funnelOrder and
+// pkg/campaign/controllers/api/resilience_test.go, which asserts this
+// count independently over the HTTP handler), and a StageWebAuthn row must
+// have zero effect on Friction (it carries no organization/ASN and is not
+// StageCloak).
+func TestWebAuthnEventStaysOutOfFunnel(t *testing.T) {
+	db := newDB(t)
+	base := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+
+	seed(t, db, base, time.Minute, telemetry.StageDelivery, telemetry.OutcomeAllowed, "target-1")
+	webauthnEvent(t, db, base, 30*time.Second, "10.0.0.1", true, true)
+
+	report, err := Compute(db, 1, wideWindow(base), allFeatures())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(report.Funnel) != 8 {
+		t.Fatalf("funnel has %d stages, want 8 (StageWebAuthn must not be added to funnelOrder)", len(report.Funnel))
+	}
+	for _, stage := range report.Funnel {
+		if stage.Stage == telemetry.StageWebAuthn {
+			t.Fatalf("StageWebAuthn appeared in the funnel: %+v", stage)
+		}
+	}
+	if len(report.Friction) != 0 {
+		t.Fatalf("Friction = %+v, want empty (the webauthn event carries no organization/ASN and is not StageCloak)", report.Friction)
+	}
+	// The observation must still be fully counted in its own section.
+	if report.Passkey.RanScriptTargets != 1 || report.Passkey.PlatformAuthenticatorAvailable != 1 || report.Passkey.CeremonyInitiated != 1 {
+		t.Fatalf("Passkey = %+v, want RanScriptTargets=1, PlatformAuthenticatorAvailable=1, CeremonyInitiated=1", report.Passkey)
+	}
+}

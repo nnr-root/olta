@@ -38,6 +38,73 @@ type FrictionEntry struct {
 	Count        int    `json:"count"`
 }
 
+// PasskeyDefense quantifies how much of the attack a client's passkey /
+// WebAuthn rollout stopped. WebAuthn's origin binding is what defeats AiTM
+// proxying by design: when a target has a passkey available and the
+// proxied page cannot complete that ceremony, that is the security control
+// working, not a measurement gap. This is deliberately measurement only --
+// nothing in jsinspect or here suppresses, downgrades, or interferes with a
+// WebAuthn ceremony.
+//
+// Honesty requirements this type exists to enforce (see pkg/proxy/middleware/jsinspect
+// and telemetry.StageWebAuthn):
+//
+//   - The denominator is RanScriptTargets: clients whose browser executed
+//     the injected verification script, NOT the campaign's full target
+//     list. A target who never opened a proxied page cannot be measured
+//     here, and every count below is a subset of RanScriptTargets, never a
+//     fraction of the whole campaign.
+//   - Measured is false whenever browser verification (-enable-js-inspect)
+//     was off for the engagement (self-corrected to true if events prove
+//     it actually ran, exactly like the funnel's optional stages). A
+//     report consumer must render "not measured" in that case, never 0%:
+//     zero would read as "no passkeys were available" when the truth is
+//     "nothing was watching for them".
+//   - Every field here is a raw count, deliberately: this package does not
+//     compute a percentage, because a percentage over a zero or trivially
+//     small RanScriptTargets is misleading on its face. A report consumer
+//     should compute (and caveat) a rate itself, and only once
+//     RanScriptTargets is large enough to say anything.
+type PasskeyDefense struct {
+	Measured bool `json:"measured"`
+
+	// RanScriptTargets is the denominator for every field below: distinct
+	// clients that produced at least one StageWebAuthn observation (i.e.
+	// the injected script ran and was not itself flagged as automation --
+	// see jsinspect.HandleRequest, which only emits StageWebAuthn on the
+	// non-suspicious path).
+	RanScriptTargets int `json:"ran_script_targets"`
+
+	// PlatformAuthenticatorAvailable is how many of RanScriptTargets
+	// reported PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable()
+	// === true at least once: a passkey-capable authenticator (Touch ID,
+	// Windows Hello, a security key, etc.) was available to the browser.
+	PlatformAuthenticatorAvailable int `json:"platform_authenticator_available"`
+
+	// CeremonyInitiated is how many of RanScriptTargets had a WebAuthn
+	// ceremony (navigator.credentials.get/create called with a publicKey
+	// option) observed starting on the page. Observed only: jsinspect's
+	// wrapper always lets the original call proceed untouched and returns
+	// its result unmodified.
+	CeremonyInitiated int `json:"ceremony_initiated"`
+
+	// PushedToWeakerFactor is how many clients that showed passkey
+	// capability (PlatformAuthenticatorAvailable or CeremonyInitiated)
+	// nonetheless went on to reach credential submission or session
+	// capture -- i.e. were pushed to, or fell back to, a weaker factor
+	// despite a stronger one being available. The gap between
+	// PlatformAuthenticatorAvailable and PushedToWeakerFactor is
+	// informally the rollout's save: the CISO-facing finding this type
+	// exists to produce.
+	//
+	// Correlation across stages is approximate: StageWebAuthn fires before
+	// lure validation resolves a recipient (no RID), while credential and
+	// capture events are RID-attributed, so this links them by client IP
+	// address instead -- the one signal both carry. Two distinct clients
+	// sharing an IP (e.g. behind the same NAT) would count as one.
+	PushedToWeakerFactor int `json:"pushed_to_weaker_factor"`
+}
+
 // RaceSummary answers whether the human layer beat the attacker.
 type RaceSummary struct {
 	// Delivered is the denominator: every RID with a delivery event. The
@@ -72,6 +139,10 @@ type Report struct {
 	Funnel     []FunnelStage   `json:"funnel"`
 	Friction   []FrictionEntry `json:"friction"`
 	Race       RaceSummary     `json:"race"`
+	// Passkey is the passkey/WebAuthn defense measure -- see PasskeyDefense's
+	// doc comment for the denominator and "not measured" rules that govern
+	// how a consumer must render it.
+	Passkey PasskeyDefense `json:"passkey"`
 	// UnattributedScoped is true when the unattributed cloak/verify events
 	// folded into Funnel and Friction were bounded to the campaign window.
 	// FrictionScope is the human-readable caveat the dashboard must render
@@ -115,6 +186,13 @@ type eventRow struct {
 	Timestamp  time.Time
 	Actor      string
 	CampaignID int64
+	// Detail is only read by buildPasskeyDefense today, which needs the
+	// capability/ceremony booleans jsinspect attaches to StageWebAuthn
+	// rows. Every other stage's Detail is fetched but unused, which is
+	// harmless: it is the same column already indexed by nothing but
+	// primary key, and the row set here is already bounded to one
+	// campaign's window.
+	Detail string
 }
 
 // Compute builds the report for one campaign.
@@ -136,7 +214,7 @@ func Compute(db *gorm.DB, campaignID int64, window Window, enabled Features) (Re
 
 	var rows []eventRow
 	query := db.Table("telemetry_events").
-		Select("stage, outcome, rid, timestamp, actor, campaign_id").
+		Select("stage, outcome, rid, timestamp, actor, campaign_id, detail").
 		Where("campaign_id = ? OR (campaign_id = 0 AND timestamp >= ? AND timestamp <= ?)",
 			campaignID, window.Start, window.End)
 	if err := query.Scan(&rows).Error; err != nil {
@@ -146,6 +224,7 @@ func Compute(db *gorm.DB, campaignID int64, window Window, enabled Features) (Re
 	report.Funnel = buildFunnel(rows, enabled)
 	report.Friction = buildFriction(rows)
 	report.Race = buildRace(rows)
+	report.Passkey = buildPasskeyDefense(rows, enabled)
 	return report, nil
 }
 
@@ -339,6 +418,129 @@ func buildRace(rows []eventRow) RaceSummary {
 	// tells them apart instead of treating 0 as falsy.
 	summary.HasMedianTimeToReport = len(durations) > 0
 	return summary
+}
+
+// buildPasskeyDefense computes PasskeyDefense from the same row set as the
+// funnel and friction sections. See PasskeyDefense's doc comment for the
+// denominator, the "not measured" rule, and why this deliberately never
+// computes a percentage.
+func buildPasskeyDefense(rows []eventRow, enabled Features) PasskeyDefense {
+	type client struct {
+		platformAvailable bool
+		ceremony          bool
+	}
+	byClient := make(map[string]*client)
+
+	for _, row := range rows {
+		if telemetry.Stage(row.Stage) != telemetry.StageWebAuthn {
+			continue
+		}
+		key := passkeyClientKey(row)
+		c := byClient[key]
+		if c == nil {
+			c = &client{}
+			byClient[key] = c
+		}
+		detail := parseDetail(row.Detail)
+		if detailBool(detail, "platform_authenticator_available") {
+			c.platformAvailable = true
+		}
+		if detailBool(detail, "webauthn_ceremony_observed") {
+			c.ceremony = true
+		}
+	}
+
+	// Self-correction, exactly like measured() for the funnel's optional
+	// stages: config false is only a claim and can go stale, but one or
+	// more StageWebAuthn rows is hard proof jsinspect actually ran.
+	// Absence proves nothing, so a configured true is never downgraded.
+	webauthnMeasured := enabled.Verify
+	if !webauthnMeasured && len(byClient) > 0 {
+		webauthnMeasured = true
+	}
+
+	defense := PasskeyDefense{Measured: webauthnMeasured}
+	if !webauthnMeasured {
+		// Not measured: every count stays zero, and Measured=false is the
+		// signal a report consumer must render as "not measured" rather
+		// than treating these zeros as "no passkeys were available".
+		return defense
+	}
+	defense.RanScriptTargets = len(byClient)
+
+	// reachedWeakerFactor keys by the same client identity as byClient
+	// (IP-first, see passkeyClientKey) so a client observed with passkey
+	// capability can be linked to a later credential/capture event even
+	// though StageWebAuthn fires before lure validation assigns an RID.
+	reachedWeakerFactor := make(map[string]bool)
+	for _, row := range rows {
+		stage := telemetry.Stage(row.Stage)
+		if stage != telemetry.StageCredential && stage != telemetry.StageCapture {
+			continue
+		}
+		if ip := actorIP(row.Actor); ip != "" {
+			reachedWeakerFactor["ip:"+ip] = true
+		}
+	}
+
+	for key, c := range byClient {
+		if c.platformAvailable {
+			defense.PlatformAuthenticatorAvailable++
+		}
+		if c.ceremony {
+			defense.CeremonyInitiated++
+		}
+		if (c.platformAvailable || c.ceremony) && reachedWeakerFactor[key] {
+			defense.PushedToWeakerFactor++
+		}
+	}
+	return defense
+}
+
+// passkeyClientKey identifies the client a StageWebAuthn row belongs to.
+// It prefers actor IP specifically (rather than actorIdentity's RID-first
+// key) because IP is the only signal shared with the later, RID-attributed
+// credential/capture events buildPasskeyDefense correlates against.
+func passkeyClientKey(row eventRow) string {
+	if ip := actorIP(row.Actor); ip != "" {
+		return "ip:" + ip
+	}
+	return actorIdentity(row.Actor)
+}
+
+// actorIP extracts the actor's IP address from its stored JSON, or "" when
+// unavailable or unparseable.
+func actorIP(actorJSON string) string {
+	if actorJSON == "" {
+		return ""
+	}
+	var actor telemetry.Actor
+	if err := json.Unmarshal([]byte(actorJSON), &actor); err != nil {
+		return ""
+	}
+	return actor.IP
+}
+
+// parseDetail decodes a telemetry_events.detail JSON blob. An empty or
+// unparseable value returns nil, which detailBool treats as "false" for
+// every key -- consistent with WithDetail's guarantee that every stored
+// value is already a plain JSON scalar.
+func parseDetail(raw string) map[string]any {
+	if raw == "" {
+		return nil
+	}
+	var detail map[string]any
+	if err := json.Unmarshal([]byte(raw), &detail); err != nil {
+		return nil
+	}
+	return detail
+}
+
+// detailBool reads a boolean detail field, defaulting to false for a
+// missing key or a value that (should never happen, but) isn't a JSON bool.
+func detailBool(detail map[string]any, key string) bool {
+	value, ok := detail[key].(bool)
+	return ok && value
 }
 
 func median(values []int64) int64 {
