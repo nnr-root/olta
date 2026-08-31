@@ -80,6 +80,88 @@ func makeFlagPathAbsolute(path *string) error {
 	return nil
 }
 
+// startupTelemetryConfig collects the values buildStartupEvent needs as
+// plain fields rather than package-level flag pointers, so the event's
+// shape is testable without invoking main() or flag.Parse().
+type startupTelemetryConfig struct {
+	Version                 string
+	DeveloperMode           bool
+	ProxyHeaderTrustEnabled bool
+	ClientProfile           string
+	RateLimitMax            int
+	RateLimitWindow         time.Duration
+	CloakerEnabled          bool
+	CloakerAction           string
+	CloakerBlockStatus      int
+	IPSyncEnabled           bool
+	IPSyncInterval          time.Duration
+	JSInspectEnabled        bool
+	JSInspectEndpoint       string
+	SessionValidatorEnabled bool
+	FeedEnabled             bool
+
+	// Turnstile, WebhookURL, CampaignDBDriver, and CampaignDBTLSCA hold the
+	// raw flag values that can carry a secret, on purpose: -turnstile is a
+	// "public:private" key pair, -webhook-url is itself a bearer secret
+	// (Slack/Discord webhook URLs authenticate by URL alone), and -g
+	// becomes a MySQL DSN containing "user:password@tcp(...)" once
+	// -g-driver=mysql. None of those flag names tokenize to a word
+	// telemetry's key-based redaction backstop recognizes ("turnstile",
+	// "webhook_url", and "campaign_db" all pass isLootKey), and this event
+	// fans out to every configured sink -- including the webhook sink
+	// itself, which would otherwise be handed its own secret URL, and the
+	// campaign database, which would otherwise receive its own password.
+	// buildStartupEvent is the single place responsible for reducing every
+	// one of these to a presence boolean or a non-secret enum before it
+	// ever reaches a telemetry.Event -- never the raw value. CampaignDBTLSCA
+	// is a filesystem path rather than a secret, but it reveals host
+	// layout, so it gets the same presence-only treatment.
+	Turnstile        string
+	WebhookURL       string
+	CampaignDBDriver string
+	CampaignDBTLSCA  string
+}
+
+// buildStartupEvent records the configuration a proxy process actually
+// started with as one StageInitialization event, so an engagement report
+// can show how the proxy was run. It carries no ATT&CK technique and is
+// emitted with no CampaignID/RID, matching every other cloak/verify-style
+// unattributed event -- see the StageInitialization doc comment for why
+// that keeps it inert in the resilience funnel and friction report.
+//
+// Turnstile, WebhookURL, CampaignDBDriver, and CampaignDBTLSCA are the only
+// inputs that can carry a secret (see the startupTelemetryConfig doc
+// comment); this function is the sole place that reduces each of them to a
+// presence boolean or non-secret enum. Never add a WithDetail call below
+// that passes one of those fields through unreduced.
+func buildStartupEvent(cfg startupTelemetryConfig) telemetry.Event {
+	driver := strings.ToLower(strings.TrimSpace(cfg.CampaignDBDriver))
+	if driver == "" {
+		driver = "sqlite3"
+	}
+	return telemetry.New(telemetry.StageInitialization, telemetry.OutcomeAllowed).
+		WithDetail("version", cfg.Version).
+		WithDetail("developer_mode", cfg.DeveloperMode).
+		WithDetail("proxy_header_trust_enabled", cfg.ProxyHeaderTrustEnabled).
+		WithDetail("client_profile", cfg.ClientProfile).
+		WithDetail("rate_limit_max", cfg.RateLimitMax).
+		WithDetail("rate_limit_window_seconds", int64(cfg.RateLimitWindow.Seconds())).
+		WithDetail("cloaker_enabled", cfg.CloakerEnabled).
+		WithDetail("cloaker_action", cfg.CloakerAction).
+		WithDetail("cloaker_block_status", cfg.CloakerBlockStatus).
+		WithDetail("ip_sync_enabled", cfg.IPSyncEnabled).
+		WithDetail("ip_sync_interval_seconds", int64(cfg.IPSyncInterval.Seconds())).
+		WithDetail("js_inspect_enabled", cfg.JSInspectEnabled).
+		WithDetail("js_inspect_endpoint", cfg.JSInspectEndpoint).
+		WithDetail("session_validator_enabled", cfg.SessionValidatorEnabled).
+		WithDetail("feed_enabled", cfg.FeedEnabled).
+		// Presence/enum only below -- never the secret value itself.
+		WithDetail("turnstile_enabled", cfg.Turnstile != "").
+		WithDetail("webhook_configured", strings.TrimSpace(cfg.WebhookURL) != "").
+		WithDetail("campaign_db_driver", driver).
+		WithDetail("campaign_db_tls_ca_configured", strings.TrimSpace(cfg.CampaignDBTLSCA) != "")
+}
+
 func main() {
 	flag.Parse()
 	if *version_flag == true {
@@ -401,6 +483,33 @@ func main() {
 	if hs != nil {
 		hs.Start(hp)
 	}
+
+	// Startup configuration telemetry: one event recording how this proxy
+	// process was actually launched, so an engagement report can show the
+	// posture in effect (cloaker, verification, rate limiting, etc.). See
+	// buildStartupEvent for why turnstile, webhook-url, and the campaign DB
+	// value never appear in it.
+	telemetryBus.Emit(buildStartupEvent(startupTelemetryConfig{
+		Version:                 core.VERSION,
+		DeveloperMode:           *developer_mode,
+		ProxyHeaderTrustEnabled: *cloaker_trust_proxy_headers,
+		ClientProfile:           *client_profile,
+		RateLimitMax:            *rate_limit,
+		RateLimitWindow:         *rate_window,
+		CloakerEnabled:          *enable_cloaker,
+		CloakerAction:           strings.ToLower(*cloaker_action),
+		CloakerBlockStatus:      *cloaker_block_status,
+		IPSyncEnabled:           *enable_ip_sync,
+		IPSyncInterval:          *ip_sync_interval,
+		JSInspectEnabled:        *enable_js_inspect,
+		JSInspectEndpoint:       *js_inspect_endpoint,
+		SessionValidatorEnabled: *enable_session_validator,
+		FeedEnabled:             *feed_enabled,
+		Turnstile:               *turnstile,
+		WebhookURL:              *webhook_url,
+		CampaignDBDriver:        *campaign_db_driver,
+		CampaignDBTLSCA:         *campaign_db_tls_ca,
+	}))
 
 	hp.Start()
 

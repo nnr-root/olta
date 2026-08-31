@@ -37,6 +37,14 @@ const (
 	StageCapture    Stage = "capture"
 	StageReplay     Stage = "replay"
 	StageReport     Stage = "report"
+
+	// StageInitialization records the configuration a proxy process started
+	// with. It carries no ATT&CK technique -- same reasoning as StageReport:
+	// process configuration is not adversary behavior, it is operational
+	// posture. It is deliberately excluded from the funnel kill chain (see
+	// pkg/campaign/resilience.funnelOrder), which counts recipient-facing
+	// engagement stages, not process startup.
+	StageInitialization Stage = "initialization"
 )
 
 // Outcome describes how a stage resolved.

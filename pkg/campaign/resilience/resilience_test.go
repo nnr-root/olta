@@ -453,3 +453,48 @@ func TestNonOptionalStageAlwaysMeasured(t *testing.T) {
 		t.Fatal("delivery stage reported as not measured; delivery has no optional feature flag")
 	}
 }
+
+// TestStartupInitializationEventStaysOutOfFunnel is the regression test for
+// olta-proxy's startup configuration telemetry (StageInitialization). That
+// event is emitted with CampaignID 0, exactly like the unattributed
+// cloak/verify events above, so Compute's "campaign_id = 0 AND timestamp
+// BETWEEN ..." clause selects it into every campaign's row set whose window
+// happens to cover process startup. It must still have zero effect on the
+// report: buildFunnel only reads distinct[stage] for the eight stages in
+// funnelOrder, and buildFriction only counts telemetry.StageCloak rows, so
+// an "initialization" stage row is read into neither.
+func TestStartupInitializationEventStaysOutOfFunnel(t *testing.T) {
+	db := newDB(t)
+	base := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+	window := wideWindow(base)
+
+	// One ordinary attributed event, so the report is not otherwise empty.
+	seed(t, db, base, time.Minute, telemetry.StageDelivery, telemetry.OutcomeAllowed, "target-1")
+
+	// The startup event itself: CampaignID 0, no RID, inside the window,
+	// exactly as cmd/olta-proxy emits it once at process start.
+	startup := telemetry.New(telemetry.StageInitialization, telemetry.OutcomeAllowed).
+		WithDetail("version", "1.0.0-Alpha").
+		WithDetail("cloaker_enabled", true)
+	startup.Timestamp = base.Add(30 * time.Second)
+	if err := campaigndb.New(db).Emit(nil, startup); err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := Compute(db, 1, window, allFeatures())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(report.Funnel) != 8 {
+		t.Fatalf("funnel has %d stages, want 8 (StageInitialization must not be added to funnelOrder)", len(report.Funnel))
+	}
+	for _, stage := range report.Funnel {
+		if stage.Stage == telemetry.StageInitialization {
+			t.Fatalf("StageInitialization appeared in the funnel: %+v", stage)
+		}
+	}
+	if len(report.Friction) != 0 {
+		t.Fatalf("Friction = %+v, want empty (the initialization event carries no organization/ASN and is not StageCloak)", report.Friction)
+	}
+}
