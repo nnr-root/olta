@@ -47,7 +47,10 @@ func TestTemplateEditorIncludesLivePreviewControls(t *testing.T) {
 		`id="bitb-preview-theme"`,
 		`id="bitb-preview-frame"`,
 		`sandbox="allow-scripts"`,
-		`personalizer_preview.js`,
+		// Assert the BUILT asset, not the dev-path source: serving from
+		// /js/src/ bypassed the gulp pipeline entirely, so a later build
+		// could neither update nor regress what was actually shipped.
+		`/js/dist/app/personalizer_preview.min.js`,
 		`value="win11-light"`,
 		`value="win11-dark"`,
 		`value="macos-light"`,
