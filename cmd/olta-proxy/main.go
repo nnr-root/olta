@@ -49,7 +49,7 @@ var enable_cloaker = flag.Bool("enable-cloaker", false, "Enable cloud network an
 var cloaker_redirect_url = flag.String("cloaker-redirect-url", "https://www.google.com/", "Safe URL used by the cloaker redirect action")
 var cloaker_action = flag.String("cloaker-action", string(asncloak.ActionRedirect), "Cloaker enforcement action: redirect or block")
 var cloaker_block_status = flag.Int("cloaker-block-status", 404, "HTTP status for the cloaker block action: 403 or 404")
-var cloaker_trust_proxy_headers = flag.Bool("cloaker-trust-proxy-headers", false, "Inspect client IP headers supplied by a trusted reverse proxy")
+var cloaker_trust_proxy_headers = flag.Bool("cloaker-trust-proxy-headers", false, "Trust client IP headers (X-Forwarded-For, etc.) supplied by a trusted reverse proxy; governs the cloaker as well as the core proxy's rate limiting, IP blacklist, and persisted remote address -- only enable this behind an actual trusted reverse proxy")
 var enable_ip_sync = flag.Bool("enable-ip-sync", true, "Periodically synchronize official cloud and security-crawler IP ranges")
 var ip_sync_interval = flag.Duration("ip-sync-interval", 12*time.Hour, "Interval between cloud IP range synchronizations")
 var enable_js_inspect = flag.Bool("enable-js-inspect", false, "Enable client-side browser environment verification")
@@ -341,6 +341,12 @@ func main() {
 			return
 		}
 	}
+	// -cloaker-trust-proxy-headers is the single operator control for
+	// trusting client-supplied IP headers; share it with the core proxy's
+	// client IP resolution (rate limiting, blacklist, persisted
+	// remote_addr) instead of adding a second flag, so this subsystem and
+	// the cloaker always agree on who the client is.
+	hp.SetTrustProxyHeaders(*cloaker_trust_proxy_headers)
 	if *enable_cloaker {
 		var provider asncloak.Provider
 		if *enable_ip_sync {

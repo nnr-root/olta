@@ -199,23 +199,62 @@ func (middleware *Middleware) evaluate(request *http.Request) (Match, bool) {
 
 func (middleware *Middleware) clientAddresses(request *http.Request) []netip.Addr {
 	if middleware.config.TrustProxyHeaders {
-		for _, value := range request.Header.Values("X-Forwarded-For") {
-			for _, part := range strings.Split(value, ",") {
-				if address, ok := parseAddress(part); ok {
-					return []netip.Addr{address}
-				}
-			}
-		}
-		for _, header := range []string{"X-Real-IP", "X-Client-IP", "Connecting-IP", "True-Client-IP", "Client-IP"} {
-			if address, ok := parseAddress(request.Header.Get(header)); ok {
-				return []netip.Addr{address}
-			}
+		if address, ok := addressFromProxyHeaders(request); ok {
+			return []netip.Addr{address}
 		}
 	}
 	if address, ok := parseAddress(request.RemoteAddr); ok {
 		return []netip.Addr{address}
 	}
 	return nil
+}
+
+// addressFromProxyHeaders applies the precedence used to trust a reverse
+// proxy's client-IP headers: X-Forwarded-For (first parseable hop across all
+// occurrences of the header, comma-split), then X-Real-IP, X-Client-IP,
+// Connecting-IP, True-Client-IP, and Client-IP in that order. It performs no
+// trust decision of its own -- callers gate this behind their own trust
+// setting.
+func addressFromProxyHeaders(request *http.Request) (netip.Addr, bool) {
+	for _, value := range request.Header.Values("X-Forwarded-For") {
+		for _, part := range strings.Split(value, ",") {
+			if address, ok := parseAddress(part); ok {
+				return address, true
+			}
+		}
+	}
+	for _, header := range []string{"X-Real-IP", "X-Client-IP", "Connecting-IP", "True-Client-IP", "Client-IP"} {
+		if address, ok := parseAddress(request.Header.Get(header)); ok {
+			return address, true
+		}
+	}
+	return netip.Addr{}, false
+}
+
+// ResolveClientIP determines which address a request should be attributed
+// to. It is the single source of truth other subsystems (the core proxy's
+// rate limiter, IP blacklist, and persisted remote_addr) should use so they
+// never disagree with the cloaker about who the client is.
+//
+// When trustProxyHeaders is false, or true but no proxy header carries a
+// parseable address, req.RemoteAddr is used. When trustProxyHeaders is true,
+// the same X-Forwarded-For / X-Real-IP / X-Client-IP / Connecting-IP /
+// True-Client-IP / Client-IP precedence as the cloaker applies. The returned
+// string never carries a port.
+func ResolveClientIP(request *http.Request, trustProxyHeaders bool) string {
+	if trustProxyHeaders {
+		if address, ok := addressFromProxyHeaders(request); ok {
+			return address.String()
+		}
+	}
+	if address, ok := parseAddress(request.RemoteAddr); ok {
+		return address.String()
+	}
+	// RemoteAddr did not parse as a host[:port] holding a valid IP (e.g. it
+	// is empty, as in a synthetic/test request). Fall back to whatever text
+	// precedes the first colon so callers still get a stable, non-empty
+	// value rather than silently trusting a header instead.
+	return strings.SplitN(request.RemoteAddr, ":", 2)[0]
 }
 
 func parseAddress(value string) (netip.Addr, bool) {

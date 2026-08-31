@@ -188,6 +188,68 @@ func TestEvaluateUsesTrustedForwardedClientIP(t *testing.T) {
 	}
 }
 
+func TestResolveClientIP(t *testing.T) {
+	t.Run("trust disabled always uses RemoteAddr", func(t *testing.T) {
+		request := httptest.NewRequest(http.MethodGet, "https://example.test/", nil)
+		request.RemoteAddr = "203.0.113.9:51234"
+		request.Header.Set("X-Forwarded-For", "1.2.3.4")
+		request.Header.Set("X-Real-IP", "5.6.7.8")
+		if got := ResolveClientIP(request, false); got != "203.0.113.9" {
+			t.Errorf("ResolveClientIP() = %q, want RemoteAddr host 203.0.113.9", got)
+		}
+	})
+
+	t.Run("trust enabled with no proxy headers falls back to RemoteAddr", func(t *testing.T) {
+		request := httptest.NewRequest(http.MethodGet, "https://example.test/", nil)
+		request.RemoteAddr = "203.0.113.9:51234"
+		if got := ResolveClientIP(request, true); got != "203.0.113.9" {
+			t.Errorf("ResolveClientIP() = %q, want RemoteAddr host 203.0.113.9", got)
+		}
+	})
+
+	t.Run("X-Forwarded-For takes precedence over every other header", func(t *testing.T) {
+		request := httptest.NewRequest(http.MethodGet, "https://example.test/", nil)
+		request.RemoteAddr = "203.0.113.9:51234"
+		request.Header.Set("X-Forwarded-For", "198.51.100.7, 10.0.0.1")
+		request.Header.Set("X-Real-IP", "5.6.7.8")
+		if got := ResolveClientIP(request, true); got != "198.51.100.7" {
+			t.Errorf("ResolveClientIP() = %q, want first hop of X-Forwarded-For 198.51.100.7", got)
+		}
+	})
+
+	// Table-driven over every header ResolveClientIP is documented to honor
+	// when trust is enabled, confirming both that each is read and that the
+	// documented precedence order holds (each case sets only headers at or
+	// after its own position, so an earlier header winning would mask a
+	// precedence bug).
+	headerPrecedence := []string{"X-Forwarded-For", "X-Real-IP", "X-Client-IP", "Connecting-IP", "True-Client-IP", "Client-IP"}
+	for i, header := range headerPrecedence {
+		t.Run("honors "+header, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodGet, "https://example.test/", nil)
+			request.RemoteAddr = "203.0.113.9:51234"
+			wantIP := "198.51.100.100"
+			request.Header.Set(header, wantIP)
+			// Lower-precedence headers must not be able to shadow this one.
+			for _, lower := range headerPrecedence[i+1:] {
+				request.Header.Set(lower, "192.0.2.200")
+			}
+			if got := ResolveClientIP(request, true); got != wantIP {
+				t.Errorf("ResolveClientIP() = %q, want %s honored via header %s", got, wantIP, header)
+			}
+		})
+	}
+
+	t.Run("garbage header values are skipped, not trusted verbatim", func(t *testing.T) {
+		request := httptest.NewRequest(http.MethodGet, "https://example.test/", nil)
+		request.RemoteAddr = "203.0.113.9:51234"
+		request.Header.Set("X-Forwarded-For", "not-an-ip")
+		request.Header.Set("X-Real-IP", "also-not-an-ip")
+		if got := ResolveClientIP(request, true); got != "203.0.113.9" {
+			t.Errorf("ResolveClientIP() = %q, want fallback to RemoteAddr 203.0.113.9 when headers are unparseable", got)
+		}
+	})
+}
+
 func TestRedirectHandler(t *testing.T) {
 	provider, err := NewLocalProvider([]Entry{{CIDR: "192.0.2.0/24", Organization: "scanner network"}})
 	if err != nil {
