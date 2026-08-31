@@ -177,6 +177,65 @@ func TestUpdateResultEmitsSMSMedium(t *testing.T) {
 	}
 }
 
+// TestUpdateResultEmitsRealClientIP verifies the campaign-side telemetry
+// event carries the client address the proxy actually observed (via the
+// browser attributes' "orig-address" key), not the loopback address that
+// used to be hardcoded here.
+func TestUpdateResultEmitsRealClientIP(t *testing.T) {
+	store := newTestStore(t)
+	emitter := &captureEmitter{}
+	store.SetEmitter(emitter)
+
+	seedResult(t, store, "rid-real-ip", 7)
+
+	browser := map[string]string{"address": "203.0.113.7:54321", "orig-address": "203.0.113.7", "user-agent": "test-agent"}
+	if err := store.updateResult("rid-real-ip", "Clicked Link", browser, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	events := emitter.all()
+	if len(events) != 1 {
+		t.Fatalf("emitted %d events, want 1", len(events))
+	}
+	if got := events[0].Actor.IP; got != "203.0.113.7" {
+		t.Fatalf("Actor.IP = %q, want %q", got, "203.0.113.7")
+	}
+
+	var stored Result
+	if err := store.db.Table("results").Where("r_id=?", "rid-real-ip").Scan(&stored).Error; err != nil {
+		t.Fatalf("scan result: %v", err)
+	}
+	if stored.IP != "203.0.113.7" {
+		t.Fatalf("stored result.IP = %q, want %q", stored.IP, "203.0.113.7")
+	}
+}
+
+// TestUpdateResultOmitsIPWhenUnknown verifies that when no real client
+// address is available, the store leaves the telemetry actor IP absent
+// instead of recording the loopback address as if it were observed.
+func TestUpdateResultOmitsIPWhenUnknown(t *testing.T) {
+	store := newTestStore(t)
+	emitter := &captureEmitter{}
+	store.SetEmitter(emitter)
+
+	seedResult(t, store, "rid-unknown-ip", 7)
+
+	if err := store.updateResult("rid-unknown-ip", "Clicked Link", nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	events := emitter.all()
+	if len(events) != 1 {
+		t.Fatalf("emitted %d events, want 1", len(events))
+	}
+	if got := events[0].Actor.IP; got == "127.0.0.1" {
+		t.Fatalf("Actor.IP = %q, must not be the loopback address", got)
+	}
+	if got := events[0].Actor.IP; got != "" {
+		t.Fatalf("Actor.IP = %q, want empty when no real address is known", got)
+	}
+}
+
 func TestNilEmitterIsSafe(t *testing.T) {
 	store := newTestStore(t)
 	seedResult(t, store, "rid-43", 7)

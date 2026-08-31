@@ -142,7 +142,7 @@ func (s *Store) emitStage(result Result, status string, browser map[string]strin
 	event := telemetry.New(stage, outcome, technique).
 		WithCampaign(result.CampaignId, result.RId).
 		WithActor(telemetry.Actor{
-			IP:        result.IP,
+			IP:        clientIP(browser),
 			UserAgent: browser["user-agent"],
 		})
 
@@ -155,6 +155,16 @@ func (s *Store) emitStage(result Result, status string, browser map[string]strin
 	}
 
 	emitter.Emit(event)
+}
+
+// clientIP recovers the real client address the proxy observed for this
+// event from the browser attributes (see http_proxy.go, where "orig-address"
+// is set from the request's remote address or a trusted proxy header,
+// already stripped of its port). It returns "" when the caller supplied no
+// browser attributes or none carry an address, so callers can leave the
+// field absent rather than record a fabricated one.
+func clientIP(browser map[string]string) string {
+	return browser["orig-address"]
 }
 
 // medium reports which channel delivered the lure, so callers can attach it
@@ -308,7 +318,12 @@ func (s *Store) updateResult(rid, status string, browser map[string]string, payl
 	if err := s.db.Save(&event).Error; err != nil {
 		return err
 	}
-	result.IP = "127.0.0.1"
+	// Record the real observed client address when the proxy supplied one.
+	// Leave the previously stored value alone otherwise, rather than
+	// overwrite it with a fabricated address (see clientIP).
+	if ip := clientIP(browser); ip != "" {
+		result.IP = ip
+	}
 	result.ModifiedDate = event.Time
 	s.emitStage(result, status, browser)
 	if notification != nil && s.feedEnabled {
