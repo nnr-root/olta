@@ -12,11 +12,10 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/jinzhu/gorm"
-	_ "github.com/mattn/go-sqlite3"
+	campaigndb "github.com/s4l1hs/olta/pkg/campaign/database"
 	"github.com/s4l1hs/olta/pkg/campaign/secrets"
 	feedclient "github.com/s4l1hs/olta/pkg/feed/client"
 	"github.com/s4l1hs/olta/pkg/proxy/database"
-	sqlitedsn "github.com/s4l1hs/olta/pkg/storage/sqlite"
 	"github.com/s4l1hs/olta/pkg/telemetry"
 )
 
@@ -79,11 +78,28 @@ type Store struct {
 	closeOnce sync.Once
 }
 
-func New(path, feedEndpoint string, feedEnabled bool) (*Store, error) {
+// New opens the campaign event store on the given database driver, reusing
+// pkg/campaign/database's connector -- the same dialect selection the
+// campaign service itself uses (see models.Setup) -- rather than a second,
+// parallel one. driver is "" or "sqlite3" for the embedded default, or
+// "mysql" for an external server; path is a SQLite file path for the
+// former and a MySQL DSN for the latter, matching db_name/db_path in the
+// campaign configuration. tlsCAPath is the optional MySQL CA certificate
+// path (db_sslca_path); the SQLite connector rejects a non-empty value.
+//
+// For the SQLite driver this opens the database exactly as before: the
+// connector's sqliteConnector.Open still builds the DSN through
+// sqlitedsn.ConcurrentDSN, so the WAL and busy-timeout tuning are
+// unchanged. MySQL support is additive.
+func New(driver, path, tlsCAPath, feedEndpoint string, feedEnabled bool) (*Store, error) {
 	if _, err := secrets.ConfigureFromEnvironment(); err != nil {
 		return nil, err
 	}
-	db, err := gorm.Open("sqlite3", sqlitedsn.ConcurrentDSN(path))
+	connector, err := campaigndb.New(driver)
+	if err != nil {
+		return nil, err
+	}
+	db, err := connector.Open(path, tlsCAPath)
 	if err != nil {
 		return nil, fmt.Errorf("open Olta campaign database: %w", err)
 	}

@@ -36,7 +36,9 @@ var developer_mode = flag.Bool("developer", false, "Enable developer mode (gener
 var cfg_dir = flag.String("c", "", "Configuration directory path")
 var asset_dir = flag.String("asset-dir", "", "Runtime asset directory containing templates and redirectors")
 var version_flag = flag.Bool("v", false, "Show version")
-var campaign_db = flag.String("g", "", "Full path to the Olta campaign SQLite database")
+var campaign_db = flag.String("g", "", "Full path to the Olta campaign SQLite database, or a MySQL DSN when -g-driver=mysql")
+var campaign_db_driver = flag.String("g-driver", "", "Olta campaign database driver: empty or \"sqlite3\" for the embedded default, or \"mysql\" -- must match the campaign service's own db_name setting")
+var campaign_db_tls_ca = flag.String("g-tls-ca", "", "CA certificate path for a TLS-secured MySQL campaign database (ignored for sqlite3); matches db_sslca_path in the campaign configuration")
 var feed_enabled = flag.Bool("feed", false, "Enable live feed")
 var feed_url = flag.String("feed-url", feedclient.Endpoint(""), "Olta Feed WebSocket endpoint")
 var turnstile = flag.String("turnstile", "", "Turnstile public/private key separated by \":\"")
@@ -88,7 +90,14 @@ func main() {
 		log.Fatal("you need to provide the full path to the Olta campaign database: ./olta-proxy -g /opt/olta/cmd/olta-campaign/olta-campaign.db")
 		return
 	}
-	for _, path := range []*string{campaign_db, phishlets_dir, redirectors_dir, cfg_dir} {
+	pathFlags := []*string{phishlets_dir, redirectors_dir, cfg_dir, campaign_db_tls_ca}
+	// campaign_db is only a filesystem path for the embedded SQLite driver;
+	// for -g-driver=mysql it holds a DSN (e.g. "user:pass@tcp(host:3306)/db"),
+	// which filepath.Abs would corrupt by treating it as a relative path.
+	if *campaign_db_driver == "" || *campaign_db_driver == "sqlite3" {
+		pathFlags = append(pathFlags, campaign_db)
+	}
+	for _, path := range pathFlags {
 		if err := makeFlagPathAbsolute(path); err != nil {
 			log.Fatal("path: %v", err)
 			return
@@ -192,7 +201,7 @@ func main() {
 	// writes through the Store's own queue instead of a second database
 	// connection: the sink needs the Store, so the Store has to exist
 	// first. See campaignstore.Store.TelemetrySink.
-	campaignEvents, err := campaignstore.New(*campaign_db, *feed_url, *feed_enabled)
+	campaignEvents, err := campaignstore.New(*campaign_db_driver, *campaign_db, *campaign_db_tls_ca, *feed_url, *feed_enabled)
 	if err != nil {
 		log.Fatal("campaign event store: %v", err)
 		return

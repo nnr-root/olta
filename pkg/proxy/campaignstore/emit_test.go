@@ -29,7 +29,7 @@ func newTestStore(t *testing.T) *Store {
 		t.Fatalf("close raw db: %v", err)
 	}
 
-	store, err := New(path, "", false)
+	store, err := New("", path, "", "", false)
 	if err != nil {
 		t.Fatalf("New(): %v", err)
 	}
