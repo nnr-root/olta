@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-const CurrentVersion = 6
+const CurrentVersion = 7
 
 //go:embed sqlite/001_initial_olta_schema.sql
 var sqliteSchema string
@@ -46,6 +46,12 @@ var sqliteTelemetryEvents string
 //go:embed mysql/006_telemetry_events.sql
 var mysqlTelemetryEvents string
 
+//go:embed sqlite/007_session_tagging.sql
+var sqliteSessionTagging string
+
+//go:embed mysql/007_session_tagging.sql
+var mysqlSessionTagging string
+
 var requiredSchema = map[string][]string{
 	"users":                      {"id", "username", "hash", "api_key", "api_key_hash", "role_id", "password_change_required", "account_locked", "last_login"},
 	"templates":                  {"id", "user_id", "name", "envelope_sender", "subject", "text", "html", "modified_date"},
@@ -58,7 +64,7 @@ var requiredSchema = map[string][]string{
 	"sms":                        {"id", "user_id", "name", "twilio_account_sid", "twilio_auth_token", "sms_from", "modified_date"},
 	"campaigns":                  {"id", "user_id", "name", "created_date", "launch_date", "send_by_date", "completed_date", "template_id", "page_id", "status", "smtp_id", "sms_id", "url", "qr_size", "min_send_delay", "max_send_delay"},
 	"campaign_template_variants": {"id", "campaign_id", "template_id", "name", "position"},
-	"results":                    {"id", "campaign_id", "user_id", "r_id", "email", "first_name", "last_name", "position", "department", "role", "company", "manager_name", "language", "status", "ip", "latitude", "longitude", "send_date", "reported", "modified_date", "sms_target", "template_variant_id"},
+	"results":                    {"id", "campaign_id", "user_id", "r_id", "email", "first_name", "last_name", "position", "department", "role", "company", "manager_name", "language", "status", "ip", "latitude", "longitude", "send_date", "reported", "modified_date", "sms_target", "template_variant_id", "tag", "notes", "session_status"},
 	"events":                     {"id", "campaign_id", "email", "time", "message", "details"},
 	"mail_logs":                  {"id", "campaign_id", "user_id", "send_date", "send_attempt", "r_id", "processing", "target"},
 	"sms_logs":                   {"id", "campaign_id", "user_id", "send_date", "send_attempt", "r_id", "processing", "target"},
@@ -162,6 +168,10 @@ func migrationFor(dialect string, version int) (string, error) {
 		return sqliteTelemetryEvents, nil
 	case dialect == "mysql" && version == 6:
 		return mysqlTelemetryEvents, nil
+	case dialect == "sqlite3" && version == 7:
+		return sqliteSessionTagging, nil
+	case dialect == "mysql" && version == 7:
+		return mysqlSessionTagging, nil
 	case dialect != "sqlite3" && dialect != "mysql":
 		return "", fmt.Errorf("unsupported database dialect %q", dialect)
 	default:
@@ -178,7 +188,7 @@ func legacyRequiredSchema() map[string][]string {
 		filtered := make([]string, 0, len(columns))
 		for _, column := range columns {
 			if (table == "campaigns" && (column == "min_send_delay" || column == "max_send_delay")) ||
-				(table == "results" && column == "template_variant_id") ||
+				(table == "results" && (column == "template_variant_id" || column == "tag" || column == "notes" || column == "session_status")) ||
 				((table == "targets" || table == "results" || table == "email_requests") &&
 					(column == "department" || column == "role" || column == "company" || column == "manager_name" || column == "language")) ||
 				(table == "users" && column == "api_key_hash") {

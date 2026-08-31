@@ -664,13 +664,14 @@ func PostSMSCampaign(c *Campaign, uid int64) error {
 					ManagerName: t.ManagerName,
 					Language:    t.Language,
 				},
-				Status:       StatusScheduled,
-				CampaignId:   c.Id,
-				UserId:       c.UserId,
-				SendDate:     sendDate,
-				Reported:     false,
-				ModifiedDate: c.CreatedDate,
-				SMSTarget:    true,
+				Status:        StatusScheduled,
+				CampaignId:    c.Id,
+				UserId:        c.UserId,
+				SendDate:      sendDate,
+				Reported:      false,
+				ModifiedDate:  c.CreatedDate,
+				SMSTarget:     true,
+				SessionStatus: SessionStatusUntriaged,
 			}
 			err = r.GenerateId(tx)
 			if err != nil {
@@ -830,6 +831,7 @@ func PostCampaign(c *Campaign, uid int64) error {
 				ModifiedDate:      c.CreatedDate,
 				SMSTarget:         false,
 				TemplateVariantId: variant.Id,
+				SessionStatus:     SessionStatusUntriaged,
 			}
 			err = r.GenerateId(tx)
 			if err != nil {

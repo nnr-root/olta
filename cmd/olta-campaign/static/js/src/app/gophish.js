@@ -121,6 +121,14 @@ var api = {
         // summary() - Queries the API for GET /campaigns/summary
         summary: function (id) {
             return query("/campaigns/" + id + "/summary", "GET", {}, true)
+        },
+        // sessionTag() - Sets tag/notes/status on a captured session at
+        // PUT /campaigns/:id/results/:rid/session. Each of tag, notes, and
+        // status is optional in `fields` -- an omitted key leaves that
+        // column unchanged server-side, so a single-field edit doesn't
+        // clobber the others.
+        sessionTag: function (id, rid, fields) {
+            return query("/campaigns/" + id + "/results/" + rid + "/session", "PUT", fields, true)
         }
     },
     // groups contains the endpoints for /groups

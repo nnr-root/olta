@@ -98,6 +98,12 @@
         </div>
         <div class="row">
             <h2>Details</h2>
+            <div class="form-group">
+                <label for="sessionTagFilter">Filter by tag</label>
+                <select id="sessionTagFilter" class="form-control" style="max-width: 260px;">
+                    <option value="">All tags</option>
+                </select>
+            </div>
             <table id="resultsTable" class="table">
                 <thead>
                     <tr>
@@ -109,6 +115,8 @@
                         <th>Position</th>
                         <th>Status</th>
                         <th class="text-center">Reported</th>
+                        <th class="no-sort">Tag</th>
+                        <th class="no-sort">Session Status</th>
                     </tr>
                 </thead>
                 <tbody>

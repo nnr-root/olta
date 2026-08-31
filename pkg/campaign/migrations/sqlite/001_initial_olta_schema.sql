@@ -131,7 +131,10 @@ CREATE TABLE IF NOT EXISTS results (
     reported BOOLEAN NOT NULL DEFAULT 0,
     modified_date DATETIME,
     sms_target BOOLEAN NOT NULL DEFAULT 0,
-    template_variant_id BIGINT NOT NULL DEFAULT 0
+    template_variant_id BIGINT NOT NULL DEFAULT 0,
+    tag VARCHAR(120),
+    notes VARCHAR(2000),
+    session_status VARCHAR(32) NOT NULL DEFAULT 'untriaged'
 );
 
 CREATE TABLE IF NOT EXISTS events (
@@ -257,6 +260,8 @@ CREATE INDEX IF NOT EXISTS idx_campaign_template_variants_campaign_id ON campaig
 CREATE UNIQUE INDEX IF NOT EXISTS idx_campaign_template_variants_position ON campaign_template_variants(campaign_id, position);
 CREATE INDEX IF NOT EXISTS idx_results_template_variant_id ON results(template_variant_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_results_r_id ON results(r_id);
+CREATE INDEX IF NOT EXISTS idx_results_tag ON results(tag);
+CREATE INDEX IF NOT EXISTS idx_results_session_status ON results(session_status);
 CREATE INDEX IF NOT EXISTS idx_events_campaign_id ON events(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_mail_logs_schedule ON mail_logs(processing, send_date);
 CREATE INDEX IF NOT EXISTS idx_sms_logs_schedule ON sms_logs(processing, send_date);

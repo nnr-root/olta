@@ -147,9 +147,14 @@ CREATE TABLE IF NOT EXISTS `results` (
     `modified_date` DATETIME,
     `sms_target` BOOLEAN NOT NULL DEFAULT FALSE,
     `template_variant_id` BIGINT NOT NULL DEFAULT 0,
+    `tag` VARCHAR(120),
+    `notes` VARCHAR(2000),
+    `session_status` VARCHAR(32) NOT NULL DEFAULT 'untriaged',
     INDEX `idx_results_campaign_id` (`campaign_id`),
     INDEX `idx_results_template_variant_id` (`template_variant_id`),
-    UNIQUE INDEX `idx_results_r_id` (`r_id`)
+    UNIQUE INDEX `idx_results_r_id` (`r_id`),
+    INDEX `idx_results_tag` (`tag`),
+    INDEX `idx_results_session_status` (`session_status`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS `events` (

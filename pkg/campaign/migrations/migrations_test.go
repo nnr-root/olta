@@ -77,7 +77,8 @@ func TestApplyRejectsIncompleteLegacySchema(t *testing.T) {
 
 func TestApplyMigratesVersionOneSQLiteSchema(t *testing.T) {
 	db := openSQLiteTestDatabase(t)
-	legacySchema := schemaWithoutRecipientPersonalization(sqliteSchema)
+	legacySchema := schemaWithoutSessionTagging(sqliteSchema)
+	legacySchema = schemaWithoutRecipientPersonalization(legacySchema)
 	legacySchema = schemaWithoutSecretStorage(legacySchema)
 	legacySchema = strings.Replace(legacySchema, ",\n    min_send_delay BIGINT NOT NULL DEFAULT 0,\n    max_send_delay BIGINT NOT NULL DEFAULT 0", "", 1)
 	legacySchema = strings.Replace(legacySchema, ",\n    template_variant_id BIGINT NOT NULL DEFAULT 0", "", 1)
@@ -139,7 +140,8 @@ func TestApplyMigratesVersionOneSQLiteSchema(t *testing.T) {
 
 func TestApplyMigratesVersionTwoSQLiteSchema(t *testing.T) {
 	db := openSQLiteTestDatabase(t)
-	versionTwoSchema := schemaWithoutRecipientPersonalization(sqliteSchema)
+	versionTwoSchema := schemaWithoutSessionTagging(sqliteSchema)
+	versionTwoSchema = schemaWithoutRecipientPersonalization(versionTwoSchema)
 	versionTwoSchema = schemaWithoutSecretStorage(versionTwoSchema)
 	if err := executeSchema(db, versionTwoSchema); err != nil {
 		t.Fatalf("apply version two fixture: %v", err)
@@ -171,7 +173,8 @@ func TestApplyMigratesVersionTwoSQLiteSchema(t *testing.T) {
 
 func TestApplyMigratesVersionThreeSQLiteSchema(t *testing.T) {
 	db := openSQLiteTestDatabase(t)
-	versionThreeSchema := strings.ReplaceAll(sqliteSchema, ",\n    language VARCHAR(32)", "")
+	versionThreeSchema := schemaWithoutSessionTagging(sqliteSchema)
+	versionThreeSchema = strings.ReplaceAll(versionThreeSchema, ",\n    language VARCHAR(32)", "")
 	versionThreeSchema = schemaWithoutSecretStorage(versionThreeSchema)
 	if err := executeSchema(db, versionThreeSchema); err != nil {
 		t.Fatalf("apply version three fixture: %v", err)
@@ -217,7 +220,8 @@ func schemaWithoutSecretStorage(schema string) string {
 
 func TestApplyMigratesVersionFourSQLiteSchema(t *testing.T) {
 	db := openSQLiteTestDatabase(t)
-	versionFourSchema := schemaWithoutSecretStorage(sqliteSchema)
+	versionFourSchema := schemaWithoutSessionTagging(sqliteSchema)
+	versionFourSchema = schemaWithoutSecretStorage(versionFourSchema)
 	if err := executeSchema(db, versionFourSchema); err != nil {
 		t.Fatal(err)
 	}
@@ -295,8 +299,8 @@ func TestTelemetryEventsTableExistsOnFreshInstall(t *testing.T) {
 	if version != CurrentVersion {
 		t.Fatalf("version = %d, want %d", version, CurrentVersion)
 	}
-	if CurrentVersion != 6 {
-		t.Fatalf("CurrentVersion = %d, want 6", CurrentVersion)
+	if CurrentVersion != 7 {
+		t.Fatalf("CurrentVersion = %d, want 7", CurrentVersion)
 	}
 
 	for _, column := range []string{
@@ -319,12 +323,24 @@ func TestTelemetryEventsUpgradeFromVersionFive(t *testing.T) {
 	if err := Apply(db, "sqlite3"); err != nil {
 		t.Fatal(err)
 	}
-	// Rewind to v5 and drop the new table to simulate a pre-006 database.
-	// currentVersion() takes MAX(version) over an insert-only log, so the
-	// version-6 row recorded by the fresh Apply() above must be cleared
-	// first or MAX() would still report 6 despite the table drop.
+	// Rewind to v5 and drop everything migrations 6 and 7 added, to
+	// simulate a pre-006 database. currentVersion() takes MAX(version)
+	// over an insert-only log, so the version-7 row recorded by the fresh
+	// Apply() above must be cleared first or MAX() would still report 7
+	// despite the drops.
 	if _, err := db.Exec("DROP TABLE telemetry_events"); err != nil {
 		t.Fatal(err)
+	}
+	if _, err := db.Exec("DROP INDEX idx_results_tag"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("DROP INDEX idx_results_session_status"); err != nil {
+		t.Fatal(err)
+	}
+	for _, column := range []string{"tag", "notes", "session_status"} {
+		if _, err := db.Exec("ALTER TABLE results DROP COLUMN " + column); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if _, err := db.Exec("DELETE FROM olta_schema_migrations"); err != nil {
 		t.Fatal(err)
@@ -334,14 +350,103 @@ func TestTelemetryEventsUpgradeFromVersionFive(t *testing.T) {
 	}
 
 	if err := Apply(db, "sqlite3"); err != nil {
-		t.Fatalf("upgrade v5 to v6: %v", err)
+		t.Fatalf("upgrade v5 to current: %v", err)
 	}
 
 	version, err := currentVersion(db)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if version != 6 {
-		t.Fatalf("version after upgrade = %d, want 6", version)
+	if version != CurrentVersion {
+		t.Fatalf("version after upgrade = %d, want %d", version, CurrentVersion)
+	}
+}
+
+// schemaWithoutSessionTagging strips the session tagging columns/indexes
+// this migration adds from the full unified schema, producing a
+// version-6-equivalent schema for upgrade testing. Mirrors
+// schemaWithoutSecretStorage above.
+func schemaWithoutSessionTagging(schema string) string {
+	schema = strings.Replace(schema,
+		"    template_variant_id BIGINT NOT NULL DEFAULT 0,\n    tag VARCHAR(120),\n    notes VARCHAR(2000),\n    session_status VARCHAR(32) NOT NULL DEFAULT 'untriaged'\n)",
+		"    template_variant_id BIGINT NOT NULL DEFAULT 0\n)", 1)
+	schema = strings.ReplaceAll(schema, "CREATE INDEX IF NOT EXISTS idx_results_tag ON results(tag);", "")
+	schema = strings.ReplaceAll(schema, "CREATE INDEX IF NOT EXISTS idx_results_session_status ON results(session_status);", "")
+	return schema
+}
+
+// TestSessionTaggingColumnsExistOnFreshInstall proves the fresh-install
+// schema (001) and the numbered migration (007) agree: a brand new
+// database gets the operator tagging columns on the results table without
+// ever running migration 007 directly.
+func TestSessionTaggingColumnsExistOnFreshInstall(t *testing.T) {
+	db := openSQLiteTestDatabase(t)
+	if err := Apply(db, "sqlite3"); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, column := range []string{"tag", "notes", "session_status"} {
+		var count int
+		query := "SELECT COUNT(*) FROM pragma_table_info('results') WHERE name = ?"
+		if err := db.QueryRow(query, column).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 1 {
+			t.Fatalf("results is missing column %q", column)
+		}
+	}
+
+	// session_status must default an existing row to "untriaged" rather
+	// than an empty string, so a pre-existing captured session shows up
+	// as untriaged in the dashboard filter instead of falling through it.
+	if _, err := db.Exec(`INSERT INTO results (r_id, status) VALUES ('ridfresh', 'Captured Session')`); err != nil {
+		t.Fatal(err)
+	}
+	var status string
+	if err := db.QueryRow(`SELECT session_status FROM results WHERE r_id='ridfresh'`).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "untriaged" {
+		t.Fatalf("session_status default = %q, want untriaged", status)
+	}
+}
+
+// TestSessionTaggingUpgradeFromVersionSix proves migration 007 brings an
+// existing (pre-tagging) database up to the same shape a fresh install
+// gets from 001, including the same default.
+func TestSessionTaggingUpgradeFromVersionSix(t *testing.T) {
+	db := openSQLiteTestDatabase(t)
+	versionSixSchema := schemaWithoutSessionTagging(sqliteSchema)
+	if err := executeSchema(db, versionSixSchema); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureVersionTable(db, "sqlite3"); err != nil {
+		t.Fatal(err)
+	}
+	if err := recordVersion(db, 6); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO results (r_id, status) VALUES ('ridlegacy', 'Captured Session')`); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Apply(db, "sqlite3"); err != nil {
+		t.Fatalf("upgrade v6 to current: %v", err)
+	}
+
+	version, err := currentVersion(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if version != CurrentVersion {
+		t.Fatalf("version after upgrade = %d, want %d", version, CurrentVersion)
+	}
+
+	var status string
+	if err := db.QueryRow(`SELECT session_status FROM results WHERE r_id='ridlegacy'`).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "untriaged" {
+		t.Fatalf("session_status for pre-existing row = %q, want untriaged", status)
 	}
 }

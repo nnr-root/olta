@@ -381,8 +381,18 @@ function renderTimeline(data) {
         "position": data[5],
         "status": data[6],
         "reported": data[7],
-        "send_date": data[8]
+        "send_date": data[10]
     }
+    // Notes aren't carried in the DataTable row (they can run to 2000
+    // characters, and don't need their own column) -- look the current
+    // value up from campaign.results by rid instead.
+    var notesValue = ""
+    $.each(campaign.results || [], function (i, result) {
+        if (result.id == record.id) {
+            notesValue = result.notes || ""
+            return false
+        }
+    })
     results = '<div class="timeline col-sm-12 well well-lg">' +
         '<h6>Timeline for ' + escapeHtml(record.first_name) + ' ' + escapeHtml(record.last_name) +
         '</h6><span class="subtitle">Email: ' + escapeHtml(record.email) +
@@ -449,7 +459,14 @@ function renderTimeline(data) {
             '    <i class="fa ' + statuses[record.status].icon + '"></i></div>' +
             '    <div class="timeline-message">' + "Scheduled to send at " + record.send_date + '</span>'
     }
-    results += '</div></div>'
+    results += '</div>'
+    results += '<div class="timeline-notes col-sm-6">' +
+        '<h6>Operator Notes</h6>' +
+        '<textarea class="form-control session-notes-textarea" data-rid="' + escapeHtml(record.id) + '" rows="4" maxlength="2000">' + escapeHtml(notesValue) + '</textarea>' +
+        '<button type="button" class="btn btn-default btn-sm session-notes-save" data-rid="' + escapeHtml(record.id) + '" style="margin-top:5px;">' +
+        '<i class="fa fa-save"></i> Save Notes</button>' +
+        '</div>'
+    results += '</div>'
     return results
 }
 
@@ -633,6 +650,81 @@ function createStatusLabel(status, send_date) {
     return statusColumn
 }
 
+// Session tagging: operator-facing metadata on captured sessions (see
+// pkg/campaign/models.SessionStatuses), so a team working one engagement
+// can mark which sessions are triaged, high-value, or already replayed.
+var SESSION_STATUSES = ["untriaged", "triaged", "high_value", "replayed", "discarded"]
+var SESSION_STATUS_LABELS = {
+    untriaged: "Untriaged",
+    triaged: "Triaged",
+    high_value: "High Value",
+    replayed: "Replayed",
+    discarded: "Discarded"
+}
+
+function sessionStatusOptions(selected) {
+    var html = ""
+    $.each(SESSION_STATUSES, function (i, status) {
+        html += '<option value="' + escapeHtml(status) + '"' +
+            (status === selected ? ' selected' : '') + '>' +
+            escapeHtml(SESSION_STATUS_LABELS[status] || status) + '</option>'
+    })
+    return html
+}
+
+// renderSessionTagCell/renderSessionStatusCell build the editable controls
+// shown in the results table. rid is embedded as a data-* attribute (never
+// interpolated into an event handler string) and both the tag value and
+// rid are escaped: tag is operator free text, and while rid is server-
+// generated, nothing reaching the DOM here skips escaping on principle.
+function renderSessionTagCell(tag, rid) {
+    return '<input type="text" class="form-control input-sm session-tag-input" ' +
+        'data-rid="' + escapeHtml(rid) + '" value="' + escapeHtml(tag || "") + '" maxlength="120">'
+}
+
+function renderSessionStatusCell(status, rid) {
+    return '<select class="form-control input-sm session-status-select" data-rid="' + escapeHtml(rid) + '">' +
+        sessionStatusOptions(status || "untriaged") +
+        '</select>'
+}
+
+// saveSessionTag persists a partial tag/notes/status edit for one session.
+// fields carries only the field(s) that changed -- see api.campaignId.
+// sessionTag in gophish.js for why that matters.
+function saveSessionTag(rid, fields) {
+    api.campaignId.sessionTag(campaign.id, rid, fields)
+        .success(function () {
+            refreshSessionTagFilter()
+        })
+        .error(function () {
+            errorFlashFade(' Could not save the session tag.', 5)
+        })
+}
+
+// refreshSessionTagFilter rebuilds the tag filter dropdown's option list
+// from the tags currently present on campaign.results, preserving the
+// operator's current selection where it still applies.
+function refreshSessionTagFilter() {
+    var select = $('#sessionTagFilter')
+    if (select.length === 0) {
+        return
+    }
+    var current = select.val()
+    var tags = {}
+    $.each(campaign.results || [], function (i, result) {
+        if (result.tag) {
+            tags[result.tag] = true
+        }
+    })
+    select.find('option').slice(1).remove()
+    $.each(Object.keys(tags).sort(), function (i, tag) {
+        select.append('<option value="' + escapeHtml(tag) + '">' + escapeHtml(tag) + '</option>')
+    })
+    if (Object.prototype.hasOwnProperty.call(tags, current)) {
+        select.val(current)
+    }
+}
+
 /* poll - Queries the API and updates the UI with the results
  *
  * Updates:
@@ -708,7 +800,9 @@ function poll() {
                 var rid = rowData[0]
                 $.each(campaign.results, function (j, result) {
                     if (result.id == rid) {
-                        rowData[8] = moment(result.send_date).format('MMMM Do YYYY, h:mm:ss a')
+                        rowData[10] = moment(result.send_date).format('MMMM Do YYYY, h:mm:ss a')
+                        rowData[9] = result.session_status
+                        rowData[8] = result.tag
                         rowData[7] = result.reported
                         rowData[6] = result.status
                         resultsTable.row(i).data(rowData)
@@ -722,6 +816,7 @@ function poll() {
                 })
             })
             resultsTable.draw(false)
+            refreshSessionTagFilter()
             /* Update the map information */
             updateMap(campaign.results)
             $('[data-toggle="tooltip"]').tooltip()
@@ -775,11 +870,11 @@ function load() {
                             "targets": [1]
                         }, {
                             "visible": false,
-                            "targets": [0, 8]
+                            "targets": [0, 10]
                         },
                         {
                             "render": function (data, type, row) {
-                                return createStatusLabel(data, row[8])
+                                return createStatusLabel(data, row[10])
                             },
                             "targets": [6]
                         },
@@ -795,6 +890,24 @@ function load() {
                                 return reported
                             },
                             "targets": [7]
+                        },
+                        {
+                            "render": function (tag, type, row) {
+                                if (type !== "display") {
+                                    return tag || ""
+                                }
+                                return renderSessionTagCell(tag, row[0])
+                            },
+                            "targets": [8]
+                        },
+                        {
+                            "render": function (status, type, row) {
+                                if (type !== "display") {
+                                    return status || ""
+                                }
+                                return renderSessionStatusCell(status, row[0])
+                            },
+                            "targets": [9]
                         }
                     ]
                 });
@@ -814,6 +927,8 @@ function load() {
                         escapeHtml(result.position) || "",
                         result.status,
                         result.reported,
+                        result.tag || "",
+                        result.session_status || "untriaged",
                         moment(result.send_date).format('MMMM Do YYYY, h:mm:ss a')
                     ])
                     email_series_data[result.status]++;
@@ -827,8 +942,38 @@ function load() {
                     }
                 })
                 resultsTable.draw();
+                refreshSessionTagFilter()
                 // Setup tooltips
                 $('[data-toggle="tooltip"]').tooltip()
+                // Setup saving the operator tag/notes/status controls added
+                // to each row. Delegated on the table body (rather than
+                // bound per-input) since DataTables re-renders row markup
+                // on every draw/poll.
+                $('#resultsTable tbody').on('blur', '.session-tag-input', function () {
+                    saveSessionTag($(this).data('rid'), {
+                        tag: $(this).val()
+                    })
+                })
+                $('#resultsTable tbody').on('change', '.session-status-select', function () {
+                    saveSessionTag($(this).data('rid'), {
+                        status: $(this).val()
+                    })
+                })
+                $('#resultsTable').on('click', '.session-notes-save', function () {
+                    var rid = $(this).data('rid')
+                    var textarea = $(this).siblings('.session-notes-textarea')
+                    saveSessionTag(rid, {
+                        notes: textarea.val()
+                    })
+                })
+                $('#sessionTagFilter').on('change', function () {
+                    var tag = this.value
+                    if (tag === "") {
+                        resultsTable.column(8).search("").draw()
+                    } else {
+                        resultsTable.column(8).search("^" + $.fn.dataTable.util.escapeRegex(tag) + "$", true, false).draw()
+                    }
+                })
                 // Setup the individual timelines
                 $('#resultsTable tbody').on('click', 'td.details-control', function () {
                     var tr = $(this).closest('tr');

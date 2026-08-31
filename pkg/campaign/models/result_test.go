@@ -3,6 +3,7 @@ package models
 import (
 	"net/mail"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/s4l1hs/olta/pkg/telemetry"
@@ -252,4 +253,105 @@ func (s *ModelsSuite) TestHandleEmailReportEmitsReportTelemetryWithNoTechnique(c
 	ch.Assert(len(events), check.Equals, 1)
 	ch.Assert(events[0].Stage, check.Equals, telemetry.StageReport)
 	ch.Assert(len(events[0].Techniques), check.Equals, 0)
+}
+
+func (s *ModelsSuite) TestSetResultSessionMetadataUpdatesFields(ch *check.C) {
+	c := s.createCampaign(ch)
+	ch.Assert(len(c.Results) > 0, check.Equals, true)
+	rid := c.Results[0].RId
+
+	tag := "hot-lead"
+	notes := "Escalated to blue team"
+	status := SessionStatusTriaged
+	updated, err := SetResultSessionMetadata(c.Id, c.UserId, rid, &tag, &notes, &status)
+	ch.Assert(err, check.Equals, nil)
+	ch.Assert(updated.Tag, check.Equals, tag)
+	ch.Assert(updated.Notes, check.Equals, notes)
+	ch.Assert(updated.SessionStatus, check.Equals, status)
+
+	reloaded, err := GetResult(rid)
+	ch.Assert(err, check.Equals, nil)
+	ch.Assert(reloaded.Tag, check.Equals, tag)
+	ch.Assert(reloaded.Notes, check.Equals, notes)
+	ch.Assert(reloaded.SessionStatus, check.Equals, status)
+}
+
+// TestSetResultSessionMetadataPartialUpdateLeavesOtherFieldsAlone confirms
+// a nil field pointer really does leave that column untouched, so the
+// dashboard can save a single edited field (e.g. just the tag, on blur)
+// without clobbering notes an operator is still typing in another control.
+func (s *ModelsSuite) TestSetResultSessionMetadataPartialUpdateLeavesOtherFieldsAlone(ch *check.C) {
+	c := s.createCampaign(ch)
+	rid := c.Results[0].RId
+	tag := "first-tag"
+	notes := "first-notes"
+	status := SessionStatusTriaged
+	_, err := SetResultSessionMetadata(c.Id, c.UserId, rid, &tag, &notes, &status)
+	ch.Assert(err, check.Equals, nil)
+
+	onlyTag := "second-tag"
+	updated, err := SetResultSessionMetadata(c.Id, c.UserId, rid, &onlyTag, nil, nil)
+	ch.Assert(err, check.Equals, nil)
+	ch.Assert(updated.Tag, check.Equals, onlyTag)
+	ch.Assert(updated.Notes, check.Equals, notes)
+	ch.Assert(updated.SessionStatus, check.Equals, status)
+
+	reloaded, err := GetResult(rid)
+	ch.Assert(err, check.Equals, nil)
+	ch.Assert(reloaded.Tag, check.Equals, onlyTag)
+	ch.Assert(reloaded.Notes, check.Equals, notes)
+	ch.Assert(reloaded.SessionStatus, check.Equals, status)
+}
+
+func (s *ModelsSuite) TestSetResultSessionMetadataRejectsInvalidStatus(ch *check.C) {
+	c := s.createCampaign(ch)
+	rid := c.Results[0].RId
+	bogus := "not-a-real-status"
+	_, err := SetResultSessionMetadata(c.Id, c.UserId, rid, nil, nil, &bogus)
+	ch.Assert(err, check.Equals, ErrInvalidSessionStatus)
+}
+
+func (s *ModelsSuite) TestSetResultSessionMetadataRejectsOversizedTag(ch *check.C) {
+	c := s.createCampaign(ch)
+	rid := c.Results[0].RId
+	tooLong := strings.Repeat("a", MaxSessionTagLength+1)
+	_, err := SetResultSessionMetadata(c.Id, c.UserId, rid, &tooLong, nil, nil)
+	ch.Assert(err, check.Equals, ErrSessionTagTooLong)
+}
+
+func (s *ModelsSuite) TestSetResultSessionMetadataRejectsOversizedNotes(ch *check.C) {
+	c := s.createCampaign(ch)
+	rid := c.Results[0].RId
+	tooLong := strings.Repeat("a", MaxSessionNotesLength+1)
+	_, err := SetResultSessionMetadata(c.Id, c.UserId, rid, nil, &tooLong, nil)
+	ch.Assert(err, check.Equals, ErrSessionNotesTooLong)
+}
+
+// TestSetResultSessionMetadataEnforcesCampaignOwnership is the IDOR check
+// at the model layer: a uid that does not own the campaign must not be
+// able to tag a session in it, even with a correct rid.
+func (s *ModelsSuite) TestSetResultSessionMetadataEnforcesCampaignOwnership(ch *check.C) {
+	c := s.createCampaign(ch)
+	rid := c.Results[0].RId
+	tag := "should-not-apply"
+	_, err := SetResultSessionMetadata(c.Id, 999, rid, &tag, nil, nil)
+	ch.Assert(err, check.Equals, ErrSessionNotFound)
+
+	reloaded, err := GetResult(rid)
+	ch.Assert(err, check.Equals, nil)
+	ch.Assert(reloaded.Tag, check.Equals, "")
+}
+
+// TestSetResultSessionMetadataRejectsCrossCampaignRid confirms a valid rid
+// from one campaign cannot be tagged by naming a *different* campaign the
+// same operator happens to also own -- the rid has to actually belong to
+// the campaign named in the request.
+func (s *ModelsSuite) TestSetResultSessionMetadataRejectsCrossCampaignRid(ch *check.C) {
+	a := s.createCampaign(ch)
+	b := s.createCampaign(ch)
+
+	rid := a.Results[0].RId
+	tag := "should-not-apply"
+	_, err := SetResultSessionMetadata(b.Id, b.UserId, rid, &tag, nil, nil)
+	ch.Assert(err, check.Equals, ErrSessionNotFound)
 }
