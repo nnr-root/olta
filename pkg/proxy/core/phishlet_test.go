@@ -199,10 +199,12 @@ func TestNewPhishlet_ValidRoundTrip(t *testing.T) {
 	if cookies[2].name != "persist" || !cookies[2].always {
 		t.Errorf("cookies[2] = %+v, want persist always", cookies[2])
 	}
-	// http_only is never set true anywhere in the parser; see TestCookieAuthToken_HttpOnlyNeverSet.
+	// None of this fixture's keys use the ":http_only" modifier, so the
+	// default (false) must hold; see TestAddCookieAuthTokens_Direct and
+	// TestNewPhishlet_CookieAuthTokenHttpOnlyModifier for the opt-in case.
 	for i, c := range cookies {
 		if c.http_only {
-			t.Errorf("cookies[%d].http_only = true, want false (no parse path ever sets it)", i)
+			t.Errorf("cookies[%d].http_only = true, want false (fixture does not opt in via :http_only)", i)
 		}
 	}
 
@@ -1521,7 +1523,9 @@ func TestGetAuthTokenAndVariants(t *testing.T) {
 	if p.isAuthToken("d", "nope") {
 		t.Errorf("isAuthToken(d, nope) = true")
 	}
-	// See TestCookieAuthToken_HttpOnlyNeverSet: this is always false today.
+	// sid carries no :http_only modifier, so it keeps today's default; see
+	// TestCookieAuthToken_HttpOnlyModifier and
+	// TestNewPhishlet_CookieAuthTokenHttpOnlyModifier for the opt-in case.
 	if p.isTokenHttpOnly("d", "sid") {
 		t.Errorf("isTokenHttpOnly(d, sid) = true, want false")
 	}
@@ -1530,26 +1534,78 @@ func TestGetAuthTokenAndVariants(t *testing.T) {
 	}
 }
 
-// TestCookieAuthToken_HttpOnlyNeverSet documents a latent gap: CookieAuthToken
-// has an http_only field and isTokenHttpOnly() reads it, but no parse path
-// (addCookieAuthTokens' modifier switch only recognizes "regexp", "opt" and
-// "always") ever sets it to true. isTokenHttpOnly is therefore dead code that
-// always returns false regardless of what an operator writes in a phishlet.
-func TestCookieAuthToken_HttpOnlyNeverSet(t *testing.T) {
+// TestCookieAuthToken_HttpOnlyModifier verifies that the ":http_only"
+// modifier - the same colon-suffix form used by ":opt", ":always" and
+// ":regexp" - sets CookieAuthToken.http_only, and that only that exact,
+// case-sensitive spelling is recognized: plausible near-misses an operator
+// might type ("httponly", "HttpOnly") are left unrecognized and keep the
+// default of false, exactly like any other unrecognized modifier. A key
+// without any modifier also keeps today's default.
+func TestCookieAuthToken_HttpOnlyModifier(t *testing.T) {
 	p := &Phishlet{}
 	p.Clear()
-	// Try every plausible spelling an operator might use for "HttpOnly".
-	for _, tok := range []string{"a:httponly", "b:http_only", "c:HttpOnly"} {
-		if err := p.addCookieAuthTokens("d", []string{tok}); err != nil {
-			t.Fatalf("unexpected error for %q: %v", tok, err)
+
+	cases := []struct {
+		domain string
+		tok    string
+		want   bool
+	}{
+		{"d1", "sid", false},        // no modifier: today's default
+		{"d2", "b:http_only", true}, // exact spelling: recognized
+		{"d3", "a:httponly", false}, // missing underscore: not recognized
+		{"d4", "c:HttpOnly", false}, // wrong case: not recognized
+	}
+	for _, c := range cases {
+		if err := p.addCookieAuthTokens(c.domain, []string{c.tok}); err != nil {
+			t.Fatalf("unexpected error for %q: %v", c.tok, err)
+		}
+		tk := p.cookieAuthTokens[c.domain][0]
+		if tk.http_only != c.want {
+			t.Errorf("addCookieAuthTokens(%q, %q): http_only = %v, want %v", c.domain, c.tok, tk.http_only, c.want)
 		}
 	}
-	for domain, tokens := range p.cookieAuthTokens {
-		for _, tk := range tokens {
-			if tk.http_only {
-				t.Fatalf("token %q on %q has http_only=true; expected the parser to never set it", tk.name, domain)
-			}
-		}
+}
+
+// TestNewPhishlet_CookieAuthTokenHttpOnlyModifier exercises the
+// ":http_only" modifier through the full YAML parse path (LoadFromFile) and
+// confirms isTokenHttpOnly() reflects the parsed value for both an opted-in
+// and a default token, and that omitting the modifier changes nothing about
+// existing phishlet behavior.
+func TestNewPhishlet_CookieAuthTokenHttpOnlyModifier(t *testing.T) {
+	content := `
+author: test
+min_ver: '2.3.0'
+proxy_hosts:
+  - {phish_sub: '', orig_sub: '', domain: 'example.com', session: true, is_landing: true}
+auth_tokens:
+  - domain: 'example.com'
+    keys: ['sid', 'sess:http_only']
+credentials:
+  username: {key: 'u', search: '(.*)'}
+  password: {key: 'p', search: '(.*)'}
+login: {domain: 'example.com', path: '/'}
+`
+	p, err := load(t, content)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	cookies := p.cookieAuthTokens["example.com"]
+	if len(cookies) != 2 {
+		t.Fatalf("cookieAuthTokens[example.com] = %+v, want 2 entries", cookies)
+	}
+	if cookies[0].name != "sid" || cookies[0].http_only {
+		t.Errorf("cookies[0] = %+v, want sid with http_only=false (today's default)", cookies[0])
+	}
+	if cookies[1].name != "sess" || !cookies[1].http_only {
+		t.Errorf("cookies[1] = %+v, want sess with http_only=true (:http_only modifier)", cookies[1])
+	}
+
+	if p.isTokenHttpOnly("example.com", "sid") {
+		t.Errorf("isTokenHttpOnly(example.com, sid) = true, want false (no :http_only modifier)")
+	}
+	if !p.isTokenHttpOnly("example.com", "sess") {
+		t.Errorf("isTokenHttpOnly(example.com, sess) = false, want true (:http_only modifier set)")
 	}
 }
 

