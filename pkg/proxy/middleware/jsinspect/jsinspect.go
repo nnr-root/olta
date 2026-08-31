@@ -48,6 +48,13 @@ type Config struct {
 }
 
 // Assertion is the compact client environment signal emitted by Script.
+//
+// The WebAuthn fields below are measurement only -- see pkg/telemetry's
+// StageWebAuthn doc comment. They are all optional and backward compatible:
+// an older injected script (or a browser missing every one of these APIs)
+// simply omits them from the JSON, and they decode to their zero value
+// (false) rather than an error. Suspicious, the bot/automation check, never
+// reads any of them, so their presence or absence cannot affect enforcement.
 type Assertion struct {
 	Version          int    `json:"version"`
 	WebDriver        bool   `json:"webdriver"`
@@ -56,6 +63,31 @@ type Assertion struct {
 	Renderer         string `json:"renderer"`
 	SoftwareRenderer bool   `json:"software_renderer"`
 	CanvasConsistent bool   `json:"canvas_consistent"`
+
+	// WebAuthnSupported reports window.PublicKeyCredential !== undefined.
+	WebAuthnSupported bool `json:"webauthn_supported,omitempty"`
+	// PlatformAuthenticatorAvailable reports the resolved value of
+	// PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable(),
+	// i.e. whether a passkey-capable authenticator (Touch ID, Windows
+	// Hello, a security key, etc.) is available to this browser. That call
+	// returns a Promise, so the script resolves it asynchronously and may
+	// report this field on a follow-up assertion after the one that
+	// established WebAuthnSupported.
+	PlatformAuthenticatorAvailable bool `json:"platform_authenticator_available,omitempty"`
+	// ConditionalMediationSupported reports whether
+	// PublicKeyCredential.isConditionalMediationAvailable exists -- it does
+	// not exist in every browser that supports WebAuthn.
+	ConditionalMediationSupported bool `json:"conditional_mediation_supported,omitempty"`
+	// ConditionalMediationAvailable is the resolved value of that call
+	// (passkey autofill / conditional UI availability), meaningful only
+	// when ConditionalMediationSupported is true.
+	ConditionalMediationAvailable bool `json:"conditional_mediation_available,omitempty"`
+	// WebAuthnCeremonyObserved reports that the page called
+	// navigator.credentials.get or .create with a publicKey option --
+	// observed only. The injected wrapper that detects this always lets
+	// the original call proceed untouched and returns its result
+	// unmodified; see generateScript.
+	WebAuthnCeremonyObserved bool `json:"webauthn_ceremony_observed,omitempty"`
 }
 
 // Suspicious reports whether an assertion indicates browser automation or a
@@ -203,6 +235,14 @@ func (middleware *Middleware) HandleRequest(request *http.Request) (*http.Respon
 		return middleware.enforcementResponse(request), true
 	}
 	middleware.emitVerify(request, assertion, telemetry.OutcomeAllowed)
+	// WebAuthn capability and ceremony observation are only ever collected
+	// by the non-suspicious code path in generateScript (the suspicious
+	// path redirects away before reaching it), so StageWebAuthn is only
+	// emitted here. That also keeps the resilience denominator ("ran
+	// script") honest for its purpose: it counts browsers that made it
+	// past the automation check, which is the population capability
+	// measurement is meaningful for.
+	middleware.emitWebAuthn(request, assertion)
 	return emptyResponse(request, http.StatusNoContent), true
 }
 
@@ -226,6 +266,29 @@ func (middleware *Middleware) emitVerify(request *http.Request, assertion Assert
 			WithDetail("software_renderer", assertion.SoftwareRenderer).
 			WithDetail("canvas_consistent", assertion.CanvasConsistent).
 			WithDetail("renderer", assertion.Renderer),
+	)
+}
+
+// emitWebAuthn records the passkey capability and ceremony-observation
+// signal as its own stage, separate from StageVerify's bot/automation
+// check. It carries no ATT&CK technique (see telemetry.StageWebAuthn) and
+// no credential material, challenge, or user handle -- only the capability
+// and ceremony-occurred booleans the client reported.
+func (middleware *Middleware) emitWebAuthn(request *http.Request, assertion Assertion) {
+	if middleware.config.Emitter == nil {
+		return
+	}
+	middleware.config.Emitter.Emit(
+		telemetry.New(telemetry.StageWebAuthn, telemetry.OutcomeAllowed).
+			WithActor(telemetry.Actor{
+				IP:        clientIP(request),
+				UserAgent: request.UserAgent(),
+			}).
+			WithDetail("webauthn_supported", assertion.WebAuthnSupported).
+			WithDetail("platform_authenticator_available", assertion.PlatformAuthenticatorAvailable).
+			WithDetail("conditional_mediation_supported", assertion.ConditionalMediationSupported).
+			WithDetail("conditional_mediation_available", assertion.ConditionalMediationAvailable).
+			WithDetail("webauthn_ceremony_observed", assertion.WebAuthnCeremonyObserved),
 	)
 }
 
@@ -277,5 +340,5 @@ func response(request *http.Request, status int, contentType string, body string
 
 func generateScript(endpoint string) string {
 	endpointJSON, _ := json.Marshal(endpoint)
-	return `(function(){try{var a={version:1,webdriver:navigator.webdriver===true,headless:false,phantom:false,renderer:"",software_renderer:false,canvas_consistent:true};var u=(navigator.userAgent||"").toLowerCase();a.headless=u.indexOf("headless")!==-1||("_Selenium_IDE_Recorder" in window)||("__webdriver_script_fn" in document);a.phantom=!!(window.callPhantom||window._phantom);try{var c=document.createElement("canvas"),g=c.getContext("webgl")||c.getContext("experimental-webgl");if(g){var x=g.getExtension("WEBGL_debug_renderer_info");a.renderer=String(x?g.getParameter(x.UNMASKED_RENDERER_WEBGL):g.getParameter(g.RENDERER)||"");a.software_renderer=/(swiftshader|llvmpipe|mesa)/i.test(a.renderer)}}catch(e){a.canvas_consistent=false}try{var c1=document.createElement("canvas"),c2=document.createElement("canvas"),d1=c1.getContext("2d"),d2=c2.getContext("2d");c1.width=c2.width=64;c1.height=c2.height=16;d1.font=d2.font="12px sans-serif";d1.fillText("olta",2,12);d2.fillText("olta",2,12);var p1=c1.toDataURL(),p2=c2.toDataURL();a.canvas_consistent=p1.length>32&&p1===p2}catch(e){a.canvas_consistent=false}var j=JSON.stringify(a),bad=a.webdriver||a.headless||a.phantom||a.software_renderer||!a.canvas_consistent,e=` + string(endpointJSON) + `;if(bad){var b=btoa(unescape(encodeURIComponent(j))).replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,"");location.replace(e+"?assertion="+encodeURIComponent(b))}else if(navigator.sendBeacon){navigator.sendBeacon(e,new Blob([j],{type:"application/json"}))}else{fetch(e,{method:"POST",headers:{"Content-Type":"application/json"},body:j,credentials:"same-origin",keepalive:true})}}catch(e){}})();`
+	return `(function(){try{var a={version:1,webdriver:navigator.webdriver===true,headless:false,phantom:false,renderer:"",software_renderer:false,canvas_consistent:true,webauthn_supported:false,platform_authenticator_available:false,conditional_mediation_supported:false,conditional_mediation_available:false,webauthn_ceremony_observed:false};var u=(navigator.userAgent||"").toLowerCase();a.headless=u.indexOf("headless")!==-1||("_Selenium_IDE_Recorder" in window)||("__webdriver_script_fn" in document);a.phantom=!!(window.callPhantom||window._phantom);try{var c=document.createElement("canvas"),g=c.getContext("webgl")||c.getContext("experimental-webgl");if(g){var x=g.getExtension("WEBGL_debug_renderer_info");a.renderer=String(x?g.getParameter(x.UNMASKED_RENDERER_WEBGL):g.getParameter(g.RENDERER)||"");a.software_renderer=/(swiftshader|llvmpipe|mesa)/i.test(a.renderer)}}catch(e){a.canvas_consistent=false}try{var c1=document.createElement("canvas"),c2=document.createElement("canvas"),d1=c1.getContext("2d"),d2=c2.getContext("2d");c1.width=c2.width=64;c1.height=c2.height=16;d1.font=d2.font="12px sans-serif";d1.fillText("olta",2,12);d2.fillText("olta",2,12);var p1=c1.toDataURL(),p2=c2.toDataURL();a.canvas_consistent=p1.length>32&&p1===p2}catch(e){a.canvas_consistent=false}var j=JSON.stringify(a),bad=a.webdriver||a.headless||a.phantom||a.software_renderer||!a.canvas_consistent,e=` + string(endpointJSON) + `;if(bad){var b=btoa(unescape(encodeURIComponent(j))).replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,"");location.replace(e+"?assertion="+encodeURIComponent(b))}else{var send=function(){try{var jj=JSON.stringify(a);if(navigator.sendBeacon){navigator.sendBeacon(e,new Blob([jj],{type:"application/json"}))}else{fetch(e,{method:"POST",headers:{"Content-Type":"application/json"},body:jj,credentials:"same-origin",keepalive:true})}}catch(err){}};try{if(window.PublicKeyCredential){a.webauthn_supported=true;if(typeof PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable==="function"){PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable().then(function(v){a.platform_authenticator_available=!!v;send()}).catch(function(){})}if(typeof PublicKeyCredential.isConditionalMediationAvailable==="function"){a.conditional_mediation_supported=true;PublicKeyCredential.isConditionalMediationAvailable().then(function(v){a.conditional_mediation_available=!!v;send()}).catch(function(){})}}}catch(err){}try{if(navigator.credentials){var wrap=function(name){var orig=navigator.credentials[name];if(typeof orig!=="function"){return}navigator.credentials[name]=function(){var result=orig.apply(this,arguments);try{var opts=arguments[0];if(opts&&opts.publicKey&&!a.webauthn_ceremony_observed){a.webauthn_ceremony_observed=true;send()}}catch(err){}return result}};wrap("get");wrap("create")}}catch(err){}send()}}catch(e){}})();`
 }

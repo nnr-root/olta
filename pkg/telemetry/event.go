@@ -45,6 +45,18 @@ const (
 	// pkg/campaign/resilience.funnelOrder), which counts recipient-facing
 	// engagement stages, not process startup.
 	StageInitialization Stage = "initialization"
+
+	// StageWebAuthn records a client's passkey/WebAuthn capability and
+	// ceremony-observation signal, reported by the same injected script as
+	// StageVerify (see pkg/proxy/middleware/jsinspect). It carries no
+	// ATT&CK technique: a target having a platform authenticator available,
+	// or a page initiating a WebAuthn ceremony, is the defender's control
+	// working, not adversary behavior -- there is no technique for "the
+	// origin binding defeated the proxy". Like StageInitialization, it is
+	// deliberately excluded from the funnel kill chain (see
+	// pkg/campaign/resilience.funnelOrder); it feeds a separate resilience
+	// measure (pkg/campaign/resilience.PasskeyDefense) instead.
+	StageWebAuthn Stage = "webauthn"
 )
 
 // Outcome describes how a stage resolved.

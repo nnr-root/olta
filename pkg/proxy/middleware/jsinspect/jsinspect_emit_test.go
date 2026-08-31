@@ -85,9 +85,95 @@ func TestHandleRequestEmitsAllowedOnCleanAssertion(t *testing.T) {
 		t.Fatal("HandleRequest() did not handle the verification endpoint")
 	}
 
+	// A non-suspicious assertion now emits two events: the existing
+	// bot/automation StageVerify, and StageWebAuthn carrying the passkey
+	// capability/ceremony signal from the same assertion.
 	events := emitter.all()
-	if len(events) != 1 || events[0].Outcome != telemetry.OutcomeAllowed {
-		t.Fatalf("events = %+v, want one allowed outcome", events)
+	if len(events) != 2 {
+		t.Fatalf("events = %+v, want 2 (verify + webauthn)", events)
+	}
+	if events[0].Stage != telemetry.StageVerify || events[0].Outcome != telemetry.OutcomeAllowed {
+		t.Fatalf("events[0] = %+v, want verify/allowed", events[0])
+	}
+	if events[1].Stage != telemetry.StageWebAuthn || events[1].Outcome != telemetry.OutcomeAllowed {
+		t.Fatalf("events[1] = %+v, want webauthn/allowed", events[1])
+	}
+}
+
+// TestHandleRequestSuppressesWebAuthnForSuspiciousAssertion pins that
+// StageWebAuthn is only emitted for the non-suspicious path: the
+// suspicious/blocked path in generateScript redirects the browser away
+// before it ever runs the capability or ceremony-observation checks, so
+// there is nothing genuine to report, and emitting a zero-valued event
+// would misrepresent "never checked" as "checked, found nothing".
+func TestHandleRequestSuppressesWebAuthnForSuspiciousAssertion(t *testing.T) {
+	emitter := &captureEmitter{}
+	middleware := newMiddleware(t, emitter)
+
+	body := `{"version":1,"webdriver":true,"headless":true,"canvas_consistent":true}`
+	if _, handled := middleware.HandleRequest(assertionRequest(body)); !handled {
+		t.Fatal("HandleRequest() did not handle the verification endpoint")
+	}
+
+	events := emitter.all()
+	if len(events) != 1 {
+		t.Fatalf("events = %+v, want 1 (verify only)", events)
+	}
+	if events[0].Stage != telemetry.StageVerify {
+		t.Fatalf("events[0].Stage = %q, want verify", events[0].Stage)
+	}
+}
+
+// TestWebAuthnEventCarriesOnlyScalarCapabilityBooleans is the no-loot
+// pinning test for the new stage: the assertion's WebAuthn fields must
+// reach telemetry as plain scalar booleans, and the detail map must
+// contain nothing that looks like credential material, a challenge, or a
+// user handle -- capability and ceremony-occurred booleans only.
+func TestWebAuthnEventCarriesOnlyScalarCapabilityBooleans(t *testing.T) {
+	emitter := &captureEmitter{}
+	middleware := newMiddleware(t, emitter)
+
+	body := `{"version":1,"renderer":"ANGLE","canvas_consistent":true,` +
+		`"webauthn_supported":true,"platform_authenticator_available":true,` +
+		`"conditional_mediation_supported":true,"conditional_mediation_available":true,` +
+		`"webauthn_ceremony_observed":true}`
+	if _, handled := middleware.HandleRequest(assertionRequest(body)); !handled {
+		t.Fatal("HandleRequest() did not handle the verification endpoint")
+	}
+
+	events := emitter.all()
+	if len(events) != 2 {
+		t.Fatalf("events = %+v, want 2", events)
+	}
+	webauthn := events[1]
+	if webauthn.Stage != telemetry.StageWebAuthn {
+		t.Fatalf("events[1].Stage = %q, want webauthn", webauthn.Stage)
+	}
+	if len(webauthn.Techniques) != 0 {
+		t.Fatalf("Techniques = %v, want none: a passkey control is not adversary behavior", webauthn.Techniques)
+	}
+	wantKeys := []string{
+		"webauthn_supported", "platform_authenticator_available",
+		"conditional_mediation_supported", "conditional_mediation_available",
+		"webauthn_ceremony_observed",
+	}
+	if len(webauthn.Detail) != len(wantKeys) {
+		t.Fatalf("Detail = %v, want exactly %v", webauthn.Detail, wantKeys)
+	}
+	for _, key := range wantKeys {
+		value, ok := webauthn.Detail[key]
+		if !ok {
+			t.Fatalf("Detail missing key %q: %v", key, webauthn.Detail)
+		}
+		b, ok := value.(bool)
+		if !ok || !b {
+			t.Fatalf("Detail[%q] = %#v (%T), want scalar bool true", key, value, value)
+		}
+	}
+	for _, forbidden := range []string{"challenge", "credential_id", "user_handle", "signature", "attestation"} {
+		if _, present := webauthn.Detail[forbidden]; present {
+			t.Fatalf("Detail unexpectedly carries %q -- credential material must never reach telemetry", forbidden)
+		}
 	}
 }
 

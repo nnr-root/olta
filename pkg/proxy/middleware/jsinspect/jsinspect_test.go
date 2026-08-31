@@ -38,6 +38,9 @@ func TestScriptGeneration(t *testing.T) {
 	for _, expected := range []string{
 		`navigator.webdriver`, `window.callPhantom`, `WEBGL_debug_renderer_info`,
 		`swiftshader|llvmpipe|mesa`, `toDataURL()`, `"/internal/check.js"`,
+		`window.PublicKeyCredential`, `isUserVerifyingPlatformAuthenticatorAvailable`,
+		`isConditionalMediationAvailable`, `navigator.credentials`, `opts.publicKey`,
+		`orig.apply(this,arguments)`,
 	} {
 		if !strings.Contains(script, expected) {
 			t.Errorf("Script() does not contain %q", expected)
@@ -69,6 +72,25 @@ func TestParseAssertion(t *testing.T) {
 		{name: "unsupported version", body: `{"version":2}`, wantErr: true},
 		{name: "unknown field", body: `{"version":1,"extra":true}`, wantErr: true},
 		{name: "invalid JSON", body: `{`, wantErr: true},
+		{
+			// An older injected script (before the WebAuthn fields
+			// existed) never sends these keys. The assertion must still
+			// parse, with every new field defaulting to false.
+			name: "older script without webauthn fields",
+			body: `{"version":1,"webdriver":false,"headless":false,"phantom":false,"renderer":"ANGLE","software_renderer":false,"canvas_consistent":true}`,
+		},
+		{
+			// A browser lacking every WebAuthn API still produces a valid
+			// assertion: the script guards each check, so the fields are
+			// present but false rather than causing a throw that would
+			// have broken headless/canvas detection too.
+			name: "browser lacking webauthn apis",
+			body: `{"version":1,"canvas_consistent":true,"webauthn_supported":false,"platform_authenticator_available":false,"conditional_mediation_supported":false,"conditional_mediation_available":false,"webauthn_ceremony_observed":false}`,
+		},
+		{
+			name: "full webauthn capability and ceremony observed",
+			body: `{"version":1,"canvas_consistent":true,"webauthn_supported":true,"platform_authenticator_available":true,"conditional_mediation_supported":true,"conditional_mediation_available":true,"webauthn_ceremony_observed":true}`,
+		},
 	}
 
 	for _, test := range tests {
@@ -81,6 +103,39 @@ func TestParseAssertion(t *testing.T) {
 				t.Errorf("Suspicious() = %v, want %v", assertion.Suspicious(), test.wantSuspicious)
 			}
 		})
+	}
+}
+
+// TestParseAssertionWebAuthnFieldsAreOptional pins backward compatibility
+// for the new fields directly: an assertion missing them decodes with every
+// one at its zero value (false), and one carrying them decodes their exact
+// values, rather than the decoder rejecting either shape.
+func TestParseAssertionWebAuthnFieldsAreOptional(t *testing.T) {
+	older, err := ParseAssertion(strings.NewReader(`{"version":1,"canvas_consistent":true}`))
+	if err != nil {
+		t.Fatalf("older assertion without webauthn fields: ParseAssertion() error = %v", err)
+	}
+	if older.WebAuthnSupported || older.PlatformAuthenticatorAvailable ||
+		older.ConditionalMediationSupported || older.ConditionalMediationAvailable ||
+		older.WebAuthnCeremonyObserved {
+		t.Fatalf("older assertion = %+v, want every webauthn field false", older)
+	}
+
+	full, err := ParseAssertion(strings.NewReader(
+		`{"version":1,"canvas_consistent":true,"webauthn_supported":true,` +
+			`"platform_authenticator_available":true,"conditional_mediation_supported":true,` +
+			`"conditional_mediation_available":true,"webauthn_ceremony_observed":true}`))
+	if err != nil {
+		t.Fatalf("full assertion: ParseAssertion() error = %v", err)
+	}
+	if !full.WebAuthnSupported || !full.PlatformAuthenticatorAvailable ||
+		!full.ConditionalMediationSupported || !full.ConditionalMediationAvailable ||
+		!full.WebAuthnCeremonyObserved {
+		t.Fatalf("full assertion = %+v, want every webauthn field true", full)
+	}
+	// New fields must never make an otherwise-clean assertion suspicious.
+	if full.Suspicious() {
+		t.Fatal("Suspicious() = true for a clean assertion with webauthn fields set")
 	}
 }
 
