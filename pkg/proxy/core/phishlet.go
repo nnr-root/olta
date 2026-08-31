@@ -250,7 +250,11 @@ func NewPhishlet(site string, path string, customParams *map[string]string, cfg 
 func (p *Phishlet) Clear() {
 	p.Name = ""
 	p.ParentName = ""
+	p.Path = ""
 	p.Author = ""
+	p.Version = PhishletVersion{}
+	p.RedirectUrl = ""
+	p.minVersion = ""
 	p.proxyHosts = []ProxyHost{}
 	p.domains = []string{}
 	p.subfilters = make(map[string][]SubFilter)
@@ -258,12 +262,14 @@ func (p *Phishlet) Clear() {
 	p.bodyAuthTokens = make(map[string]*BodyAuthToken)
 	p.httpAuthTokens = make(map[string]*HttpAuthToken)
 	p.authUrls = []*regexp.Regexp{}
-	p.username.key = nil
-	p.username.search = nil
-	p.password.key = nil
-	p.password.search = nil
+	p.username = PostField{}
+	p.password = PostField{}
+	p.landing_path = []string{}
 	p.custom = []PostField{}
 	p.forcePost = []ForcePost{}
+	p.login = LoginUrl{}
+	p.js_inject = []JsInject{}
+	p.intercept = []Intercept{}
 	p.customParams = make(map[string]string)
 	p.isTemplate = false
 }

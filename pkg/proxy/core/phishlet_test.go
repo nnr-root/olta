@@ -1664,6 +1664,27 @@ func TestClear_ResetsParsedCollections(t *testing.T) {
 	if p.Name != "" || p.Author != "" {
 		t.Errorf("Name/Author not cleared: %q / %q", p.Name, p.Author)
 	}
+	if p.Path != "" {
+		t.Errorf("Path not cleared: %q", p.Path)
+	}
+	if p.RedirectUrl != "" {
+		t.Errorf("RedirectUrl not cleared: %q", p.RedirectUrl)
+	}
+	if p.Version != (PhishletVersion{}) {
+		t.Errorf("Version not cleared: %+v", p.Version)
+	}
+	if p.login != (LoginUrl{}) {
+		t.Errorf("login not cleared: %+v", p.login)
+	}
+	if len(p.landing_path) != 0 {
+		t.Errorf("landing_path not cleared: %v", p.landing_path)
+	}
+	if len(p.js_inject) != 0 {
+		t.Errorf("js_inject not cleared: %v", p.js_inject)
+	}
+	if len(p.intercept) != 0 {
+		t.Errorf("intercept not cleared: %v", p.intercept)
+	}
 	if len(p.proxyHosts) != 0 || len(p.domains) != 0 {
 		t.Errorf("proxyHosts/domains not cleared")
 	}
@@ -1673,52 +1694,67 @@ func TestClear_ResetsParsedCollections(t *testing.T) {
 	if len(p.authUrls) != 0 || p.username.key != nil || p.password.key != nil || len(p.custom) != 0 || len(p.forcePost) != 0 {
 		t.Errorf("credential/forcePost state not cleared")
 	}
+	if p.username.tp != "" || p.username.key_s != "" || p.password.tp != "" || p.password.key_s != "" {
+		t.Errorf("username/password tp and key_s not cleared: username=%+v password=%+v", p.username, p.password)
+	}
 	if len(p.customParams) != 0 || p.isTemplate {
 		t.Errorf("customParams/isTemplate not cleared")
 	}
 }
 
-// TestClear_DoesNotResetEverything documents that Clear() is incomplete:
-// js_inject, intercept, login and landing_path are never reset, and
-// js_inject/intercept are append-only. NewPhishlet always builds a fresh
-// *Phishlet so this is dormant in today's callers (see config.go and
-// cmd/olta-proxy/main.go), but LoadFromFile is exported and nothing stops a
-// caller from invoking it twice on the same *Phishlet - if they do, stale
-// data from a previous load survives an unrelated failure, and repeated
-// successful loads duplicate js_inject/intercept entries forever.
-func TestClear_DoesNotResetEverything(t *testing.T) {
-	p, err := load(t, fullValidPhishlet)
+// TestClear_ReloadSameObjectMatchesFreshLoad reloads the same *Phishlet
+// object with identical content and asserts the result matches a single
+// fresh load: no duplicated js_inject or intercept entries. Before the
+// Clear() fix, js_inject and intercept were append-only, so a reload
+// doubled their length instead of matching a fresh load.
+func TestClear_ReloadSameObjectMatchesFreshLoad(t *testing.T) {
+	fresh, err := load(t, fullValidPhishlet)
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatalf("unexpected error loading fresh phishlet: %v", err)
 	}
-	wantJsInject := len(p.js_inject)
-	wantIntercept := len(p.intercept)
-	if wantJsInject == 0 || wantIntercept == 0 {
+	if len(fresh.js_inject) == 0 || len(fresh.intercept) == 0 {
 		t.Fatalf("fixture must define at least one js_inject and intercept entry")
+	}
+
+	reused, err := load(t, fullValidPhishlet)
+	if err != nil {
+		t.Fatalf("unexpected error loading reused phishlet: %v", err)
 	}
 
 	// Reload the SAME phishlet object with the same fully valid content.
 	path := writeYAML(t, fullValidPhishlet)
-	if err := p.LoadFromFile("site", path, nil); err != nil {
+	if err := reused.LoadFromFile("site", path, nil); err != nil {
 		t.Fatalf("unexpected error on reload: %v", err)
 	}
 
-	if len(p.js_inject) != wantJsInject*2 {
-		t.Errorf("js_inject len after reload = %d, want %d (duplicated because Clear() never resets it)", len(p.js_inject), wantJsInject*2)
+	if len(reused.js_inject) != len(fresh.js_inject) {
+		t.Errorf("js_inject len after reload = %d, want %d (matching a single fresh load, not duplicated)", len(reused.js_inject), len(fresh.js_inject))
 	}
-	if len(p.intercept) != wantIntercept*2 {
-		t.Errorf("intercept len after reload = %d, want %d (duplicated because Clear() never resets it)", len(p.intercept), wantIntercept*2)
+	if len(reused.intercept) != len(fresh.intercept) {
+		t.Errorf("intercept len after reload = %d, want %d (matching a single fresh load, not duplicated)", len(reused.intercept), len(fresh.intercept))
+	}
+	for i := range fresh.js_inject {
+		f, r := fresh.js_inject[i], reused.js_inject[i]
+		if r.script != f.script || strings.Join(r.trigger_domains, ",") != strings.Join(f.trigger_domains, ",") || strings.Join(r.trigger_params, ",") != strings.Join(f.trigger_params, ",") {
+			t.Errorf("js_inject[%d] after reload = %+v, want to match a fresh load %+v", i, r, f)
+		}
+	}
+	for i := range fresh.intercept {
+		f, r := fresh.intercept[i], reused.intercept[i]
+		if r.domain != f.domain || r.http_status != f.http_status || r.body != f.body || r.mime != f.mime || r.path.String() != f.path.String() {
+			t.Errorf("intercept[%d] after reload = %+v, want to match a fresh load %+v", i, r, f)
+		}
 	}
 }
 
-// TestClear_StaleLandingPathSurvivesAFailedReload shows the sharper edge of
-// the same gap: when a second LoadFromFile call on the same object fails
-// partway through (here, at force_post validation, which runs before
-// landing_path is parsed), the *previous* load's landing_path is left in
-// place - Clear() doesn't zero it, and the failing load never reached the
-// code that would overwrite it. Callers that check only the returned error
-// could keep operating on part-stale phishlet state.
-func TestClear_StaleLandingPathSurvivesAFailedReload(t *testing.T) {
+// TestClear_StaleLandingPathDoesNotSurviveAFailedReload covers the sharper
+// edge of the same gap: when a second LoadFromFile call on the same object
+// fails partway through (here, at force_post validation, which runs before
+// landing_path is parsed), the *previous* load's landing_path must not be
+// left in place - Clear() zeroes it at the top of LoadFromFile, and the
+// failing load never reaches the code that would repopulate it, so it must
+// stay cleared rather than leak the first load's value.
+func TestClear_StaleLandingPathDoesNotSurviveAFailedReload(t *testing.T) {
 	first := "author: test\nmin_ver: '2.3.0'\n" +
 		"proxy_hosts:\n  - {phish_sub: '', orig_sub: '', domain: 'example.com', session: true, is_landing: true}\n" +
 		"auth_tokens: []\n" +
@@ -1748,7 +1784,50 @@ func TestClear_StaleLandingPathSurvivesAFailedReload(t *testing.T) {
 		t.Fatal("expected the second load to fail at force_post validation")
 	}
 
-	if len(p.landing_path) != 1 || p.landing_path[0] != "/from-first-load" {
-		t.Errorf("landing_path after failed reload = %v, want stale value from first load to survive (documenting the gap)", p.landing_path)
+	if len(p.landing_path) != 0 {
+		t.Errorf("landing_path after failed reload = %v, want empty (Clear() must not leave the first load's value in place)", p.landing_path)
+	}
+}
+
+// TestClear_MalformedReloadLeavesNoStaleState loads a valid phishlet, then
+// attempts to load a malformed (unparseable) file into the same object. The
+// malformed load fails inside c.ReadInConfig(), before LoadFromFile
+// reassigns any field, so only Clear() stands between this call and stale
+// data from the first load surviving on every field the parser owns.
+func TestClear_MalformedReloadLeavesNoStaleState(t *testing.T) {
+	p, err := load(t, fullValidPhishlet)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if p.RedirectUrl == "" || p.login.domain == "" || len(p.landing_path) == 0 || len(p.js_inject) == 0 || len(p.intercept) == 0 {
+		t.Fatalf("fixture must populate RedirectUrl/login/landing_path/js_inject/intercept for this test to be meaningful")
+	}
+
+	malformedPath := writeYAML(t, "not: [valid: yaml")
+	err = p.LoadFromFile("site", malformedPath, nil)
+	if err == nil {
+		t.Fatal("expected malformed YAML to fail parsing")
+	}
+
+	if p.Name != "" {
+		t.Errorf("Name after failed reload = %q, want \"\" (stale value from first load survived)", p.Name)
+	}
+	if p.RedirectUrl != "" {
+		t.Errorf("RedirectUrl after failed reload = %q, want \"\" (stale value from first load survived)", p.RedirectUrl)
+	}
+	if p.Version != (PhishletVersion{}) {
+		t.Errorf("Version after failed reload = %+v, want zero value (stale value from first load survived)", p.Version)
+	}
+	if p.login != (LoginUrl{}) {
+		t.Errorf("login after failed reload = %+v, want zero value (stale value from first load survived)", p.login)
+	}
+	if len(p.landing_path) != 0 {
+		t.Errorf("landing_path after failed reload = %v, want empty (stale value from first load survived)", p.landing_path)
+	}
+	if len(p.js_inject) != 0 {
+		t.Errorf("js_inject after failed reload = %v, want empty (stale value from first load survived)", p.js_inject)
+	}
+	if len(p.intercept) != 0 {
+		t.Errorf("intercept after failed reload = %v, want empty (stale value from first load survived)", p.intercept)
 	}
 }
