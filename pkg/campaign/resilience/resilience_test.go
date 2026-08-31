@@ -554,6 +554,16 @@ func TestPasskeyDefenseNotMeasuredWhenJSInspectDisabled(t *testing.T) {
 		report.Passkey.CeremonyInitiated != 0 || report.Passkey.PushedToWeakerFactor != 0 {
 		t.Fatalf("Passkey = %+v, want every count zero when not measured", report.Passkey)
 	}
+	// A caveat about a measurement must not appear next to a metric that
+	// reports it never took one.
+	if report.Passkey.Scope != "" {
+		t.Fatalf("Passkey.Scope = %q, want empty when not measured", report.Passkey.Scope)
+	}
+	// CorrelationReliable must stay at its non-alarming default: no
+	// correlation was attempted, so there is nothing to flag as untrusted.
+	if !report.Passkey.CorrelationReliable {
+		t.Fatal("Passkey.CorrelationReliable = false when not measured, want true (no correlation was attempted)")
+	}
 }
 
 // TestPasskeyDefenseMeasuredUpgradesFromEvents mirrors
@@ -700,5 +710,86 @@ func TestWebAuthnEventStaysOutOfFunnel(t *testing.T) {
 	// The observation must still be fully counted in its own section.
 	if report.Passkey.RanScriptTargets != 1 || report.Passkey.PlatformAuthenticatorAvailable != 1 || report.Passkey.CeremonyInitiated != 1 {
 		t.Fatalf("Passkey = %+v, want RanScriptTargets=1, PlatformAuthenticatorAvailable=1, CeremonyInitiated=1", report.Passkey)
+	}
+}
+
+// TestPasskeyDefenseScopeCaveatPresentWhenMeasured pins the honesty-gap fix
+// itself: whenever the passkey metric is measured, a human-readable caveat
+// must travel with the counts, exactly like Report.FrictionScope travels
+// with Friction. With no RID sharing any IP in this data, correlation is
+// (trivially) reliable, so Scope must be the plain, non-alarming caption.
+func TestPasskeyDefenseScopeCaveatPresentWhenMeasured(t *testing.T) {
+	db := newDB(t)
+	base := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+
+	webauthnEvent(t, db, base, 0, "10.0.0.1", true, false)
+
+	report, err := Compute(db, 1, wideWindow(base), allFeatures())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !report.Passkey.Measured {
+		t.Fatal("Passkey.Measured = false, want true (Verify enabled)")
+	}
+	if report.Passkey.Scope == "" {
+		t.Fatal("Passkey.Scope is empty while Measured is true, want a non-empty caveat")
+	}
+	if !report.Passkey.CorrelationReliable {
+		t.Fatal("Passkey.CorrelationReliable = false, want true (no IP is shared by more than one RID)")
+	}
+	if report.Passkey.Scope != passkeyScopeCaption {
+		t.Fatalf("Passkey.Scope = %q, want the plain (non-collision) caption", report.Passkey.Scope)
+	}
+}
+
+// TestPasskeyDefenseCorrelationUnreliableWithSharedIPAcrossDistinctRIDs is
+// the evidence half of the fix: a caveat everyone ignores is weak, so when
+// this campaign's own rows prove the IP-based join actually collided --
+// two distinct RIDs attributed to events sharing one client IP, exactly
+// what a corporate NAT produces -- CorrelationReliable must flip to false
+// and Scope must upgrade to say so plainly, not just warn abstractly.
+func TestPasskeyDefenseCorrelationUnreliableWithSharedIPAcrossDistinctRIDs(t *testing.T) {
+	db := newDB(t)
+	base := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+
+	// Two different people (distinct RIDs), same egress IP -- the NAT
+	// collision scenario the whole change exists to surface.
+	credentialEvent(t, db, base, 0, telemetry.StageCredential, "victim-a", "10.0.0.9")
+	credentialEvent(t, db, base, time.Second, telemetry.StageCapture, "victim-b", "10.0.0.9")
+
+	report, err := Compute(db, 1, wideWindow(base), allFeatures())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !report.Passkey.Measured {
+		t.Fatal("Passkey.Measured = false, want true (Verify enabled)")
+	}
+	if report.Passkey.CorrelationReliable {
+		t.Fatal("Passkey.CorrelationReliable = true, want false (two distinct RIDs share one IP)")
+	}
+	if report.Passkey.Scope != passkeyScopeUnreliableCaption {
+		t.Fatalf("Passkey.Scope = %q, want the collision caption", report.Passkey.Scope)
+	}
+}
+
+// TestPasskeyDefenseCorrelationReliableWithOneRIDPerIP is the negative
+// pairing for the above: distinct targets each behind their own IP must
+// not trip the unreliable-correlation signal.
+func TestPasskeyDefenseCorrelationReliableWithOneRIDPerIP(t *testing.T) {
+	db := newDB(t)
+	base := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+
+	credentialEvent(t, db, base, 0, telemetry.StageCredential, "victim-a", "10.0.0.1")
+	credentialEvent(t, db, base, time.Second, telemetry.StageCapture, "victim-b", "10.0.0.2")
+
+	report, err := Compute(db, 1, wideWindow(base), allFeatures())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !report.Passkey.CorrelationReliable {
+		t.Fatal("Passkey.CorrelationReliable = false, want true (one RID per IP)")
+	}
+	if report.Passkey.Scope != passkeyScopeCaption {
+		t.Fatalf("Passkey.Scope = %q, want the plain (non-collision) caption", report.Passkey.Scope)
 	}
 }

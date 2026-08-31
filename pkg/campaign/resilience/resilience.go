@@ -103,6 +103,32 @@ type PasskeyDefense struct {
 	// address instead -- the one signal both carry. Two distinct clients
 	// sharing an IP (e.g. behind the same NAT) would count as one.
 	PushedToWeakerFactor int `json:"pushed_to_weaker_factor"`
+
+	// CorrelationReliable is false when this campaign's own row set shows
+	// the IP-based join above actually colliding: two or more distinct
+	// RIDs attributed to events sharing one client IP address. That is
+	// direct evidence of the corporate-NAT scenario described above, not a
+	// hypothetical -- an office of targets sharing one egress IP produces
+	// exactly this signature. True means no such collision was observed in
+	// this campaign's data; it is evidence the join held here, not proof
+	// it always will. It carries no meaning when Measured is false (no
+	// correlation was attempted), so it is always true in that case --
+	// never render it as a finding for an unmeasured metric.
+	CorrelationReliable bool `json:"correlation_reliable"`
+
+	// Scope is the human-readable caveat that must travel with every count
+	// above wherever this report is rendered, following the same pattern
+	// as Report.FrictionScope. It states, in language a non-engineer can
+	// act on, that RanScriptTargets is only the clients whose browser ran
+	// the injected script (not the full campaign target list), and that
+	// PushedToWeakerFactor links pre-lure and post-lure events by client
+	// IP address, so clients sharing an egress IP -- a corporate NAT --
+	// may be counted as one. When CorrelationReliable is false, Scope
+	// upgrades to say plainly that this campaign's data shows that
+	// collision actually happening. Scope is empty when Measured is
+	// false: an unmeasured metric gets no caveat about a measurement it
+	// never took.
+	Scope string `json:"scope"`
 }
 
 // RaceSummary answers whether the human layer beat the attacker.
@@ -157,6 +183,24 @@ type Report struct {
 const frictionScopeCaption = "Cloak and verify counts include unattributed proxy traffic " +
 	"(no recipient was resolved yet) recorded during this campaign's time window. " +
 	"They may include traffic from other campaigns running concurrently on the same install."
+
+// passkeyScopeCaption is PasskeyDefense.Scope's default text: it holds
+// regardless of whether this campaign's data happens to show a correlation
+// collision, so passkeyScopeUnreliableCaption below builds on it rather
+// than restating it.
+const passkeyScopeCaption = "These counts only cover clients whose browser ran the injected " +
+	"verification script -- not every target in the campaign. Pushed-to-weaker-factor links each " +
+	"client's pre-lure passkey check to its post-lure credential or session-capture activity by " +
+	"client IP address, so clients sharing an egress IP (for example, employees behind the same " +
+	"corporate NAT) may be counted as a single client."
+
+// passkeyScopeUnreliableCaption is used in place of passkeyScopeCaption when
+// CorrelationReliable is false: the campaign's own data shows the IP-based
+// join actually colliding, so the caveat says so plainly instead of only
+// warning about the possibility.
+const passkeyScopeUnreliableCaption = passkeyScopeCaption + " This campaign's own data shows that " +
+	"collision happening: more than one target was observed behind the same IP address, so treat " +
+	"pushed-to-weaker-factor as an upper bound on distinct people affected, not an exact count."
 
 // funnelOrder is the kill chain in sequence, with the technique each stage
 // emulates. It mirrors the mapping table in the design spec.
@@ -464,6 +508,11 @@ func buildPasskeyDefense(rows []eventRow, enabled Features) PasskeyDefense {
 		// Not measured: every count stays zero, and Measured=false is the
 		// signal a report consumer must render as "not measured" rather
 		// than treating these zeros as "no passkeys were available".
+		// CorrelationReliable stays at its non-alarming default (no
+		// correlation was attempted, so there is nothing to distrust) and
+		// Scope stays empty: a caveat about a measurement must not appear
+		// next to a metric that reports it never took one.
+		defense.CorrelationReliable = true
 		return defense
 	}
 	defense.RanScriptTargets = len(byClient)
@@ -494,7 +543,47 @@ func buildPasskeyDefense(rows []eventRow, enabled Features) PasskeyDefense {
 			defense.PushedToWeakerFactor++
 		}
 	}
+
+	defense.CorrelationReliable = correlationReliable(rows)
+	if defense.CorrelationReliable {
+		defense.Scope = passkeyScopeCaption
+	} else {
+		defense.Scope = passkeyScopeUnreliableCaption
+	}
 	return defense
+}
+
+// correlationReliable checks the same row set buildPasskeyDefense already
+// has in memory for direct evidence that its IP-based correlation is
+// unsafe for this campaign: two or more distinct RIDs whose events share a
+// single client IP address. Every RID-attributed stage that also carries
+// an actor IP (open, lure, credential, capture -- see their emitters in
+// pkg/campaign/models/result.go and pkg/proxy/campaignstore/store.go)
+// contributes, not only credential/capture, because the question is
+// whether this IP is known to belong to more than one person at all, which
+// is exactly what PushedToWeakerFactor's join assumes is false. No new
+// query: this reuses rows, which Compute already selected once.
+func correlationReliable(rows []eventRow) bool {
+	ridsByIP := make(map[string]map[string]bool)
+	for _, row := range rows {
+		if row.RID == "" {
+			continue
+		}
+		ip := actorIP(row.Actor)
+		if ip == "" {
+			continue
+		}
+		if ridsByIP[ip] == nil {
+			ridsByIP[ip] = make(map[string]bool)
+		}
+		ridsByIP[ip][row.RID] = true
+	}
+	for _, rids := range ridsByIP {
+		if len(rids) > 1 {
+			return false
+		}
+	}
+	return true
 }
 
 // passkeyClientKey identifies the client a StageWebAuthn row belongs to.
