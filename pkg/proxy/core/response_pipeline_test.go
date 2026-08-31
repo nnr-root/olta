@@ -1,9 +1,11 @@
 package core
 
 import (
+	"bufio"
 	"net/http"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -503,5 +505,166 @@ func TestRemoveObfuscatedDots_LeavesUnrelatedTextAlone(t *testing.T) {
 	got := removeObfuscatedDots(in)
 	if got != in {
 		t.Errorf("got %q, want unchanged %q", got, in)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Response framing fidelity: Content-Length / chunking / header casing.
+//
+// See the doc comment above the "Response pipeline steps" section in
+// http_proxy.go for the full picture, including the documented limitation
+// that the vendored goproxy fork forces chunked encoding and
+// Connection: close on every MITM'd HTTPS response regardless of what is
+// set here.
+// ---------------------------------------------------------------------------
+
+func TestShouldReconcileBodyFraming(t *testing.T) {
+	tests := []struct {
+		name              string
+		jsInspectInjected bool
+		origLen, newLen   int
+		want              bool
+	}{
+		{"unmodified body, jsInspector did not fire", false, 100, 100, false},
+		{"body grew", false, 100, 130, true},
+		{"body shrank", false, 100, 80, true},
+		{"jsInspector flagged an injection even though length matches", true, 100, 100, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := shouldReconcileBodyFraming(tt.jsInspectInjected, tt.origLen, tt.newLen)
+			if got != tt.want {
+				t.Errorf("shouldReconcileBodyFraming(%v, %d, %d) = %v, want %v", tt.jsInspectInjected, tt.origLen, tt.newLen, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestResponseFraming_UnmodifiedResponseKeepsContentLengthAndIsNotChunked
+// drives the same decision the OnResponse closure makes for a small,
+// untouched JSON body: shouldReconcileBodyFraming must say "no", which
+// means setModifiedBodyFraming is never called and the origin's own
+// Content-Length/Transfer-Encoding are left exactly as they arrived.
+func TestResponseFraming_UnmodifiedResponseKeepsContentLengthAndIsNotChunked(t *testing.T) {
+	origBody := []byte(`{"ok":true}`)
+	resp := &http.Response{Header: http.Header{}}
+	resp.Header.Set("Content-Length", strconv.Itoa(len(origBody)))
+	resp.ContentLength = int64(len(origBody))
+
+	origBodyLen := len(origBody)
+	body := append([]byte(nil), origBody...) // pipeline ran but rewrote nothing
+
+	if shouldReconcileBodyFraming(false, origBodyLen, len(body)) {
+		t.Fatalf("expected no reconciliation for an unmodified body")
+	}
+	// Nothing further is invoked in that case, so the header state below is
+	// exactly what the origin sent.
+	if got := resp.Header.Get("Content-Length"); got != strconv.Itoa(len(origBody)) {
+		t.Errorf("Content-Length = %q, want %q", got, strconv.Itoa(len(origBody)))
+	}
+	if got := resp.Header.Get("Transfer-Encoding"); got != "" {
+		t.Errorf("Transfer-Encoding = %q, want empty (not chunked)", got)
+	}
+	if resp.TransferEncoding != nil {
+		t.Errorf("TransferEncoding field = %v, want nil", resp.TransferEncoding)
+	}
+}
+
+// TestResponseFraming_ModifiedBodyGetsCorrectedContentLength simulates a
+// sub_filter rewrite that changes body length: shouldReconcileBodyFraming
+// must say "yes", and setModifiedBodyFraming must then bring
+// Content-Length back in line with the actual rewritten body and clear any
+// stale chunked marker.
+func TestResponseFraming_ModifiedBodyGetsCorrectedContentLength(t *testing.T) {
+	origBody := []byte(`{"hostname":"example.com"}`)
+	resp := &http.Response{Header: http.Header{}, TransferEncoding: []string{"chunked"}}
+	resp.Header.Set("Content-Length", strconv.Itoa(len(origBody)))
+	resp.Header.Set("Transfer-Encoding", "chunked")
+	resp.ContentLength = int64(len(origBody))
+
+	origBodyLen := len(origBody)
+	body := []byte(`{"hostname":"phish.test"}`) // sub_filter rewrote the hostname
+
+	if !shouldReconcileBodyFraming(false, origBodyLen, len(body)) {
+		t.Fatalf("expected reconciliation for a body whose length changed")
+	}
+	setModifiedBodyFraming(resp, body)
+
+	if got := resp.Header.Get("Content-Length"); got != strconv.Itoa(len(body)) {
+		t.Errorf("Content-Length = %q, want %q", got, strconv.Itoa(len(body)))
+	}
+	if resp.ContentLength != int64(len(body)) {
+		t.Errorf("ContentLength field = %d, want %d", resp.ContentLength, len(body))
+	}
+	if got := resp.Header.Get("Transfer-Encoding"); got != "" {
+		t.Errorf("Transfer-Encoding = %q, want cleared", got)
+	}
+	if resp.TransferEncoding != nil {
+		t.Errorf("TransferEncoding field = %v, want nil", resp.TransferEncoding)
+	}
+}
+
+// TestHeaderCasing_TransportAlreadyCanonicalizes documents, with evidence,
+// why this pipeline cannot restore origin header casing: Go's response
+// parsing (http.ReadResponse / textproto.Reader.ReadMIMEHeader, used
+// internally by http.Transport and therefore by this proxy's outbound
+// RoundTripper) canonicalizes every response header key before resp.Header
+// is ever visible to core. "x-ms-request-id" and "CF-RAY" already arrive
+// as "X-Ms-Request-Id" and "Cf-Ray" - the original wire casing never
+// reaches this package, so there is nothing left for a raw-map-key write
+// to preserve at this layer.
+func TestHeaderCasing_TransportAlreadyCanonicalizes(t *testing.T) {
+	raw := "HTTP/1.1 200 OK\r\n" +
+		"x-ms-request-id: abc123\r\n" +
+		"Server: nginx\r\n" +
+		"CF-RAY: 1234-ORD\r\n" +
+		"Content-Type: text/html\r\n" +
+		"Content-Length: 5\r\n" +
+		"\r\n" +
+		"hello"
+	resp, err := http.ReadResponse(bufio.NewReader(strings.NewReader(raw)), nil)
+	if err != nil {
+		t.Fatalf("ReadResponse: %v", err)
+	}
+	defer resp.Body.Close()
+
+	wantCanonical := map[string]bool{
+		"X-Ms-Request-Id": true,
+		"Server":          true,
+		"Cf-Ray":          true,
+		"Content-Type":    true,
+		"Content-Length":  true,
+	}
+	for k := range resp.Header {
+		if !wantCanonical[k] {
+			t.Errorf("unexpected header key casing survived parsing: %q (want one of %v)", k, wantCanonical)
+		}
+	}
+	for _, origWireCasing := range []string{"x-ms-request-id", "CF-RAY"} {
+		if _, ok := resp.Header[origWireCasing]; ok {
+			t.Errorf("original wire casing %q unexpectedly present in resp.Header - canonicalization assumption is wrong", origWireCasing)
+		}
+	}
+}
+
+// TestResponsePipeline_DoesNotFurtherManglePreservedCasing verifies that
+// headers this pipeline doesn't explicitly rewrite keep whatever key
+// casing they arrived with (which, per the test above, is already
+// canonical by the time OnResponse ever sees them) - i.e. this pipeline
+// doesn't introduce additional casing damage on top of what the transport
+// already did.
+func TestResponsePipeline_DoesNotFurtherManglePreservedCasing(t *testing.T) {
+	h := http.Header{}
+	h["X-Ms-Request-Id"] = []string{"abc123"}
+	h["Cf-Ray"] = []string{"1234-ORD"}
+
+	stripResponseSecurityHeaders(h, responseSecurityHeaders)
+	_ = rewriteAccessControlAllowOrigin(h, func(string) (string, bool) { return "", false })
+
+	if got, ok := h["X-Ms-Request-Id"]; !ok || len(got) != 1 || got[0] != "abc123" {
+		t.Errorf("X-Ms-Request-Id key casing/value was altered: %v", h["X-Ms-Request-Id"])
+	}
+	if got, ok := h["Cf-Ray"]; !ok || len(got) != 1 || got[0] != "1234-ORD" {
+		t.Errorf("Cf-Ray key casing/value was altered: %v", h["Cf-Ray"])
 	}
 }

