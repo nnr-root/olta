@@ -16,12 +16,26 @@ var (
 	ErrDuplicateEvent = errors.New("session validation event already queued")
 )
 
+// defaultSeenCapacity bounds the deduplication set when WorkerConfig leaves
+// SeenCapacity unset. It is sized well above the default QueueSize (256) so
+// dedup comfortably covers a burst of in-flight and recently queued events,
+// while still holding the set's memory to a small, fixed footprint over an
+// engagement that runs for days and sees many more than 256 sessions.
+const defaultSeenCapacity = 4096
+
 // WorkerConfig controls queue capacity, concurrency, and time limits.
 type WorkerConfig struct {
 	Workers           int
 	QueueSize         int
 	ValidationTimeout time.Duration
 	Validator         Validator
+	// SeenCapacity bounds how many session IDs the deduplication set
+	// remembers at once. Once full, the oldest tracked ID is forgotten to
+	// make room for the newest, so a session queued long enough ago can be
+	// queued again -- trading perfect lifetime deduplication for a fixed
+	// memory footprint across a long-running engagement. 0 uses
+	// defaultSeenCapacity.
+	SeenCapacity int
 	// Emitter, when set, receives one replay-stage telemetry.Event per
 	// validation result. Telemetry flows through the shared bus rather than
 	// a validator-specific webhook, so any sink on that bus receives it.
@@ -36,7 +50,15 @@ type Worker struct {
 
 	acceptMu  sync.Mutex
 	accepting bool
+	// seen and seenOrder together implement a bounded FIFO deduplication
+	// set: seen answers membership, seenOrder is a fixed-capacity ring
+	// buffer (length grows to seenCap once, then never again) recording
+	// insertion order so the oldest entry can be evicted from seen in O(1)
+	// once the set is full. Both are guarded by acceptMu.
 	seen      map[string]struct{}
+	seenOrder []string
+	seenNext  int
+	seenCap   int
 	shutdown  chan struct{}
 	wg        sync.WaitGroup
 	closeOnce sync.Once
@@ -53,11 +75,17 @@ func NewWorker(config WorkerConfig) (*Worker, error) {
 	if config.ValidationTimeout == 0 {
 		config.ValidationTimeout = 10 * time.Second
 	}
+	if config.SeenCapacity == 0 {
+		config.SeenCapacity = defaultSeenCapacity
+	}
 	if config.Workers < 1 || config.QueueSize < 1 {
 		return nil, fmt.Errorf("session validator workers and queue size must be positive")
 	}
 	if config.ValidationTimeout <= 0 {
 		return nil, fmt.Errorf("session validator timeouts must be positive")
+	}
+	if config.SeenCapacity < 1 {
+		return nil, fmt.Errorf("session validator seen capacity must be positive")
 	}
 	if config.Validator == nil {
 		config.Validator = NewHTTPValidator(nil)
@@ -67,6 +95,8 @@ func NewWorker(config WorkerConfig) (*Worker, error) {
 		queue:     make(chan Event, config.QueueSize),
 		accepting: true,
 		seen:      make(map[string]struct{}),
+		seenOrder: make([]string, 0, config.SeenCapacity),
+		seenCap:   config.SeenCapacity,
 		shutdown:  make(chan struct{}),
 	}
 	worker.wg.Add(config.Workers)
@@ -74,6 +104,20 @@ func NewWorker(config WorkerConfig) (*Worker, error) {
 		go worker.run()
 	}
 	return worker, nil
+}
+
+// remember records sessionID as seen, evicting the oldest tracked session ID
+// first if the set is already at capacity. Callers must hold acceptMu.
+func (worker *Worker) remember(sessionID string) {
+	if len(worker.seenOrder) < worker.seenCap {
+		worker.seenOrder = append(worker.seenOrder, sessionID)
+	} else {
+		oldest := worker.seenOrder[worker.seenNext]
+		delete(worker.seen, oldest)
+		worker.seenOrder[worker.seenNext] = sessionID
+		worker.seenNext = (worker.seenNext + 1) % worker.seenCap
+	}
+	worker.seen[sessionID] = struct{}{}
 }
 
 // Enqueue adds an event without waiting for queue space. Cookie data is cloned
@@ -96,7 +140,7 @@ func (worker *Worker) Enqueue(event Event) error {
 	select {
 	case worker.queue <- event:
 		if event.SessionID != "" {
-			worker.seen[event.SessionID] = struct{}{}
+			worker.remember(event.SessionID)
 		}
 		return nil
 	default:
