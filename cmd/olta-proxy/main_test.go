@@ -40,25 +40,26 @@ func (s *recordingSink) all() []telemetry.Event {
 // to a realistic, distinctly-shaped secret value.
 func representativeConfig() startupTelemetryConfig {
 	return startupTelemetryConfig{
-		Version:                 "1.0.0-Alpha",
-		DeveloperMode:           false,
-		ProxyHeaderTrustEnabled: true,
-		ClientProfile:           "Chrome",
-		RateLimitMax:            30,
-		RateLimitWindow:         time.Minute,
-		CloakerEnabled:          true,
-		CloakerAction:           "block",
-		CloakerBlockStatus:      404,
-		IPSyncEnabled:           true,
-		IPSyncInterval:          12 * time.Hour,
-		JSInspectEnabled:        true,
-		JSInspectEndpoint:       "/_assets/js/v.js",
-		SessionValidatorEnabled: true,
-		FeedEnabled:             true,
-		Turnstile:               "0x4AAAAAAA_publickeyXYZ:0x4AAAAAAA_SECRETprivatekeyDONOTLEAK",
-		WebhookURL:              "https://hooks.slack.com/services/T000/B000/SUPERSECRETBEARERTOKEN123",
-		CampaignDBDriver:        "mysql",
-		CampaignDBTLSCA:         "/opt/olta/certs/mysql-ca.pem",
+		Version:                  "1.0.0-Alpha",
+		DeveloperMode:            false,
+		ProxyHeaderTrustEnabled:  true,
+		ClientProfile:            "Chrome",
+		RateLimitMax:             30,
+		RateLimitWindow:          time.Minute,
+		CloakerEnabled:           true,
+		CloakerAction:            "block",
+		CloakerBlockStatus:       404,
+		IPSyncEnabled:            true,
+		IPSyncInterval:           12 * time.Hour,
+		JSInspectEnabled:         true,
+		JSInspectEndpoint:        "/_assets/js/v.js",
+		SessionValidatorEnabled:  true,
+		FeedEnabled:              true,
+		SecretsEncryptionEnabled: true,
+		Turnstile:                "0x4AAAAAAA_publickeyXYZ:0x4AAAAAAA_SECRETprivatekeyDONOTLEAK",
+		WebhookURL:               "https://hooks.slack.com/services/T000/B000/SUPERSECRETBEARERTOKEN123",
+		CampaignDBDriver:         "mysql",
+		CampaignDBTLSCA:          "/opt/olta/certs/mysql-ca.pem",
 	}
 }
 
@@ -97,6 +98,7 @@ func TestBuildStartupEvent_Shape(t *testing.T) {
 		"js_inspect_endpoint":           "/_assets/js/v.js",
 		"session_validator_enabled":     true,
 		"feed_enabled":                  true,
+		"secrets_encryption_enabled":    true,
 		"turnstile_enabled":             true,
 		"webhook_configured":            true,
 		"campaign_db_driver":            "mysql",
@@ -114,6 +116,24 @@ func TestBuildStartupEvent_Shape(t *testing.T) {
 		if got != wantValue {
 			t.Errorf("Detail[%q] = %v (%T), want %v (%T)", key, got, got, wantValue, wantValue)
 		}
+	}
+}
+
+// TestBuildStartupEvent_ReportsEncryptionDisabled pins the honest half of
+// the encryption posture. A missing OLTA_MASTER_KEY is exactly the case an
+// engagement report needs to be able to state, so the detail has to be
+// present and false -- not absent, which would be indistinguishable from an
+// older proxy that never reported it at all.
+func TestBuildStartupEvent_ReportsEncryptionDisabled(t *testing.T) {
+	cfg := representativeConfig()
+	cfg.SecretsEncryptionEnabled = false
+	event := buildStartupEvent(cfg)
+	got, ok := event.Detail["secrets_encryption_enabled"]
+	if !ok {
+		t.Fatal(`Detail["secrets_encryption_enabled"] missing; an unset master key must be reported, not omitted`)
+	}
+	if got != false {
+		t.Errorf(`Detail["secrets_encryption_enabled"] = %v, want false`, got)
 	}
 }
 

