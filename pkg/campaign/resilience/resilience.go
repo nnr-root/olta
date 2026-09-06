@@ -187,6 +187,64 @@ const (
 	CorrelationMixed CorrelationMethod = "mixed"
 )
 
+// TokenLifetime measures how long captured session tokens stayed usable, from
+// the repeated replay attempts the session validator makes against each
+// captured session.
+//
+// This is the number a defender acts on: it is the window during which a
+// stolen session was live, and the only direct evidence of whether revocation
+// actually happened rather than being assumed. It is also the one measure here
+// that is inherently incomplete, so its shape follows the incompleteness
+// rather than hiding it:
+//
+//   - Sessions still valid at their last check are *censored* observations:
+//     the token outlived the measurement, so its true lifetime is unknown and
+//     only a lower bound is available. They are counted separately and
+//     excluded from the median, which would otherwise be dragged down by
+//     every session that simply had not been watched long enough.
+//   - MedianTimeToRevocationSeconds is computed only over sessions actually
+//     observed being refused. It answers "when revocation happened, how long
+//     did it take", not "how long do tokens last".
+//   - BlockedOnFirstAttempt is the strongest single signal in here: the
+//     validator replays from the proxy's own network, not the victim's, so a
+//     session refused on the very first attempt is direct evidence that the
+//     target's controls -- conditional access, impossible-travel, device
+//     binding -- rejected a stolen session outright.
+type TokenLifetime struct {
+	Measured bool `json:"measured"`
+
+	// Sessions is the denominator: distinct captured sessions with at least
+	// one replay attempt. It is not the campaign's capture count, since a
+	// session with no usable cookie domain is never queued for validation.
+	Sessions int `json:"sessions"`
+
+	// StillValidAtLastCheck counts sessions whose most recent attempt still
+	// succeeded -- censored observations, whose true lifetime is unknown.
+	StillValidAtLastCheck int `json:"still_valid_at_last_check"`
+
+	// Revoked counts sessions observed being refused after having worked.
+	Revoked int `json:"revoked"`
+
+	// BlockedOnFirstAttempt counts sessions refused on the very first
+	// replay, before any recheck. These never worked for the attacker at
+	// all.
+	BlockedOnFirstAttempt int `json:"blocked_on_first_attempt"`
+
+	// LongestObservedValidSeconds is the largest age at which any session
+	// was still accepted. It is a lower bound on the worst case, never the
+	// worst case itself.
+	LongestObservedValidSeconds int64 `json:"longest_observed_valid_seconds"`
+
+	// MedianTimeToRevocationSeconds covers only the Revoked population. As
+	// elsewhere in this package, the separate boolean distinguishes "no
+	// session was observed being revoked" from a genuine zero.
+	MedianTimeToRevocationSeconds int64 `json:"median_time_to_revocation_seconds"`
+	HasMedianTimeToRevocation     bool  `json:"has_median_time_to_revocation"`
+
+	// Scope is the caveat that must travel with every count above.
+	Scope string `json:"scope,omitempty"`
+}
+
 // RaceSummary answers whether the human layer beat the attacker.
 type RaceSummary struct {
 	// Delivered is the denominator: every RID with a delivery event. The
@@ -247,6 +305,9 @@ type Report struct {
 	// doc comment for the denominator and "not measured" rules that govern
 	// how a consumer must render it.
 	Passkey PasskeyDefense `json:"passkey"`
+	// Tokens measures how long captured sessions stayed usable. See
+	// TokenLifetime for the censoring rules a consumer must respect.
+	Tokens TokenLifetime `json:"tokens"`
 	// UnattributedScoped is true when the unattributed cloak/verify events
 	// folded into Funnel and Friction were bounded to the campaign window.
 	// FrictionScope is the human-readable caveat the dashboard must render
@@ -425,6 +486,7 @@ func Compute(db *gorm.DB, campaignID int64, scope Scope, configured Features) (R
 	report.Friction = buildFriction(rows)
 	report.Race = buildRace(rows)
 	report.Passkey = buildPasskeyDefense(rows, enabled)
+	report.Tokens = buildTokenLifetime(rows, enabled)
 	return report, nil
 }
 
@@ -801,6 +863,128 @@ func buildPasskeyDefense(rows []eventRow, enabled Features) PasskeyDefense {
 		}
 	}
 	return defense
+}
+
+const tokenLifetimeScopeCaption = "Token lifetime is measured by replaying each captured session " +
+	"from the proxy's own network. Sessions still valid at their last check had not been observed " +
+	"expiring, so their true lifetime is longer than shown and they are excluded from the median " +
+	"time to revocation, which covers only sessions actually seen being refused. A proxy restarted " +
+	"mid-engagement loses pending rechecks, which truncates a session's observed lifetime rather " +
+	"than extending it."
+
+// buildTokenLifetime folds the replay attempts for each captured session into
+// one observation per session. Attempts are grouped by the session_reference
+// detail -- a truncated digest of the session ID (see
+// validation.baseResult), never the session ID itself -- because a replay
+// event carries no RID: the validator works from the captured session, which
+// the proxy holds independently of any recipient.
+func buildTokenLifetime(rows []eventRow, enabled Features) TokenLifetime {
+	type observation struct {
+		lastValidAge   int64
+		firstBlockedAt int64
+		sawValid       bool
+		sawBlocked     bool
+		blockedFirst   bool
+	}
+	bySession := make(map[string]*observation)
+
+	for _, row := range rows {
+		if telemetry.Stage(row.Stage) != telemetry.StageReplay {
+			continue
+		}
+		detail := parseDetail(row.Detail)
+		reference := detailString(detail, "session_reference")
+		if reference == "" {
+			continue
+		}
+		obs := bySession[reference]
+		if obs == nil {
+			obs = &observation{}
+			bySession[reference] = obs
+		}
+		age := detailInt(detail, "age_seconds")
+		attempt := detailInt(detail, "attempt")
+
+		switch telemetry.Outcome(row.Outcome) {
+		case telemetry.OutcomeAllowed:
+			obs.sawValid = true
+			if age > obs.lastValidAge {
+				obs.lastValidAge = age
+			}
+		case telemetry.OutcomeBlocked:
+			// The first refusal is the one that dates the revocation; a
+			// later attempt cannot happen anyway, since the schedule stops
+			// there.
+			if !obs.sawBlocked || age < obs.firstBlockedAt {
+				obs.firstBlockedAt = age
+			}
+			obs.sawBlocked = true
+			// attempt is 1-based, and defaults to 0 for an event emitted
+			// before it existed -- which was always a single first attempt.
+			if attempt <= 1 {
+				obs.blockedFirst = true
+			}
+		}
+	}
+
+	// Self-correction, exactly like the funnel's optional stages: a stale
+	// configured false is corrected by rows that prove the validator ran, and
+	// a configured true is never downgraded by their absence.
+	measured := enabled.SessionValidator
+	if !measured && len(bySession) > 0 {
+		measured = true
+	}
+
+	lifetime := TokenLifetime{Measured: measured}
+	if !measured {
+		return lifetime
+	}
+
+	lifetime.Sessions = len(bySession)
+	revocations := make([]int64, 0, len(bySession))
+	for _, obs := range bySession {
+		switch {
+		case obs.sawBlocked && obs.blockedFirst && !obs.sawValid:
+			lifetime.BlockedOnFirstAttempt++
+		case obs.sawBlocked:
+			lifetime.Revoked++
+			revocations = append(revocations, obs.firstBlockedAt)
+		case obs.sawValid:
+			lifetime.StillValidAtLastCheck++
+		}
+		if obs.sawValid && obs.lastValidAge > lifetime.LongestObservedValidSeconds {
+			lifetime.LongestObservedValidSeconds = obs.lastValidAge
+		}
+	}
+	lifetime.MedianTimeToRevocationSeconds = median(revocations)
+	lifetime.HasMedianTimeToRevocation = len(revocations) > 0
+	if lifetime.Sessions > 0 {
+		lifetime.Scope = tokenLifetimeScopeCaption
+	}
+	return lifetime
+}
+
+// detailString reads a string detail field, defaulting to "" for a missing
+// key or a non-string value.
+func detailString(detail map[string]any, key string) string {
+	value, _ := detail[key].(string)
+	return value
+}
+
+// detailInt reads a numeric detail field. Details round-trip through JSON, so
+// every number arrives as a float64 regardless of the Go type that was
+// stored.
+func detailInt(detail map[string]any, key string) int64 {
+	switch value := detail[key].(type) {
+	case float64:
+		return int64(value)
+	case int64:
+		return value
+	case int:
+		return int64(value)
+	default:
+		return 0
+	}
 }
 
 // correlationReliable checks the same row set buildPasskeyDefense already

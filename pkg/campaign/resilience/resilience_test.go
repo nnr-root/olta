@@ -1253,3 +1253,165 @@ func TestPasskeyUnmeasuredCarriesNoCorrelationMethod(t *testing.T) {
 		t.Errorf("Scope = %q, want empty for an unmeasured metric", report.Passkey.Scope)
 	}
 }
+
+// replayEvent emits one replay attempt for a captured session, the way the
+// validation worker emits it.
+func replayEvent(t *testing.T, db *gorm.DB, base time.Time, offset time.Duration,
+	reference string, attempt int, ageSeconds int64, outcome telemetry.Outcome) {
+	t.Helper()
+	event := telemetry.New(telemetry.StageReplay, outcome, telemetry.TechniqueWebSessionCookie).
+		WithDetail("session_reference", reference).
+		WithDetail("attempt", attempt).
+		WithDetail("age_seconds", ageSeconds)
+	event.Timestamp = base.Add(offset)
+	if err := campaigndb.New(db).Emit(nil, event); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestTokenLifetimeSeparatesCensoredFromRevoked is the measurement's central
+// honesty rule. A session still valid at its last check has an unknown
+// lifetime, so it must not be folded into a median that would then describe
+// how long the measurement ran rather than how long tokens live.
+func TestTokenLifetimeSeparatesCensoredFromRevoked(t *testing.T) {
+	db := newDB(t)
+	base := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+
+	// Revoked after an hour.
+	replayEvent(t, db, base, time.Minute, "aaa111", 1, 0, telemetry.OutcomeAllowed)
+	replayEvent(t, db, base, time.Hour, "aaa111", 2, 3600, telemetry.OutcomeBlocked)
+	// Revoked after three hours.
+	replayEvent(t, db, base, time.Minute, "bbb222", 1, 0, telemetry.OutcomeAllowed)
+	replayEvent(t, db, base, 3*time.Hour, "bbb222", 2, 10800, telemetry.OutcomeBlocked)
+	// Still valid eight hours in: censored, no upper bound known.
+	replayEvent(t, db, base, time.Minute, "ccc333", 1, 0, telemetry.OutcomeAllowed)
+	replayEvent(t, db, base, 8*time.Hour, "ccc333", 2, 28800, telemetry.OutcomeAllowed)
+
+	report, err := Compute(db, 1, wideWindow(base), allFeatures())
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokens := report.Tokens
+
+	if !tokens.Measured {
+		t.Fatal("Measured = false, want true")
+	}
+	if tokens.Sessions != 3 {
+		t.Errorf("Sessions = %d, want 3", tokens.Sessions)
+	}
+	if tokens.Revoked != 2 {
+		t.Errorf("Revoked = %d, want 2", tokens.Revoked)
+	}
+	if tokens.StillValidAtLastCheck != 1 {
+		t.Errorf("StillValidAtLastCheck = %d, want 1", tokens.StillValidAtLastCheck)
+	}
+	if !tokens.HasMedianTimeToRevocation {
+		t.Fatal("HasMedianTimeToRevocation = false, want true")
+	}
+	// Median over the two revoked sessions only: (3600 + 10800) / 2.
+	if tokens.MedianTimeToRevocationSeconds != 7200 {
+		t.Errorf("MedianTimeToRevocationSeconds = %d, want 7200 (the censored session must not drag it down)",
+			tokens.MedianTimeToRevocationSeconds)
+	}
+	if tokens.LongestObservedValidSeconds != 28800 {
+		t.Errorf("LongestObservedValidSeconds = %d, want 28800", tokens.LongestObservedValidSeconds)
+	}
+	if tokens.Scope == "" {
+		t.Error("Scope is empty; the censoring rule must travel with the counts")
+	}
+}
+
+// TestTokenLifetimeCountsFirstAttemptBlocks separates a session that never
+// worked at all from one that worked and was later revoked. The validator
+// replays from the proxy's own network, so a refusal on the first attempt is
+// evidence the target's controls rejected a stolen session outright.
+func TestTokenLifetimeCountsFirstAttemptBlocks(t *testing.T) {
+	db := newDB(t)
+	base := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+
+	replayEvent(t, db, base, time.Minute, "aaa111", 1, 0, telemetry.OutcomeBlocked)
+	replayEvent(t, db, base, time.Minute, "bbb222", 1, 0, telemetry.OutcomeAllowed)
+	replayEvent(t, db, base, time.Hour, "bbb222", 2, 3600, telemetry.OutcomeBlocked)
+
+	report, err := Compute(db, 1, wideWindow(base), allFeatures())
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokens := report.Tokens
+
+	if tokens.BlockedOnFirstAttempt != 1 {
+		t.Errorf("BlockedOnFirstAttempt = %d, want 1", tokens.BlockedOnFirstAttempt)
+	}
+	if tokens.Revoked != 1 {
+		t.Errorf("Revoked = %d, want 1: a session refused before it ever worked is not a revocation", tokens.Revoked)
+	}
+	if tokens.Sessions != 2 {
+		t.Errorf("Sessions = %d, want 2", tokens.Sessions)
+	}
+}
+
+// TestTokenLifetimeNotMeasuredWithValidatorOff keeps the measured/unmeasured
+// rule: zeros from a validator that never ran must read as "not measured".
+func TestTokenLifetimeNotMeasuredWithValidatorOff(t *testing.T) {
+	db := newDB(t)
+	base := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+	seed(t, db, base, time.Minute, telemetry.StageCapture, telemetry.OutcomeCaptured, "target-1")
+
+	report, err := Compute(db, 1, wideWindow(base), Features{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if report.Tokens.Measured {
+		t.Error("Measured = true with the validator off and no replay events")
+	}
+	if report.Tokens.Scope != "" {
+		t.Errorf("Scope = %q, want empty for an unmeasured metric", report.Tokens.Scope)
+	}
+}
+
+// TestTokenLifetimeMeasuredUpgradesFromEvents mirrors the funnel's
+// self-correction: replay rows are proof the validator ran, whatever the
+// configuration claimed.
+func TestTokenLifetimeMeasuredUpgradesFromEvents(t *testing.T) {
+	db := newDB(t)
+	base := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+	replayEvent(t, db, base, time.Minute, "aaa111", 1, 0, telemetry.OutcomeAllowed)
+
+	report, err := Compute(db, 1, wideWindow(base), Features{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !report.Tokens.Measured {
+		t.Error("Measured = false despite replay events proving the validator ran")
+	}
+	if report.Tokens.StillValidAtLastCheck != 1 {
+		t.Errorf("StillValidAtLastCheck = %d, want 1", report.Tokens.StillValidAtLastCheck)
+	}
+}
+
+// TestTokenLifetimeIgnoresLegacyReplayEventsWithoutAReference covers replay
+// rows written before this measurement existed. They carry a session
+// reference, so they group correctly, but one without any reference at all
+// cannot be attributed to a session and must be skipped rather than pooled
+// into a phantom session.
+func TestTokenLifetimeIgnoresLegacyReplayEventsWithoutAReference(t *testing.T) {
+	db := newDB(t)
+	base := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+
+	event := telemetry.New(telemetry.StageReplay, telemetry.OutcomeAllowed, telemetry.TechniqueWebSessionCookie)
+	event.Timestamp = base.Add(time.Minute)
+	if err := campaigndb.New(db).Emit(nil, event); err != nil {
+		t.Fatal(err)
+	}
+	replayEvent(t, db, base, 2*time.Minute, "aaa111", 1, 0, telemetry.OutcomeAllowed)
+
+	report, err := Compute(db, 1, wideWindow(base), allFeatures())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Tokens.Sessions != 1 {
+		t.Errorf("Sessions = %d, want 1: an attempt with no session reference is not a session", report.Tokens.Sessions)
+	}
+}

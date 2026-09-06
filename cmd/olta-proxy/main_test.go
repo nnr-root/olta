@@ -205,3 +205,45 @@ func TestStartupEvent_EmittedOnce(t *testing.T) {
 		t.Errorf("Stage = %q, want %q", events[0].Stage, telemetry.StageInitialization)
 	}
 }
+
+func TestParseRecheckSchedule(t *testing.T) {
+	cases := []struct {
+		name  string
+		value string
+		want  []time.Duration
+	}{
+		{"default", "5m,30m,2h,8h,24h", []time.Duration{5 * time.Minute, 30 * time.Minute, 2 * time.Hour, 8 * time.Hour, 24 * time.Hour}},
+		{"single", "1h", []time.Duration{time.Hour}},
+		{"spaces", " 5m , 1h ", []time.Duration{5 * time.Minute, time.Hour}},
+		{"trailing comma", "5m,", []time.Duration{5 * time.Minute}},
+		{"empty disables rechecks", "", nil},
+		{"whitespace disables rechecks", "   ", nil},
+	}
+
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			got, err := parseRecheckSchedule(testCase.value)
+			if err != nil {
+				t.Fatalf("parseRecheckSchedule(%q) returned error: %v", testCase.value, err)
+			}
+			if len(got) != len(testCase.want) {
+				t.Fatalf("parseRecheckSchedule(%q) = %v, want %v", testCase.value, got, testCase.want)
+			}
+			for i := range got {
+				if got[i] != testCase.want[i] {
+					t.Errorf("delay %d = %v, want %v", i, got[i], testCase.want[i])
+				}
+			}
+		})
+	}
+}
+
+// TestParseRecheckScheduleRejectsBadValues keeps a typo from silently
+// disabling the measurement instead of failing at startup.
+func TestParseRecheckScheduleRejectsBadValues(t *testing.T) {
+	for _, value := range []string{"5", "5minutes", "0s", "-1h", "5m,nonsense"} {
+		if _, err := parseRecheckSchedule(value); err == nil {
+			t.Errorf("parseRecheckSchedule(%q) accepted an invalid schedule", value)
+		}
+	}
+}
