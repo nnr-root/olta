@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -1112,5 +1113,143 @@ func TestAttributedEventsIgnoreHostScope(t *testing.T) {
 
 	if capture := funnelStage(t, report, telemetry.StageCapture); capture.Targets != 1 {
 		t.Errorf("capture targets = %d, want 1: attributed events are scoped by campaign_id, never by host", capture.Targets)
+	}
+}
+
+// webauthnEventForRecipient emits a StageWebAuthn observation that names a
+// recipient, the way jsinspect emits it once the injected script has been
+// handed the session's recipient ID.
+func webauthnEventForRecipient(t *testing.T, db *gorm.DB, base time.Time, offset time.Duration,
+	rid, ip string, platformAvailable, ceremonyObserved bool) {
+	t.Helper()
+	event := telemetry.New(telemetry.StageWebAuthn, telemetry.OutcomeAllowed).
+		WithRecipient(rid).
+		WithActor(telemetry.Actor{IP: ip}).
+		WithDetail("platform_authenticator_available", platformAvailable).
+		WithDetail("webauthn_ceremony_observed", ceremonyObserved)
+	event.Timestamp = base.Add(offset)
+	if err := campaigndb.New(db).Emit(nil, event); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestPasskeyCorrelationByRecipientSurvivesSharedNAT is the whole point of
+// attributing the observation. Two different people behind one corporate NAT
+// egress: both passkey-capable, only one goes on to submit credentials. The
+// IP-based join counted them as a single client and reported that client as
+// pushed to a weaker factor; the recipient-based join separates them.
+func TestPasskeyCorrelationByRecipientSurvivesSharedNAT(t *testing.T) {
+	db := newDB(t)
+	base := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+	const sharedIP = "203.0.113.50"
+
+	webauthnEventForRecipient(t, db, base, time.Minute, "target-a", sharedIP, true, false)
+	webauthnEventForRecipient(t, db, base, 2*time.Minute, "target-b", sharedIP, true, false)
+	// Only target-b goes on to submit credentials.
+	credentialEvent(t, db, base, 3*time.Minute, telemetry.StageCredential, "target-b", sharedIP)
+
+	report, err := Compute(db, 1, wideWindow(base), allFeatures())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	passkey := report.Passkey
+	if passkey.RanScriptTargets != 2 {
+		t.Errorf("RanScriptTargets = %d, want 2: two distinct recipients behind one IP are two clients",
+			passkey.RanScriptTargets)
+	}
+	if passkey.PlatformAuthenticatorAvailable != 2 {
+		t.Errorf("PlatformAuthenticatorAvailable = %d, want 2", passkey.PlatformAuthenticatorAvailable)
+	}
+	if passkey.PushedToWeakerFactor != 1 {
+		t.Errorf("PushedToWeakerFactor = %d, want 1: only one of the two submitted credentials",
+			passkey.PushedToWeakerFactor)
+	}
+	if passkey.CorrelationMethod != CorrelationRecipient {
+		t.Errorf("CorrelationMethod = %q, want %q", passkey.CorrelationMethod, CorrelationRecipient)
+	}
+	if !passkey.CorrelationReliable {
+		t.Error("CorrelationReliable = false, want true: a recipient-keyed join cannot conflate clients")
+	}
+	if passkey.Scope != passkeyScopeExactCaption {
+		t.Error("Scope should be the exact caption; repeating the shared-IP warning would understate an exact number")
+	}
+}
+
+// TestPasskeyCorrelationByIPStillConflates records what the old behavior
+// actually was, so the improvement above is not asserted against a straw man:
+// the same two people, with no recipient on their observations, still collapse
+// into one client.
+func TestPasskeyCorrelationByIPStillConflates(t *testing.T) {
+	db := newDB(t)
+	base := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+	const sharedIP = "203.0.113.50"
+
+	webauthnEvent(t, db, base, time.Minute, sharedIP, true, false)
+	webauthnEvent(t, db, base, 2*time.Minute, sharedIP, true, false)
+	credentialEvent(t, db, base, 3*time.Minute, telemetry.StageCredential, "target-b", sharedIP)
+
+	report, err := Compute(db, 1, wideWindow(base), allFeatures())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if report.Passkey.RanScriptTargets != 1 {
+		t.Errorf("RanScriptTargets = %d, want 1: without a recipient, one IP is one client", report.Passkey.RanScriptTargets)
+	}
+	if report.Passkey.CorrelationMethod != CorrelationIP {
+		t.Errorf("CorrelationMethod = %q, want %q", report.Passkey.CorrelationMethod, CorrelationIP)
+	}
+}
+
+// TestPasskeyCorrelationMixedIsDisclosed covers an upgrade landing
+// mid-engagement, or a target reaching the proxy without a valid lure: some
+// observations name a recipient and some do not. The count is then exact for
+// part of the population and approximate for the rest, and the report has to
+// say so rather than claiming either one.
+func TestPasskeyCorrelationMixedIsDisclosed(t *testing.T) {
+	db := newDB(t)
+	base := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+
+	webauthnEventForRecipient(t, db, base, time.Minute, "target-a", "203.0.113.50", true, false)
+	webauthnEvent(t, db, base, 2*time.Minute, "203.0.113.77", true, false)
+
+	report, err := Compute(db, 1, wideWindow(base), allFeatures())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if report.Passkey.CorrelationMethod != CorrelationMixed {
+		t.Errorf("CorrelationMethod = %q, want %q", report.Passkey.CorrelationMethod, CorrelationMixed)
+	}
+	if report.Passkey.RanScriptTargets != 2 {
+		t.Errorf("RanScriptTargets = %d, want 2", report.Passkey.RanScriptTargets)
+	}
+	if !strings.Contains(report.Passkey.Scope, "recipient ID") || !strings.Contains(report.Passkey.Scope, "IP address") {
+		t.Errorf("Scope must disclose both join methods, got: %s", report.Passkey.Scope)
+	}
+}
+
+// TestPasskeyUnmeasuredCarriesNoCorrelationMethod keeps the existing rule
+// that an unmeasured metric never carries a caveat or a method implying a
+// measurement was attempted.
+func TestPasskeyUnmeasuredCarriesNoCorrelationMethod(t *testing.T) {
+	db := newDB(t)
+	base := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+	seed(t, db, base, time.Minute, telemetry.StageDelivery, telemetry.OutcomeAllowed, "target-a")
+
+	report, err := Compute(db, 1, wideWindow(base), Features{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if report.Passkey.Measured {
+		t.Fatal("Passkey.Measured = true with verification disabled and no webauthn events")
+	}
+	if report.Passkey.CorrelationMethod != "" {
+		t.Errorf("CorrelationMethod = %q, want empty for an unmeasured metric", report.Passkey.CorrelationMethod)
+	}
+	if report.Passkey.Scope != "" {
+		t.Errorf("Scope = %q, want empty for an unmeasured metric", report.Passkey.Scope)
 	}
 }

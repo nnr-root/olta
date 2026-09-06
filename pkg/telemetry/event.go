@@ -150,6 +150,16 @@ func (e Event) WithCampaign(campaignID int64, rid string) Event {
 	return e
 }
 
+// WithRecipient attaches only the recipient ID, for an event that knows which
+// target it belongs to but not which campaign. The cloak-side stages are
+// emitted by the proxy, which resolves a recipient from the lure but never
+// learns the campaign ID; the campaign ID is supplied later by the report,
+// which already knows it. Use WithCampaign when both are known.
+func (e Event) WithRecipient(rid string) Event {
+	e.RID = rid
+	return e
+}
+
 // WithHost attaches the request hostname the event was produced serving.
 // See Event.Host for which stages set it and why.
 //

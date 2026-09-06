@@ -5,6 +5,7 @@ package resilience
 import (
 	"encoding/json"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/jinzhu/gorm"
@@ -134,6 +135,14 @@ type PasskeyDefense struct {
 	// sharing an IP (e.g. behind the same NAT) would count as one.
 	PushedToWeakerFactor int `json:"pushed_to_weaker_factor"`
 
+	// CorrelationMethod says how PushedToWeakerFactor's join was actually
+	// performed for this campaign, which decides how much the number can be
+	// trusted. CorrelationRecipient is exact. CorrelationIP is the older
+	// approximation that conflates clients sharing an egress IP.
+	// CorrelationMixed means both were needed, so the count is exact for
+	// some clients and approximate for others.
+	CorrelationMethod CorrelationMethod `json:"correlation_method,omitempty"`
+
 	// CorrelationReliable is false when this campaign's own row set shows
 	// the IP-based join above actually colliding: two or more distinct
 	// RIDs attributed to events sharing one client IP address. That is
@@ -160,6 +169,23 @@ type PasskeyDefense struct {
 	// never took.
 	Scope string `json:"scope"`
 }
+
+// CorrelationMethod names how PasskeyDefense linked a client's pre-lure
+// passkey observation to its post-lure credential or capture activity.
+type CorrelationMethod string
+
+const (
+	// CorrelationRecipient means every observation named a recipient, so the
+	// join is exact and no two people can be conflated.
+	CorrelationRecipient CorrelationMethod = "recipient"
+	// CorrelationIP means no observation named a recipient and the join fell
+	// back to client IP address, which counts clients sharing an egress IP
+	// as one.
+	CorrelationIP CorrelationMethod = "ip"
+	// CorrelationMixed means both were used: some clients joined exactly,
+	// others by IP.
+	CorrelationMixed CorrelationMethod = "mixed"
+)
 
 // RaceSummary answers whether the human layer beat the attacker.
 type RaceSummary struct {
@@ -269,6 +295,31 @@ const passkeyScopeCaption = "These counts only cover clients whose browser ran t
 	"client's pre-lure passkey check to its post-lure credential or session-capture activity by " +
 	"client IP address, so clients sharing an egress IP (for example, employees behind the same " +
 	"corporate NAT) may be counted as a single client."
+
+// passkeyScopeExactCaption replaces passkeyScopeCaption when every passkey
+// observation named a recipient. The denominator caveat still holds -- these
+// counts only cover clients whose browser ran the script -- but the
+// shared-IP conflation warning does not apply at all, and repeating it would
+// understate a number that is actually exact.
+const passkeyScopeExactCaption = "These counts only cover clients whose browser ran the injected " +
+	"verification script -- not every target in the campaign. Each client's pre-lure passkey check " +
+	"is linked to its own post-lure credential or session-capture activity by recipient ID, so " +
+	"clients sharing an egress IP are not conflated."
+
+// passkeyScopeMixedCaption covers a campaign where some observations named a
+// recipient and some did not, which is what an upgrade mid-engagement, or a
+// target who reached the proxy without a valid lure, produces.
+const passkeyScopeMixedCaption = "These counts only cover clients whose browser ran the injected " +
+	"verification script -- not every target in the campaign. Some clients were linked to their own " +
+	"later activity by recipient ID, which is exact; the rest were linked by client IP address, so " +
+	"those may count clients sharing an egress IP (for example, employees behind the same corporate " +
+	"NAT) as a single client."
+
+// passkeyScopeUnreliableSuffix is appended to the mixed caption when the
+// campaign's own rows show the IP-based half actually colliding.
+const passkeyScopeUnreliableSuffix = "This campaign's own data shows that collision happening: more " +
+	"than one target was observed behind the same IP address, so treat pushed-to-weaker-factor as an " +
+	"upper bound on distinct people affected, not an exact count."
 
 // passkeyScopeUnreliableCaption is used in place of passkeyScopeCaption when
 // CorrelationReliable is false: the campaign's own data shows the IP-based
@@ -688,22 +739,32 @@ func buildPasskeyDefense(rows []eventRow, enabled Features) PasskeyDefense {
 	}
 	defense.RanScriptTargets = len(byClient)
 
-	// reachedWeakerFactor keys by the same client identity as byClient
-	// (IP-first, see passkeyClientKey) so a client observed with passkey
-	// capability can be linked to a later credential/capture event even
-	// though StageWebAuthn fires before lure validation assigns an RID.
+	// reachedWeakerFactor keys by the same client identities passkeyClientKey
+	// produces, so a client observed with passkey capability links to its own
+	// later credential/capture event. Each row contributes both keys it can:
+	// a recipient-keyed webauthn client matches on the recipient, and a
+	// legacy IP-keyed one still matches on the IP.
 	reachedWeakerFactor := make(map[string]bool)
 	for _, row := range rows {
 		stage := telemetry.Stage(row.Stage)
 		if stage != telemetry.StageCredential && stage != telemetry.StageCapture {
 			continue
 		}
+		if row.RID != "" {
+			reachedWeakerFactor["rid:"+row.RID] = true
+		}
 		if ip := actorIP(row.Actor); ip != "" {
 			reachedWeakerFactor["ip:"+ip] = true
 		}
 	}
 
+	recipientKeyed, ipKeyed := 0, 0
 	for key, c := range byClient {
+		if strings.HasPrefix(key, "rid:") {
+			recipientKeyed++
+		} else {
+			ipKeyed++
+		}
 		if c.platformAvailable {
 			defense.PlatformAuthenticatorAvailable++
 		}
@@ -715,11 +776,29 @@ func buildPasskeyDefense(rows []eventRow, enabled Features) PasskeyDefense {
 		}
 	}
 
-	defense.CorrelationReliable = correlationReliable(rows)
-	if defense.CorrelationReliable {
+	// How the correlation was actually done decides both the method reported
+	// and how much of a caveat the counts need. Recipient-keyed clients are
+	// joined exactly and carry no conflation risk at all; IP-keyed ones are
+	// the old approximation and still do.
+	switch {
+	case ipKeyed == 0 && recipientKeyed > 0:
+		defense.CorrelationMethod = CorrelationRecipient
+		defense.CorrelationReliable = true
+		defense.Scope = passkeyScopeExactCaption
+	case recipientKeyed == 0:
+		defense.CorrelationMethod = CorrelationIP
+		defense.CorrelationReliable = correlationReliable(rows)
 		defense.Scope = passkeyScopeCaption
-	} else {
-		defense.Scope = passkeyScopeUnreliableCaption
+		if !defense.CorrelationReliable {
+			defense.Scope = passkeyScopeUnreliableCaption
+		}
+	default:
+		defense.CorrelationMethod = CorrelationMixed
+		defense.CorrelationReliable = correlationReliable(rows)
+		defense.Scope = passkeyScopeMixedCaption
+		if !defense.CorrelationReliable {
+			defense.Scope = passkeyScopeMixedCaption + " " + passkeyScopeUnreliableSuffix
+		}
 	}
 	return defense
 }
@@ -758,10 +837,22 @@ func correlationReliable(rows []eventRow) bool {
 }
 
 // passkeyClientKey identifies the client a StageWebAuthn row belongs to.
-// It prefers actor IP specifically (rather than actorIdentity's RID-first
-// key) because IP is the only signal shared with the later, RID-attributed
-// credential/capture events buildPasskeyDefense correlates against.
+//
+// A recipient ID is preferred when the row carries one: jsinspect now hands
+// the injected script the session's recipient ID and the script reports it
+// back, so the observation names an actual target. That is an exact
+// identity, and it is what removes the shared-egress-IP conflation the
+// IP-based fallback below suffers from.
+//
+// Falling back to the actor IP covers rows produced before that existed, and
+// rows for a page that carried no session at all -- a target who reached the
+// proxy without a valid lure. Those keep the old, approximate behavior, and
+// the report says which of the two it used through
+// PasskeyDefense.CorrelationMethod.
 func passkeyClientKey(row eventRow) string {
+	if row.RID != "" {
+		return "rid:" + row.RID
+	}
 	if ip := actorIP(row.Actor); ip != "" {
 		return "ip:" + ip
 	}

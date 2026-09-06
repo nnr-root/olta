@@ -56,7 +56,20 @@ type Config struct {
 // (false) rather than an error. Suspicious, the bot/automation check, never
 // reads any of them, so their presence or absence cannot affect enforcement.
 type Assertion struct {
-	Version          int    `json:"version"`
+	Version int `json:"version"`
+
+	// RID is the recipient ID the injected script was given for this page,
+	// echoed back so verify and webauthn events can name a recipient. It is
+	// empty when the response carried no session, and for an assertion
+	// produced by a script injected before this field existed.
+	//
+	// It is client-reported and therefore only as trustworthy as the page it
+	// ran on: a victim can edit it. That is acceptable for what it is used
+	// for -- correlating a client's own passkey capability with its own
+	// later credential submission in a report -- and it is never used to
+	// authorize anything.
+	RID string `json:"rid,omitempty"`
+
 	WebDriver        bool   `json:"webdriver"`
 	Headless         bool   `json:"headless"`
 	Phantom          bool   `json:"phantom"`
@@ -157,7 +170,14 @@ func (middleware *Middleware) Script() []byte {
 // InjectHTML inserts the verification script immediately after the first head
 // start tag. Non-HTML fragments without a head and already-injected pages are
 // returned unchanged.
-func (middleware *Middleware) InjectHTML(body []byte) []byte {
+//
+// rid is the recipient ID of the session this response belongs to, or empty
+// when the response is not tied to one. The script reports it back on its
+// assertion, which is what lets the verify and webauthn stages carry a
+// recipient despite running before lure validation resolves one -- see
+// Assertion.RID. An empty rid changes nothing: the script still runs and the
+// events are still emitted, they just fall back to IP correlation as before.
+func (middleware *Middleware) InjectHTML(body []byte, rid string) []byte {
 	if middleware == nil || !middleware.config.Enabled || len(body) == 0 || bytes.Contains(body, []byte(`data-olta-js-inspect`)) {
 		return body
 	}
@@ -165,10 +185,21 @@ func (middleware *Middleware) InjectHTML(body []byte) []byte {
 	if location == nil {
 		return body
 	}
-	injection := make([]byte, 0, len(middleware.script)+43)
+	// The recipient ID reaches the script as a JSON-encoded call argument,
+	// so a value containing a quote or backslash cannot break out of the
+	// script context. It is generated from [A-Za-z0-9] (see
+	// models.generateResultId) so this is belt and braces, not the only
+	// thing standing between an attacker and the page.
+	ridJSON, err := json.Marshal(rid)
+	if err != nil {
+		ridJSON = []byte(`""`)
+	}
+	injection := make([]byte, 0, len(middleware.script)+len(ridJSON)+45)
 	injection = append(injection, `<script data-olta-js-inspect>`...)
 	injection = append(injection, middleware.script...)
-	injection = append(injection, `</script>`...)
+	injection = append(injection, '(')
+	injection = append(injection, ridJSON...)
+	injection = append(injection, `);</script>`...)
 
 	result := make([]byte, 0, len(body)+len(injection))
 	result = append(result, body[:location[1]]...)
@@ -256,6 +287,7 @@ func (middleware *Middleware) emitVerify(request *http.Request, assertion Assert
 
 	middleware.config.Emitter.Emit(
 		telemetry.New(telemetry.StageVerify, outcome, telemetry.TechniqueSandboxEvasion).
+			WithRecipient(assertion.RID).
 			WithHost(request.Host).
 			WithActor(telemetry.Actor{
 				IP:        clientIP(request),
@@ -281,6 +313,7 @@ func (middleware *Middleware) emitWebAuthn(request *http.Request, assertion Asse
 	}
 	middleware.config.Emitter.Emit(
 		telemetry.New(telemetry.StageWebAuthn, telemetry.OutcomeAllowed).
+			WithRecipient(assertion.RID).
 			WithHost(request.Host).
 			WithActor(telemetry.Actor{
 				IP:        clientIP(request),
@@ -340,7 +373,16 @@ func response(request *http.Request, status int, contentType string, body string
 	}
 }
 
+// generateScript builds the client verification script as an *uninvoked*
+// function expression taking one argument: the recipient ID to report back.
+//
+// It is a function expression rather than a self-invoking one so the whole
+// (large, constant) body can still be built once at construction while the
+// per-response recipient ID is appended as a tiny call suffix at injection
+// time -- see InjectHTML. Passing it as an argument rather than through a
+// global also keeps it out of reach of the proxied site's own scripts, which
+// would otherwise see an unexplained Olta global on the page.
 func generateScript(endpoint string) string {
 	endpointJSON, _ := json.Marshal(endpoint)
-	return `(function(){try{var a={version:1,webdriver:navigator.webdriver===true,headless:false,phantom:false,renderer:"",software_renderer:false,canvas_consistent:true,webauthn_supported:false,platform_authenticator_available:false,conditional_mediation_supported:false,conditional_mediation_available:false,webauthn_ceremony_observed:false};var u=(navigator.userAgent||"").toLowerCase();a.headless=u.indexOf("headless")!==-1||("_Selenium_IDE_Recorder" in window)||("__webdriver_script_fn" in document);a.phantom=!!(window.callPhantom||window._phantom);try{var c=document.createElement("canvas"),g=c.getContext("webgl")||c.getContext("experimental-webgl");if(g){var x=g.getExtension("WEBGL_debug_renderer_info");a.renderer=String(x?g.getParameter(x.UNMASKED_RENDERER_WEBGL):g.getParameter(g.RENDERER)||"");a.software_renderer=/(swiftshader|llvmpipe|mesa)/i.test(a.renderer)}}catch(e){a.canvas_consistent=false}try{var c1=document.createElement("canvas"),c2=document.createElement("canvas"),d1=c1.getContext("2d"),d2=c2.getContext("2d");c1.width=c2.width=64;c1.height=c2.height=16;d1.font=d2.font="12px sans-serif";d1.fillText("olta",2,12);d2.fillText("olta",2,12);var p1=c1.toDataURL(),p2=c2.toDataURL();a.canvas_consistent=p1.length>32&&p1===p2}catch(e){a.canvas_consistent=false}var j=JSON.stringify(a),bad=a.webdriver||a.headless||a.phantom||a.software_renderer||!a.canvas_consistent,e=` + string(endpointJSON) + `;if(bad){var b=btoa(unescape(encodeURIComponent(j))).replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,"");location.replace(e+"?assertion="+encodeURIComponent(b))}else{var send=function(){try{var jj=JSON.stringify(a);if(navigator.sendBeacon){navigator.sendBeacon(e,new Blob([jj],{type:"application/json"}))}else{fetch(e,{method:"POST",headers:{"Content-Type":"application/json"},body:jj,credentials:"same-origin",keepalive:true})}}catch(err){}};try{if(window.PublicKeyCredential){a.webauthn_supported=true;if(typeof PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable==="function"){PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable().then(function(v){a.platform_authenticator_available=!!v;send()}).catch(function(){})}if(typeof PublicKeyCredential.isConditionalMediationAvailable==="function"){a.conditional_mediation_supported=true;PublicKeyCredential.isConditionalMediationAvailable().then(function(v){a.conditional_mediation_available=!!v;send()}).catch(function(){})}}}catch(err){}try{if(navigator.credentials){var wrap=function(name){var orig=navigator.credentials[name];if(typeof orig!=="function"){return}navigator.credentials[name]=function(){var result=orig.apply(this,arguments);try{var opts=arguments[0];if(opts&&opts.publicKey&&!a.webauthn_ceremony_observed){a.webauthn_ceremony_observed=true;send()}}catch(err){}return result}};wrap("get");wrap("create")}}catch(err){}send()}}catch(e){}})();`
+	return `(function(r){try{var a={version:1,rid:(typeof r==="string"?r:""),webdriver:navigator.webdriver===true,headless:false,phantom:false,renderer:"",software_renderer:false,canvas_consistent:true,webauthn_supported:false,platform_authenticator_available:false,conditional_mediation_supported:false,conditional_mediation_available:false,webauthn_ceremony_observed:false};var u=(navigator.userAgent||"").toLowerCase();a.headless=u.indexOf("headless")!==-1||("_Selenium_IDE_Recorder" in window)||("__webdriver_script_fn" in document);a.phantom=!!(window.callPhantom||window._phantom);try{var c=document.createElement("canvas"),g=c.getContext("webgl")||c.getContext("experimental-webgl");if(g){var x=g.getExtension("WEBGL_debug_renderer_info");a.renderer=String(x?g.getParameter(x.UNMASKED_RENDERER_WEBGL):g.getParameter(g.RENDERER)||"");a.software_renderer=/(swiftshader|llvmpipe|mesa)/i.test(a.renderer)}}catch(e){a.canvas_consistent=false}try{var c1=document.createElement("canvas"),c2=document.createElement("canvas"),d1=c1.getContext("2d"),d2=c2.getContext("2d");c1.width=c2.width=64;c1.height=c2.height=16;d1.font=d2.font="12px sans-serif";d1.fillText("olta",2,12);d2.fillText("olta",2,12);var p1=c1.toDataURL(),p2=c2.toDataURL();a.canvas_consistent=p1.length>32&&p1===p2}catch(e){a.canvas_consistent=false}var j=JSON.stringify(a),bad=a.webdriver||a.headless||a.phantom||a.software_renderer||!a.canvas_consistent,e=` + string(endpointJSON) + `;if(bad){var b=btoa(unescape(encodeURIComponent(j))).replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,"");location.replace(e+"?assertion="+encodeURIComponent(b))}else{var send=function(){try{var jj=JSON.stringify(a);if(navigator.sendBeacon){navigator.sendBeacon(e,new Blob([jj],{type:"application/json"}))}else{fetch(e,{method:"POST",headers:{"Content-Type":"application/json"},body:jj,credentials:"same-origin",keepalive:true})}}catch(err){}};try{if(window.PublicKeyCredential){a.webauthn_supported=true;if(typeof PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable==="function"){PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable().then(function(v){a.platform_authenticator_available=!!v;send()}).catch(function(){})}if(typeof PublicKeyCredential.isConditionalMediationAvailable==="function"){a.conditional_mediation_supported=true;PublicKeyCredential.isConditionalMediationAvailable().then(function(v){a.conditional_mediation_available=!!v;send()}).catch(function(){})}}}catch(err){}try{if(navigator.credentials){var wrap=function(name){var orig=navigator.credentials[name];if(typeof orig!=="function"){return}navigator.credentials[name]=function(){var result=orig.apply(this,arguments);try{var opts=arguments[0];if(opts&&opts.publicKey&&!a.webauthn_ceremony_observed){a.webauthn_ceremony_observed=true;send()}}catch(err){}return result}};wrap("get");wrap("create")}}catch(err){}send()}}catch(e){}})`
 }

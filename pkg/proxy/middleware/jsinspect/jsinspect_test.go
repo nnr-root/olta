@@ -12,7 +12,7 @@ func TestInjectHTML(t *testing.T) {
 	middleware := newTestMiddleware(t, ActionBlock)
 	body := []byte(`<!doctype html><HTML><head class="app"><title>Olta</title></head><body></body></HTML>`)
 
-	injected := middleware.InjectHTML(body)
+	injected := middleware.InjectHTML(body, "")
 	text := string(injected)
 	if !strings.Contains(text, `<head class="app"><script data-olta-js-inspect>`) {
 		t.Fatalf("InjectHTML() did not inject immediately after head: %s", text)
@@ -20,11 +20,11 @@ func TestInjectHTML(t *testing.T) {
 	if !strings.Contains(text, middleware.Endpoint()) {
 		t.Errorf("InjectHTML() script does not contain endpoint %q", middleware.Endpoint())
 	}
-	if got := middleware.InjectHTML(injected); string(got) != text {
+	if got := middleware.InjectHTML(injected, ""); string(got) != text {
 		t.Fatal("InjectHTML() injected the script more than once")
 	}
 	fragment := []byte(`<div>no head</div>`)
-	if got := middleware.InjectHTML(fragment); string(got) != string(fragment) {
+	if got := middleware.InjectHTML(fragment, ""); string(got) != string(fragment) {
 		t.Fatalf("InjectHTML() changed fragment without head: %s", got)
 	}
 }
@@ -202,4 +202,49 @@ func newTestMiddleware(t *testing.T, action Action) *Middleware {
 		t.Fatalf("New() error = %v", err)
 	}
 	return middleware
+}
+
+// TestInjectHTMLPassesRecipientToScript covers the attribution path: the
+// recipient ID reaches the script as a JSON call argument, not as a global,
+// so the proxied site's own scripts never see an unexplained Olta variable.
+func TestInjectHTMLPassesRecipientToScript(t *testing.T) {
+	middleware := newTestMiddleware(t, ActionBlock)
+	injected := string(middleware.InjectHTML([]byte(`<html><head></head><body></body></html>`), "abcdefgh12345"))
+
+	if !strings.Contains(injected, `})("abcdefgh12345");`) {
+		t.Errorf("injected script does not receive the recipient as a call argument:\n%s", injected)
+	}
+	if strings.Contains(injected, "window.__olta") {
+		t.Error("recipient was published as a global; it must reach the script as an argument")
+	}
+}
+
+// TestInjectHTMLEscapesTheRecipient is belt and braces: recipient IDs are
+// generated from [A-Za-z0-9], but the value still reaches a script context,
+// so it must be encoded rather than concatenated.
+func TestInjectHTMLEscapesTheRecipient(t *testing.T) {
+	middleware := newTestMiddleware(t, ActionBlock)
+	injected := string(middleware.InjectHTML([]byte(`<html><head></head></html>`), `"+alert(1)+"`))
+
+	if strings.Contains(injected, `("+alert(1)+")`) {
+		t.Errorf("recipient broke out of its string literal:\n%s", injected)
+	}
+	if !strings.Contains(injected, `"\"+alert(1)+\""`) {
+		t.Errorf("recipient was not JSON-encoded:\n%s", injected)
+	}
+}
+
+// TestInjectHTMLWithNoRecipientStillInjects pins the fallback: a response
+// with no session still gets the script, it just reports an empty recipient
+// and the report falls back to IP correlation.
+func TestInjectHTMLWithNoRecipientStillInjects(t *testing.T) {
+	middleware := newTestMiddleware(t, ActionBlock)
+	injected := string(middleware.InjectHTML([]byte(`<html><head></head></html>`), ""))
+
+	if !strings.Contains(injected, `data-olta-js-inspect`) {
+		t.Error("script was not injected for a response with no session")
+	}
+	if !strings.Contains(injected, `})("");`) {
+		t.Errorf("script was not invoked with an empty recipient:\n%s", injected)
+	}
 }

