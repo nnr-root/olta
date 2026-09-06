@@ -1,7 +1,6 @@
 package feed
 
 import (
-	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -34,6 +33,12 @@ type Config struct {
 	PublisherToken string
 	ViewerToken    string
 	HistorySize    int
+	// TokenFile is a JSON file holding the accepted tokens
+	// ({"publisher": [...], "viewer": [...]}). When set, it replaces the
+	// single-token fields above and can be reloaded at runtime, which is
+	// what makes rotation possible without restarting the feed and dropping
+	// every connected viewer. See tokenStore.
+	TokenFile string
 }
 
 // Option configures the feed server.
@@ -58,6 +63,12 @@ func WithViewerToken(token string) Option {
 	return func(config *Config) { config.ViewerToken = token }
 }
 
+// WithTokenFile loads the accepted tokens from a JSON file that can be
+// reloaded at runtime, so tokens can be rotated without a restart.
+func WithTokenFile(path string) Option {
+	return func(config *Config) { config.TokenFile = path }
+}
+
 // WithHistorySize controls how many recent messages are replayed to new viewers.
 func WithHistorySize(size int) Option {
 	return func(config *Config) { config.HistorySize = size }
@@ -72,13 +83,6 @@ func newConfig(options ...Option) Config {
 		config.HistorySize = 0
 	}
 	return config
-}
-
-func sameToken(actual, expected string) bool {
-	if expected == "" {
-		return true
-	}
-	return len(actual) == len(expected) && subtle.ConstantTimeCompare([]byte(actual), []byte(expected)) == 1
 }
 
 func bearerToken(r *http.Request) string {
@@ -137,8 +141,8 @@ func newUpgrader(config Config) websocket.Upgrader {
 	}
 }
 
-func serveSubscriber(hub *Hub, upgrader websocket.Upgrader, config Config, w http.ResponseWriter, r *http.Request) {
-	if !sameToken(viewerToken(r), config.ViewerToken) {
+func serveSubscriber(hub *Hub, upgrader websocket.Upgrader, config Config, tokens *tokenStore, w http.ResponseWriter, r *http.Request) {
+	if !tokens.matchesViewer(viewerToken(r)) {
 		http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
 		return
 	}
@@ -157,8 +161,8 @@ func serveSubscriber(hub *Hub, upgrader websocket.Upgrader, config Config, w htt
 	go client.readPump(false)
 }
 
-func servePublisher(hub *Hub, upgrader websocket.Upgrader, config Config, w http.ResponseWriter, r *http.Request) {
-	if !sameToken(bearerToken(r), config.PublisherToken) {
+func servePublisher(hub *Hub, upgrader websocket.Upgrader, tokens *tokenStore, w http.ResponseWriter, r *http.Request) {
+	if !tokens.matchesPublisher(bearerToken(r)) {
 		http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
 		return
 	}
@@ -245,20 +249,62 @@ const DefaultListenAddress = "localhost:1337"
 const Version = "1.0.0-Alpha"
 
 // Handler creates the Olta Feed static and WebSocket routes.
+// Handler builds the feed's HTTP handler. It panics on an unusable token
+// file, which only happens at construction; use NewServer when the caller
+// needs to report that error instead.
 func Handler(assetDir string, options ...Option) http.Handler {
+	server, err := NewServer(assetDir, options...)
+	if err != nil {
+		panic(err)
+	}
+	return server.Handler()
+}
+
+// Server owns the feed's runtime state, so tokens can be reloaded on a
+// running server rather than only set at construction.
+type Server struct {
+	config  Config
+	tokens  *tokenStore
+	handler http.Handler
+}
+
+// NewServer builds a feed server.
+func NewServer(assetDir string, options ...Option) (*Server, error) {
 	config := newConfig(options...)
+	tokens, err := newTokenStore(config)
+	if err != nil {
+		return nil, err
+	}
+
 	hub := newHub(config.HistorySize)
 	go hub.run()
 	upgrader := newUpgrader(config)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
-		serveSubscriber(hub, upgrader, config, w, r)
+		serveSubscriber(hub, upgrader, config, tokens, w, r)
 	})
 	mux.HandleFunc("/ws/publish", func(w http.ResponseWriter, r *http.Request) {
-		servePublisher(hub, upgrader, config, w, r)
+		servePublisher(hub, upgrader, tokens, w, r)
 	})
 	mux.Handle("/", http.FileServer(http.Dir(assetDir)))
-	return securityHeaders(mux)
+
+	return &Server{config: config, tokens: tokens, handler: securityHeaders(mux)}, nil
+}
+
+// Handler returns the server's HTTP handler.
+func (s *Server) Handler() http.Handler { return s.handler }
+
+// ReloadTokens re-reads the configured token file. Connections already open
+// are not re-checked: a viewer authorized under the old token keeps its
+// stream until it disconnects, which is what makes an overlap rotation
+// non-disruptive. New connections are checked against the new set.
+//
+// A failed reload leaves the running tokens untouched and returns the error.
+func (s *Server) ReloadTokens() error {
+	if s == nil {
+		return nil
+	}
+	return s.tokens.Reload()
 }
 
 func securityHeaders(next http.Handler) http.Handler {
@@ -285,23 +331,37 @@ func loopbackListener(listenAddress string) bool {
 
 // Run starts the Olta Feed HTTP and WebSocket server.
 func Run(listenAddress, assetDir string, options ...Option) error {
-	config := newConfig(options...)
-	if !loopbackListener(listenAddress) && (config.PublisherToken == "" || config.ViewerToken == "") {
+	server, err := NewServer(assetDir, options...)
+	if err != nil {
+		return err
+	}
+	return server.ListenAndServe(listenAddress)
+}
+
+// ListenAndServe starts the Olta Feed HTTP and WebSocket server.
+func (s *Server) ListenAndServe(listenAddress string) error {
+	authenticated := s.tokens.publisherConfigured() && s.tokens.viewerConfigured()
+	if !loopbackListener(listenAddress) && !authenticated {
 		return errors.New("non-loopback feed listeners require publisher and viewer tokens")
 	}
-	if config.PublisherToken != "" && sameToken(config.PublisherToken, config.ViewerToken) {
+	if s.config.TokenFile == "" && s.config.PublisherToken != "" &&
+		s.config.PublisherToken == s.config.ViewerToken {
 		return errors.New("publisher and viewer tokens must be different")
 	}
-	server := &http.Server{
+
+	httpServer := &http.Server{
 		Addr:              listenAddress,
-		Handler:           Handler(assetDir, options...),
+		Handler:           s.handler,
 		ReadHeaderTimeout: 5 * time.Second,
 		IdleTimeout:       90 * time.Second,
 		MaxHeaderBytes:    1 << 20,
 	}
 	log.Printf("Olta Feed is available at http://%s/", listenAddress)
-	if config.PublisherToken == "" || config.ViewerToken == "" {
+	if !authenticated {
 		log.Print("Olta Feed authentication is disabled for this loopback-only listener")
 	}
-	return fmt.Errorf("feed server: %w", server.ListenAndServe())
+	if s.config.TokenFile != "" {
+		log.Printf("Olta Feed tokens loaded from %s; send SIGHUP to reload after rotating them", s.config.TokenFile)
+	}
+	return fmt.Errorf("feed server: %w", httpServer.ListenAndServe())
 }
