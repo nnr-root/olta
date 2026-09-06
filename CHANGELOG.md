@@ -2,6 +2,61 @@
 
 All notable changes to Olta are documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- Added `pkg/campaign/detection`, which turns an engagement's own telemetry and campaign configuration into deployable detection content, exposed at `GET /api/campaigns/{id}/detections` and, as a multi-document YAML bundle, `GET /api/campaigns/{id}/detections/sigma`. Three Sigma rules are generated from indicators the engagement actually produced: DNS resolution of the phishing hostname, a web proxy request to it, and delivery of the campaign's own message matched on sender and subject together. Subjects include every A/B variant, and senders are reduced to the bare address, because that is what a mail log's sender field carries.
+- Added `pkg/telemetry/sink/siem`, delivering events to Splunk HEC or an Elasticsearch/OpenSearch document endpoint in Elastic Common Schema or OCSF Detection Finding form, with the credential read from `OLTA_SIEM_TOKEN` rather than a flag. Configured through `-siem-url`, `-siem-transport`, `-siem-schema`, `-siem-auth-scheme`, and `-siem-sourcetype`.
+- Added periodic replay of still-valid captured sessions (`-session-recheck-schedule`, default `5m,30m,2h,8h,24h`), turning "the token worked once" into a measured window during which a stolen session stayed live. Each attempt records its attempt number and age since capture.
+- Added a `TokenLifetime` section to the resilience report, built from those attempts: sessions still valid at their last check are counted as censored observations and excluded from the median time to revocation, and a session refused on its very first replay is counted separately from one that worked and was later revoked — the validator replays from the proxy's own network, so a first-attempt refusal is direct evidence the target's conditional access, impossible-travel or device-binding controls rejected a stolen session outright.
+- Added `pkg/campaign/retention`, with a configurable `telemetry_retention_days` driving a daily pruner in `olta-campaign`, and an explicitly confirmed `POST /api/campaigns/{id}/purge?confirm=PURGE` that removes recipient personal data from a finished campaign while keeping the counts, statuses and timestamps its resilience report is computed from.
+- Added `telemetry.Event.Host`, the request hostname the event was produced serving, set on the three stages that fire before lure validation resolves a recipient, and normalized at the single point of entry so a report's equality comparison cannot silently match nothing.
+- Added `telemetry.Event.InstanceID`, stamped by the bus rather than by each call site so every event from one process carries it, identifying which proxy served an event when several write to one campaign database.
+- Added campaign schema migration 008 (SQLite and MySQL) creating the `instance_id` and `host` columns on `telemetry_events`, with indexes, baked forward into the fresh-install schema.
+- Added recipient attribution to the browser-verification assertion: the injected script is handed the session's recipient ID and reports it back, so the verify and webauthn stages name a target instead of being correlated by client IP address.
+- Added `PasskeyDefense.CorrelationMethod` (`recipient`, `ip` or `mixed`), with the caveat text following it — an exact join no longer repeats a shared-IP warning that would understate it.
+- Added `Report.FeaturesSource` and `Report.FeaturesScope`, so a reader always knows whether the measured/not-measured split came from the proxy's own startup record or fell back to configuration.
+- Added `Report.UnattributedHostScoped` and a stronger friction caption for reports whose unattributed events were narrowed by hostname.
+- Added token rotation to `olta-feed`: a `-token-file` (or `OLTA_FEED_TOKEN_FILE`) holding several accepted tokens per role, reloaded on `SIGHUP`, so tokens can be rotated without restarting and dropping every connected viewer.
+- Added `secrets_encryption_enabled`, `siem_configured` and `siem_schema` to the proxy's `StageInitialization` event, all presence booleans or non-secret enums.
+- Added `Bus.NewBusForInstance`, `Event.WithHost`, `Event.WithRecipient`, and `telemetry.NormalizeHost`.
+
+### Changed
+
+- The resilience report now reads the measurement posture from the proxy's own `StageInitialization` telemetry rather than the campaign service's `telemetry` configuration block, which an operator had to keep in step by hand. It takes the last startup event before the campaign's window plus every one inside it — a long-running proxy emits its startup event once, typically long before a given campaign launches, so bounding the lookup to the window alone would almost always find nothing — and combines several by OR rather than last-one-wins, mirroring the funnel's existing upgrade-on-proof rule. The configured values remain as a documented fallback.
+- Unattributed cloak, verify and webauthn events are now scoped to a campaign's own phishing hostnames as well as its time window, so two campaigns running concurrently on one install no longer absorb each other's traffic. Rows recorded before hostnames were captured carry none and are still admitted on the window alone, which the report's caption states.
+- `PasskeyDefense.PushedToWeakerFactor` now joins a client's pre-lure passkey observation to its own post-lure activity by recipient ID where available, falling back to client IP address. The corporate-NAT conflation the report previously had to disclose is gone for recipient-attributed clients.
+- `resilience.Window` became `resilience.Scope`, gaining the hostnames that narrow unattributed rows.
+- The telemetry bus now fans each event's sink deliveries out concurrently and logs the first queue overflow, so an undersized queue is visible while the engagement is still running rather than only at shutdown.
+- `cmd/olta-proxy` loads the master key once at startup and warns when captured credentials and session tokens will be stored as plaintext at rest. The campaign service has warned about this since its own setup; the proxy, which writes the material, said nothing.
+- `cmd/olta-proxy` reports the telemetry bus's dropped, failed and undelivered counts at shutdown, naming what each one means, so a shutdown that lost events says so rather than exiting clean.
+- Moved the vendored goproxy fork into `third_party/goproxy` and pointed `go.mod`'s existing `replace` directive at it, so the response framing it forces on MITM'd HTTPS traffic can be corrected. The module was already replaced onto a fork; this changes which fork, not whether there is one. `third_party/goproxy/OLTA-PATCHES.md` records every deviation from upstream, including one deliberately not made.
+- Extracted the proxy's `/s/` route matching, request-target derivation and access-control gate out of the `OnRequest` closure into `pkg/proxy/core/request_pipeline.go`, following what the response side already did.
+- Promoted `gopkg.in/yaml.v2` from an indirect to a direct dependency; it was already in the module graph and no version changed.
+
+### Fixed
+
+- Fixed the IMAP monitor truncating every reported recipient ID to seven characters. The pattern was inherited from Gophish, whose recipient IDs were a fixed seven; Olta generates 8 to 32, so `models.GetResult` was always asked for an ID that cannot exist. Because that path is the only emitter of `StageReport`, no user report had ever been recorded and the resilience report's race summary — "did the human layer beat the attacker?" — had no data source at all. It was reporting on an empty set, not on a campaign where nobody reported.
+- Fixed the proxy forcing chunked transfer encoding on every MITM'd HTTPS response. An origin serving a plain `Content-Length` response reached the victim as a chunked one, a difference visible on the wire to anything comparing the proxied site against the real one, and it happened below the layer any `OnResponse` handler can reach — so the framing reconciliation added earlier was being discarded. A response whose length is known now keeps that framing; one whose length is genuinely unknown is still chunked.
+- Fixed both `/s/` route patterns being compiled with `regexp.MustCompile` inside the per-request closure, so every proxied request paid for two regex compilations before anything else happened.
+- Fixed the resilience report trusting a configuration value that can silently disagree with how `olta-proxy` was actually launched, which made the measured/not-measured claim — the distinction this report exists to protect — capable of being wrong in both directions.
+- Fixed queue-overflow event drops being entirely silent, leaving an operator's only signal a counter no caller ever read.
+
+### Verified
+
+- Added the first tests for `pkg/campaign/imap`, covering every recipient ID length in the documented 8-to-32 range (the whole range, not a sample: a truncated ID looks exactly like a well-formed one), all five encodings the pattern claims to handle, forwarded `.eml` and `message/rfc822` attachments, and the attachments that must be ignored. The regression test was confirmed to fail against the old pattern before the fix. Coverage: 0% → 8.2%, the remainder being IMAP network I/O.
+- Added tests for the SMS delivery path, previously entirely uncovered while the email side sat at 70%. `pkg/campaign/smser` 0% → 92.0% by faking Twilio's three-method transport interface, pinning the permanent-versus-retryable split that decides whether a message is failed for good or scheduled again; `pkg/campaign/smsworker` 0% → 69.1% against an in-memory database, pinning the scheduling guarantee that a spread campaign hands over only what is due and leaves the rest unlocked.
+- Added tests covering the detection pack's privacy invariant (no victim-side address, user agent or recipient ID reaches a generated rule), that no rule is emitted without an indicator to match on (an empty Sigma selection matches everything), and that rule IDs are stable across regenerations but distinct across campaigns. Coverage: 94.5%.
+- Added tests asserting the no-loot invariant survives both SIEM schema mappings against the marshalled bytes, not just the in-memory document. Coverage: 90.3%.
+- Added tests for the purge's blast radius specifically: it must not reach another campaign, another user, or the unattributed telemetry rows shared with other campaigns' reports, and a rejected confirmation must leave everything intact.
+- Added tests for feed token rotation, including that a failed reload keeps the tokens already working rather than locking every client out of a live feed, driven end to end over a real WebSocket connection. Coverage for `pkg/feed`: 74.2% → 77.7%.
+- Added tests for the proxy's access-control gate: that a client's own `X-Forwarded-For` cannot choose the address rate limiting and blacklisting apply to, that it can when proxy-header trust is explicitly enabled, and that `blacklist_mode=all` records the address it blocks. Coverage for `pkg/proxy/core`: 35.3% → 36.0%.
+- Added a test pinning that a `/s/<session>/<segment>` path never falls through to the single-segment redirect API, a precedence the extraction briefly changed and which would have routed arbitrary paths into an endpoint that polls and can block.
+- Added tests for the session-recheck schedule, including that a refused or inconclusive attempt ends it and that a pending recheck cannot hold shutdown open. A timer-registration data race found under `-race` during development was fixed by creating and registering the timer under the same lock its callback takes.
+- Added migration tests for schema version 8 covering fresh-install and upgrade parity, and that rows recorded before the upgrade keep null scope columns rather than the upgrade inventing a value for them.
+- Verified the full suite with `go build ./...`, `go vet ./...`, `gofmt -l`, and `go test ./... -count=1`, plus `-race` on the packages this work touched.
+
 ## [1.0.0-Alpha] - 2026-08-08
 
 ### Added

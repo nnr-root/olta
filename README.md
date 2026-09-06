@@ -12,6 +12,9 @@
   * [Why?](#why)
   * [Background](#background)
   * [Purple-Team Telemetry & Resilience Reporting](#purple-team-telemetry--resilience-reporting)
+    + [Detection content export](#detection-content-export)
+    + [SIEM delivery](#siem-delivery)
+    + [Retention and post-engagement purge](#retention-and-post-engagement-purge)
   * [Evasion & Detonation Engineering](#evasion--detonation-engineering)
   * [Social Engineering Toolkit](#social-engineering-toolkit)
   * [Infrastructure Layout](#infrastructure-layout)
@@ -137,10 +140,34 @@ This is enforced structurally, not by convention. `Event.WithDetail` — the onl
 - **Kill-chain funnel** — for each of the eight attacker-side stages (`delivery` through `replay`), the number of distinct targets that reached it, labeled with its ATT&CK technique. A stage is counted by distinct `RID`, or by a derived actor identity (IP, then ASN/organization) for the unattributed `cloak`/`verify` stages, so one browser retrying dozens of blocked requests still counts as one target.
 - **Defensive friction** — cloaker `blocked`/`redirected` decisions grouped by network owner and ASN. A burst of requests from a security vendor's or cloud provider's ASN shortly after delivery is direct evidence the target's own security stack detonated the link — a real finding about the client's defenses, derived from data the proxy already collects and previously discarded.
 - **The report-vs-capture race** — for every target that was delivered to (the fixed denominator), whether they reported the phish before their session was captured, after it was captured, or never reported at all, plus the median time-to-report measured from delivery (not from click — a defender's clock starts when the message lands). This is the headline defensive metric: it measures whether the human layer beat the attacker, using only data Olta already collects, and it is honest about what it cannot see — Olta has no visibility into a client's SIEM and does not claim to.
+- **Passkey defense** — how much of the attack a client's passkey rollout stopped, counted over the clients whose browser actually ran the injected script rather than over every campaign target. Each client's pre-lure passkey capability is linked to its own post-lure credential or capture activity by recipient ID where available, falling back to client IP address; `correlation_method` says which was used, and only the IP fallback carries the shared-egress-IP caveat.
+- **Token lifetime** — how long captured sessions stayed usable, from the repeated replays the session validator makes. Sessions still valid at their last check are censored observations: their true lifetime is unknown, so they are counted separately and excluded from the median time to revocation. A session refused on the very first replay is counted separately again — the validator replays from the proxy's own network, so that is direct evidence the target's conditional access, impossible-travel or device-binding controls rejected a stolen session outright.
 
 A companion `GET /api/campaigns/{id}/resilience/navigator` endpoint exports the same technique/outcome data as a MITRE ATT&CK Navigator layer (`domain: "enterprise-attack"`, layer/navigator/ATT&CK versions embedded) that loads without manual editing.
 
-**Be aware of the report's honest limits.** Three funnel stages depend on optional proxy features: `cloak` requires `-enable-cloaker`, `verify` requires `-enable-js-inspect`, and `replay` requires `-enable-session-validator`. When a feature was disabled, its stage renders as **"not measured"**, never as zero — a disabled stage reporting zero would misleadingly read as "nothing was blocked" when the truth is "nothing was watching." Separately, unattributed `cloak`/`verify` events (no RID resolved yet) are folded into a campaign's report by bounding them to the campaign's active time window (launch date through completion, or now for an in-flight campaign) rather than by a hard campaign ID — this is an approximation, and it may include cloak/verify traffic from other campaigns running concurrently on the same proxy install during that same window.
+**Be aware of the report's honest limits.** Three funnel stages depend on optional proxy features: `cloak` requires `-enable-cloaker`, `verify` requires `-enable-js-inspect`, and `replay` requires `-enable-session-validator`. When a feature was disabled, its stage renders as **"not measured"**, never as zero — a disabled stage reporting zero would misleadingly read as "nothing was blocked" when the truth is "nothing was watching." Which of those features were on is read from the proxy's own startup telemetry rather than taken on trust from configuration (see below), and the report says which source it used in `features_source`.
+
+Unattributed `cloak`/`verify`/`webauthn` events (no RID resolved yet) are folded into a campaign's report by bounding them to the campaign's active time window **and** to the campaign's own phishing hostnames, which the proxy records on each such event. Campaigns running concurrently on different hostnames therefore no longer contaminate each other. Two limits remain and the report states both: events recorded before hostname capture existed carry none and are still admitted on the time window alone, and campaigns sharing a single hostname cannot be separated at all.
+
+### Detection content export
+
+`GET /api/campaigns/{id}/detections` returns the engagement's indicators and a set of generated Sigma rules; `GET /api/campaigns/{id}/detections/sigma` returns the same rules as a multi-document YAML bundle, and the campaign dashboard offers both as downloads next to the Navigator export.
+
+The resilience report answers "where did our defenses hold". This answers the question every debrief ends on — "so how do we catch this next time?" — with content the client's SOC can deploy: DNS resolution of the phishing hostname, a web proxy request to it, and delivery of the campaign's own message matched on sender and subject.
+
+It is deliberately conservative about what becomes an indicator. Only operator-controlled infrastructure does: the hostnames, the sending addresses, the subjects. The telemetry stream is full of the client's own employees' addresses and user agents, and turning those into "indicators of compromise" would hand a defender a blocklist of their own staff. Each rule also lists the engagement itself as a false positive, so an analyst does not chase the test as an incident, and names the logsource and fields it needs — whether the client actually collects that logsource is exactly the gap the engagement exists to find, so no rule claims it will fire.
+
+### SIEM delivery
+
+`-siem-url` sends every telemetry event to a Splunk HTTP Event Collector or an Elasticsearch/OpenSearch document endpoint (`-siem-transport`) in Elastic Common Schema or OCSF Detection Finding form (`-siem-schema`). The endpoint's credential is read from the `OLTA_SIEM_TOKEN` environment variable rather than a flag, because flag values appear in `ps` output to every user on the host.
+
+Where a schema's own vocabulary is narrower than Olta's, the original is preserved alongside the mapped value: ECS's `event.outcome` collapses five Olta outcomes onto three, so the untranslated one stays in `olta.outcome`. OCSF severity is left at Informational for every row on purpose — Olta cannot know how severe a stage is for a given organization, and inventing a number would feed a defender's alerting rules something with nothing behind it.
+
+### Retention and post-engagement purge
+
+`telemetry_retention_days` in `cmd/olta-campaign/config.json` prunes telemetry events older than that many days, checked daily. Zero or absent keeps everything, which is the default: an install that has been collecting for a year should not lose that history the moment it upgrades.
+
+`POST /api/campaigns/{id}/purge?confirm=PURGE` removes recipient personal data — names, addresses, phone numbers, job metadata, IP addresses, geolocation and submitted form details — from a finished campaign's results, events, delivery logs and telemetry, while keeping the recipient IDs, statuses, timestamps, tags and stage counts its resilience report is computed from. A purge that broke the report is a purge nobody runs. The confirmation is a specific word rather than a boolean because the operation cannot be undone, and target groups, templates and sending profiles are left untouched: those are reusable objects, not this campaign's data.
 
 ### Telemetry configuration
 
@@ -154,7 +181,9 @@ A companion `GET /api/campaigns/{id}/resilience/navigator` endpoint exports the 
 }
 ```
 
-These three flags should mirror exactly how `olta-proxy` was actually launched (`-enable-cloaker`, `-enable-js-inspect`, `-enable-session-validator`), because they are what the resilience report uses as its baseline "was this stage even measured" claim. The two directions of drift are not symmetric: a stale `false` self-corrects, because one or more observed events for that stage is hard proof the feature ran (the cloaker only emits a `cloak` event when it matched a request, `jsinspect` only emits `verify` when browser verification is on) — so the report upgrades that stage to measured on its own. A stale `true`, by contrast, never self-corrects: the absence of events proves nothing, since an enabled feature can legitimately see zero matches, so a `true` that no longer matches reality stays wrong until an operator fixes it. Keeping this block in sync with the actual `olta-proxy` flags remains the operator's responsibility.
+These three flags are now a **fallback**, not the primary source. `olta-proxy` records the configuration it actually started with as a `StageInitialization` telemetry event, and the resilience report reads its posture from there — what the proxy was really launched with beats what someone wrote in a config file. The report takes the last startup event before the campaign's window plus every one inside it (a long-running proxy emits its startup event once, typically long before a given campaign launches, so bounding the lookup to the window alone would almost always find nothing), and combines several by OR rather than last-one-wins.
+
+The configured values above are used only when no startup record covering the campaign exists — a proxy predating startup telemetry, or one whose events never reached this database — and the report's `features_source` field says which of the two it used, with a `features_scope` caveat when it fell back.
 
 ## Evasion & Detonation Engineering
 
@@ -334,6 +363,17 @@ Realtime campaign event notifications are handled by a local websocket/http serv
 **IMPORTANT NOTES**
 
 - The live feed page hooks a websocket for events with `JavaScript` and you **DO NOT** need to refresh the page. If you refresh the page, you will **LOSE** all events up to that point.
+
+- A feed listening on anything other than loopback requires a publisher and a viewer token. Supplying them through `OLTA_FEED_PUBLISHER_TOKEN` and `OLTA_FEED_VIEWER_TOKEN` fixes them for the process's lifetime, so rotating one means restarting `olta-feed` and dropping every connected viewer along with the proxy's publishing connection. For an engagement that runs for days, use `-token-file` (or `OLTA_FEED_TOKEN_FILE`) instead:
+
+```json
+{
+    "publisher": ["current-publisher-token", "previous-publisher-token"],
+    "viewer": ["current-viewer-token", "previous-viewer-token"]
+}
+```
+
+Each role accepts several tokens at once, which is what makes an overlap rotation possible: add the new token, move clients across, remove the old one, sending `SIGHUP` after each edit. Connections already open are not re-checked, so nothing is dropped mid-rotation. A file that fails to parse, lists no token for a role, or uses the same token for both leaves the running tokens untouched and logs the error — a half-written file must not lock every client out of a live feed.
 
 ## A Word About Phishlets
 
