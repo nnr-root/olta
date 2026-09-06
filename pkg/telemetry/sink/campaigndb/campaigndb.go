@@ -24,6 +24,8 @@ type row struct {
 	RID        string    `gorm:"column:rid"`
 	Actor      string    `gorm:"column:actor"`
 	Detail     string    `gorm:"column:detail"`
+	InstanceID string    `gorm:"column:instance_id"`
+	Host       string    `gorm:"column:host"`
 }
 
 func (row) TableName() string { return "telemetry_events" }
@@ -73,6 +75,8 @@ func Insert(db *gorm.DB, event telemetry.Event) error {
 		RID:        event.RID,
 		Actor:      string(actor),
 		Detail:     detail,
+		InstanceID: event.InstanceID,
+		Host:       event.Host,
 	}).Error
 }
 

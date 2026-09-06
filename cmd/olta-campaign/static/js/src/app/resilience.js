@@ -56,6 +56,24 @@ function renderFunnel(funnel) {
         '<tbody>' + rows + '</tbody></table>'
 }
 
+// renderFeaturesScope builds the caption that must sit above the kill chain
+// whenever the measured/not-measured split came from the campaign service's
+// configuration rather than from the proxy's own startup record. The split is
+// the strongest claim this report makes, so a reader has to be told when it
+// rests on a hand-maintained value that may disagree with how olta-proxy was
+// actually launched. Nothing is rendered when the posture came from the
+// proxy: that is the ordinary case and needs no caveat.
+//
+// featuresScope is server-authored plain text (see
+// pkg/campaign/resilience.featuresScopeCaption) but is still escaped like any
+// other interpolated value.
+function renderFeaturesScope(featuresScope) {
+    if (!featuresScope) {
+        return ""
+    }
+    return '<div class="alert alert-warning"><small>' + escapeHtml(featuresScope) + '</small></div>'
+}
+
 // renderFrictionScope builds the caption required under Defensive Friction:
 // cloak/verify events are unattributed by design (they fire before lure
 // validation resolves a recipient), so the server can only bound them to
@@ -137,7 +155,41 @@ function renderRace(race) {
 // already uses in campaign_results.js for the CSV export buttons.
 function renderNavigatorLink() {
     return '<button type="button" id="resilience-navigator-download" class="btn btn-default btn-sm">' +
-        '<i class="fa fa-download"></i> Download ATT&amp;CK Navigator layer</button>'
+        '<i class="fa fa-download"></i> Download ATT&amp;CK Navigator layer</button> ' +
+        '<button type="button" id="detection-sigma-download" class="btn btn-default btn-sm">' +
+        '<i class="fa fa-download"></i> Download Sigma detection pack</button>'
+}
+
+// saveBlob hands a generated file to the browser. Both downloads on this
+// panel need it for the same reason: the API requires a Bearer header with no
+// cookie or query-param fallback, so neither can be a plain <a href>.
+function saveBlob(contents, mimeType, filename) {
+    var blob = new Blob([contents], { type: mimeType })
+    if (navigator.msSaveBlob) {
+        navigator.msSaveBlob(blob, filename)
+        return
+    }
+    var blobURL = window.URL.createObjectURL(blob)
+    var dlLink = document.createElement('a')
+    dlLink.href = blobURL
+    dlLink.setAttribute('download', filename)
+    document.body.appendChild(dlLink)
+    dlLink.click()
+    document.body.removeChild(dlLink)
+    window.URL.revokeObjectURL(blobURL)
+}
+
+// downloadSigmaPack fetches the generated Sigma rules for campaignId and
+// saves them as a multi-document YAML bundle, which is the form Sigma tooling
+// ingests a rule set in.
+function downloadSigmaPack(campaignId) {
+    api.campaignId.detectionsSigma(campaignId)
+        .success(function (bundle) {
+            saveBlob(bundle, 'application/yaml;charset=utf-8;', 'olta-campaign-' + campaignId + '-sigma.yml')
+        })
+        .error(function () {
+            errorFlash(' Could not download the Sigma detection pack.')
+        })
 }
 
 // downloadNavigatorLayer fetches the Navigator layer for campaignId and
@@ -145,23 +197,8 @@ function renderNavigatorLink() {
 function downloadNavigatorLayer(campaignId) {
     api.campaignId.resilienceNavigator(campaignId)
         .success(function (layer) {
-            var json = JSON.stringify(layer, null, 2)
-            var blob = new Blob([json], {
-                type: 'application/json;charset=utf-8;'
-            })
-            var filename = 'olta-navigator-layer.json'
-            if (navigator.msSaveBlob) {
-                navigator.msSaveBlob(blob, filename)
-                return
-            }
-            var blobURL = window.URL.createObjectURL(blob)
-            var dlLink = document.createElement('a')
-            dlLink.href = blobURL
-            dlLink.setAttribute('download', filename)
-            document.body.appendChild(dlLink)
-            dlLink.click()
-            document.body.removeChild(dlLink)
-            window.URL.revokeObjectURL(blobURL)
+            saveBlob(JSON.stringify(layer, null, 2), 'application/json;charset=utf-8;',
+                'olta-navigator-layer.json')
         })
         .error(function () {
             errorFlash(' Could not download the ATT&CK Navigator layer.')
@@ -175,6 +212,7 @@ function loadResilience(campaignId) {
         .success(function (report) {
             report = report || {}
             $("#resilience-panel").html(
+                renderFeaturesScope(report.features_scope) +
                 renderFunnel(report.funnel) +
                 renderFriction(report.friction, report.friction_scope) +
                 renderRace(report.race) +
@@ -182,6 +220,9 @@ function loadResilience(campaignId) {
             )
             $("#resilience-navigator-download").on("click", function () {
                 downloadNavigatorLayer(campaignId)
+            })
+            $("#detection-sigma-download").on("click", function () {
+                downloadSigmaPack(campaignId)
             })
         })
         .error(function () {

@@ -49,6 +49,21 @@ function query(endpoint, method, data, async) {
     })
 }
 
+// queryText is query() for an endpoint that returns something other than
+// JSON. The Sigma bundle is a YAML document, and query()'s dataType: "json"
+// would fail to parse it and report a successful request as an error.
+function queryText(endpoint, method, async) {
+    return $.ajax({
+        url: "/api" + endpoint,
+        async: async,
+        method: method,
+        dataType: "text",
+        beforeSend: function (xhr) {
+            xhr.setRequestHeader('Authorization', 'Bearer ' + user.api_key);
+        }
+    })
+}
+
 function escapeHtml(text) {
     return $("<div/>").text(text).html()
 }
@@ -113,6 +128,10 @@ var api = {
         // resilienceNavigator() - Queries the API for GET /campaigns/:id/resilience/navigator
         resilienceNavigator: function (id) {
             return query("/campaigns/" + id + "/resilience/navigator", "GET", {}, true)
+        },
+        // detectionsSigma() - Queries the API for GET /campaigns/:id/detections/sigma
+        detectionsSigma: function (id) {
+            return queryText("/campaigns/" + id + "/detections/sigma", "GET", true)
         },
         // complete() - Completes a campaign at POST /campaigns/:id/complete
         complete: function (id) {

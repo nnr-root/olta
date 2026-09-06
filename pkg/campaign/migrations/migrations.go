@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-const CurrentVersion = 7
+const CurrentVersion = 8
 
 //go:embed sqlite/001_initial_olta_schema.sql
 var sqliteSchema string
@@ -52,6 +52,12 @@ var sqliteSessionTagging string
 //go:embed mysql/007_session_tagging.sql
 var mysqlSessionTagging string
 
+//go:embed sqlite/008_telemetry_scope.sql
+var sqliteTelemetryScope string
+
+//go:embed mysql/008_telemetry_scope.sql
+var mysqlTelemetryScope string
+
 var requiredSchema = map[string][]string{
 	"users":                      {"id", "username", "hash", "api_key", "api_key_hash", "role_id", "password_change_required", "account_locked", "last_login"},
 	"templates":                  {"id", "user_id", "name", "envelope_sender", "subject", "text", "html", "modified_date"},
@@ -74,7 +80,7 @@ var requiredSchema = map[string][]string{
 	"role_permissions":           {"role_id", "permission_id"},
 	"webhooks":                   {"id", "name", "url", "secret", "is_active"},
 	"imap":                       {"user_id", "host", "port", "username", "password", "modified_date", "tls", "enabled", "folder", "restrict_domain", "delete_reported_campaign_email", "last_login", "imap_freq", "ignore_cert_errors"},
-	"telemetry_events":           {"id", "event_id", "timestamp", "stage", "outcome", "techniques", "campaign_id", "rid", "actor", "detail"},
+	"telemetry_events":           {"id", "event_id", "timestamp", "stage", "outcome", "techniques", "campaign_id", "rid", "actor", "detail", "instance_id", "host"},
 }
 
 // Apply initializes a fresh database from one schema or baselines an existing
@@ -172,6 +178,10 @@ func migrationFor(dialect string, version int) (string, error) {
 		return sqliteSessionTagging, nil
 	case dialect == "mysql" && version == 7:
 		return mysqlSessionTagging, nil
+	case dialect == "sqlite3" && version == 8:
+		return sqliteTelemetryScope, nil
+	case dialect == "mysql" && version == 8:
+		return mysqlTelemetryScope, nil
 	case dialect != "sqlite3" && dialect != "mysql":
 		return "", fmt.Errorf("unsupported database dialect %q", dialect)
 	default:

@@ -40,25 +40,28 @@ func (s *recordingSink) all() []telemetry.Event {
 // to a realistic, distinctly-shaped secret value.
 func representativeConfig() startupTelemetryConfig {
 	return startupTelemetryConfig{
-		Version:                 "1.0.0-Alpha",
-		DeveloperMode:           false,
-		ProxyHeaderTrustEnabled: true,
-		ClientProfile:           "Chrome",
-		RateLimitMax:            30,
-		RateLimitWindow:         time.Minute,
-		CloakerEnabled:          true,
-		CloakerAction:           "block",
-		CloakerBlockStatus:      404,
-		IPSyncEnabled:           true,
-		IPSyncInterval:          12 * time.Hour,
-		JSInspectEnabled:        true,
-		JSInspectEndpoint:       "/_assets/js/v.js",
-		SessionValidatorEnabled: true,
-		FeedEnabled:             true,
-		Turnstile:               "0x4AAAAAAA_publickeyXYZ:0x4AAAAAAA_SECRETprivatekeyDONOTLEAK",
-		WebhookURL:              "https://hooks.slack.com/services/T000/B000/SUPERSECRETBEARERTOKEN123",
-		CampaignDBDriver:        "mysql",
-		CampaignDBTLSCA:         "/opt/olta/certs/mysql-ca.pem",
+		Version:                  "1.0.0-Alpha",
+		DeveloperMode:            false,
+		ProxyHeaderTrustEnabled:  true,
+		ClientProfile:            "Chrome",
+		RateLimitMax:             30,
+		RateLimitWindow:          time.Minute,
+		CloakerEnabled:           true,
+		CloakerAction:            "block",
+		CloakerBlockStatus:       404,
+		IPSyncEnabled:            true,
+		IPSyncInterval:           12 * time.Hour,
+		JSInspectEnabled:         true,
+		JSInspectEndpoint:        "/_assets/js/v.js",
+		SessionValidatorEnabled:  true,
+		FeedEnabled:              true,
+		SecretsEncryptionEnabled: true,
+		SIEMConfigured:           true,
+		SIEMSchema:               "ecs",
+		Turnstile:                "0x4AAAAAAA_publickeyXYZ:0x4AAAAAAA_SECRETprivatekeyDONOTLEAK",
+		WebhookURL:               "https://hooks.slack.com/services/T000/B000/SUPERSECRETBEARERTOKEN123",
+		CampaignDBDriver:         "mysql",
+		CampaignDBTLSCA:          "/opt/olta/certs/mysql-ca.pem",
 	}
 }
 
@@ -97,6 +100,9 @@ func TestBuildStartupEvent_Shape(t *testing.T) {
 		"js_inspect_endpoint":           "/_assets/js/v.js",
 		"session_validator_enabled":     true,
 		"feed_enabled":                  true,
+		"secrets_encryption_enabled":    true,
+		"siem_configured":               true,
+		"siem_schema":                   "ecs",
 		"turnstile_enabled":             true,
 		"webhook_configured":            true,
 		"campaign_db_driver":            "mysql",
@@ -114,6 +120,36 @@ func TestBuildStartupEvent_Shape(t *testing.T) {
 		if got != wantValue {
 			t.Errorf("Detail[%q] = %v (%T), want %v (%T)", key, got, got, wantValue, wantValue)
 		}
+	}
+}
+
+// TestBuildStartupEvent_ReportsEncryptionDisabled pins the honest half of
+// the encryption posture. A missing OLTA_MASTER_KEY is exactly the case an
+// engagement report needs to be able to state, so the detail has to be
+// present and false -- not absent, which would be indistinguishable from an
+// older proxy that never reported it at all.
+func TestBuildStartupEvent_ReportsEncryptionDisabled(t *testing.T) {
+	cfg := representativeConfig()
+	cfg.SecretsEncryptionEnabled = false
+	event := buildStartupEvent(cfg)
+	got, ok := event.Detail["secrets_encryption_enabled"]
+	if !ok {
+		t.Fatal(`Detail["secrets_encryption_enabled"] missing; an unset master key must be reported, not omitted`)
+	}
+	if got != false {
+		t.Errorf(`Detail["secrets_encryption_enabled"] = %v, want false`, got)
+	}
+}
+
+// TestSIEMSchemaForTelemetry pins that a schema is never reported for a sink
+// that does not exist: a report showing "ocsf" for a proxy with no SIEM
+// destination would describe a delivery path that was never configured.
+func TestSIEMSchemaForTelemetry(t *testing.T) {
+	if got := siemSchemaForTelemetry(false, "ocsf"); got != "" {
+		t.Errorf("siemSchemaForTelemetry(false, ...) = %q, want empty", got)
+	}
+	if got := siemSchemaForTelemetry(true, "  OCSF "); got != "ocsf" {
+		t.Errorf("siemSchemaForTelemetry(true, ...) = %q, want the normalized schema", got)
 	}
 }
 
@@ -183,5 +219,47 @@ func TestStartupEvent_EmittedOnce(t *testing.T) {
 	}
 	if events[0].Stage != telemetry.StageInitialization {
 		t.Errorf("Stage = %q, want %q", events[0].Stage, telemetry.StageInitialization)
+	}
+}
+
+func TestParseRecheckSchedule(t *testing.T) {
+	cases := []struct {
+		name  string
+		value string
+		want  []time.Duration
+	}{
+		{"default", "5m,30m,2h,8h,24h", []time.Duration{5 * time.Minute, 30 * time.Minute, 2 * time.Hour, 8 * time.Hour, 24 * time.Hour}},
+		{"single", "1h", []time.Duration{time.Hour}},
+		{"spaces", " 5m , 1h ", []time.Duration{5 * time.Minute, time.Hour}},
+		{"trailing comma", "5m,", []time.Duration{5 * time.Minute}},
+		{"empty disables rechecks", "", nil},
+		{"whitespace disables rechecks", "   ", nil},
+	}
+
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			got, err := parseRecheckSchedule(testCase.value)
+			if err != nil {
+				t.Fatalf("parseRecheckSchedule(%q) returned error: %v", testCase.value, err)
+			}
+			if len(got) != len(testCase.want) {
+				t.Fatalf("parseRecheckSchedule(%q) = %v, want %v", testCase.value, got, testCase.want)
+			}
+			for i := range got {
+				if got[i] != testCase.want[i] {
+					t.Errorf("delay %d = %v, want %v", i, got[i], testCase.want[i])
+				}
+			}
+		})
+	}
+}
+
+// TestParseRecheckScheduleRejectsBadValues keeps a typo from silently
+// disabling the measurement instead of failing at startup.
+func TestParseRecheckScheduleRejectsBadValues(t *testing.T) {
+	for _, value := range []string{"5", "5minutes", "0s", "-1h", "5m,nonsense"} {
+		if _, err := parseRecheckSchedule(value); err == nil {
+			t.Errorf("parseRecheckSchedule(%q) accepted an invalid schedule", value)
+		}
 	}
 }

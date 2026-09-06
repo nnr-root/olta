@@ -5,6 +5,7 @@ package resilience
 import (
 	"encoding/json"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/jinzhu/gorm"
@@ -20,6 +21,36 @@ type Features struct {
 	Verify           bool `json:"verify"`
 	SessionValidator bool `json:"session_validator"`
 }
+
+// FeaturesSource records where a report's Features actually came from. The
+// distinction is load-bearing, not cosmetic: Features drives the
+// measured/unmeasured split, which is the single claim this report is most
+// careful about, and a hand-maintained configuration value can silently
+// disagree with how the proxy was really launched.
+type FeaturesSource string
+
+const (
+	// FeaturesSourceProxy means the posture was read from the proxy's own
+	// StageInitialization telemetry -- what the process was actually
+	// launched with, not what someone wrote in a config file.
+	FeaturesSourceProxy FeaturesSource = "proxy"
+
+	// FeaturesSourceConfiguration means no initialization event covering
+	// this campaign was found, so the caller's configured values were used.
+	// That happens with a proxy predating startup telemetry, or one whose
+	// events never reached this database.
+	FeaturesSourceConfiguration FeaturesSource = "configuration"
+)
+
+// Detail keys on a StageInitialization event that carry the proxy's
+// measurement posture. They are written by cmd/olta-proxy's
+// buildStartupEvent; changing either side without the other silently
+// returns the report to trusting configuration.
+const (
+	detailKeyCloakerEnabled          = "cloaker_enabled"
+	detailKeyJSInspectEnabled        = "js_inspect_enabled"
+	detailKeySessionValidatorEnabled = "session_validator_enabled"
+)
 
 // FunnelStage is one step of the kill chain.
 type FunnelStage struct {
@@ -104,6 +135,14 @@ type PasskeyDefense struct {
 	// sharing an IP (e.g. behind the same NAT) would count as one.
 	PushedToWeakerFactor int `json:"pushed_to_weaker_factor"`
 
+	// CorrelationMethod says how PushedToWeakerFactor's join was actually
+	// performed for this campaign, which decides how much the number can be
+	// trusted. CorrelationRecipient is exact. CorrelationIP is the older
+	// approximation that conflates clients sharing an egress IP.
+	// CorrelationMixed means both were needed, so the count is exact for
+	// some clients and approximate for others.
+	CorrelationMethod CorrelationMethod `json:"correlation_method,omitempty"`
+
 	// CorrelationReliable is false when this campaign's own row set shows
 	// the IP-based join above actually colliding: two or more distinct
 	// RIDs attributed to events sharing one client IP address. That is
@@ -131,6 +170,81 @@ type PasskeyDefense struct {
 	Scope string `json:"scope"`
 }
 
+// CorrelationMethod names how PasskeyDefense linked a client's pre-lure
+// passkey observation to its post-lure credential or capture activity.
+type CorrelationMethod string
+
+const (
+	// CorrelationRecipient means every observation named a recipient, so the
+	// join is exact and no two people can be conflated.
+	CorrelationRecipient CorrelationMethod = "recipient"
+	// CorrelationIP means no observation named a recipient and the join fell
+	// back to client IP address, which counts clients sharing an egress IP
+	// as one.
+	CorrelationIP CorrelationMethod = "ip"
+	// CorrelationMixed means both were used: some clients joined exactly,
+	// others by IP.
+	CorrelationMixed CorrelationMethod = "mixed"
+)
+
+// TokenLifetime measures how long captured session tokens stayed usable, from
+// the repeated replay attempts the session validator makes against each
+// captured session.
+//
+// This is the number a defender acts on: it is the window during which a
+// stolen session was live, and the only direct evidence of whether revocation
+// actually happened rather than being assumed. It is also the one measure here
+// that is inherently incomplete, so its shape follows the incompleteness
+// rather than hiding it:
+//
+//   - Sessions still valid at their last check are *censored* observations:
+//     the token outlived the measurement, so its true lifetime is unknown and
+//     only a lower bound is available. They are counted separately and
+//     excluded from the median, which would otherwise be dragged down by
+//     every session that simply had not been watched long enough.
+//   - MedianTimeToRevocationSeconds is computed only over sessions actually
+//     observed being refused. It answers "when revocation happened, how long
+//     did it take", not "how long do tokens last".
+//   - BlockedOnFirstAttempt is the strongest single signal in here: the
+//     validator replays from the proxy's own network, not the victim's, so a
+//     session refused on the very first attempt is direct evidence that the
+//     target's controls -- conditional access, impossible-travel, device
+//     binding -- rejected a stolen session outright.
+type TokenLifetime struct {
+	Measured bool `json:"measured"`
+
+	// Sessions is the denominator: distinct captured sessions with at least
+	// one replay attempt. It is not the campaign's capture count, since a
+	// session with no usable cookie domain is never queued for validation.
+	Sessions int `json:"sessions"`
+
+	// StillValidAtLastCheck counts sessions whose most recent attempt still
+	// succeeded -- censored observations, whose true lifetime is unknown.
+	StillValidAtLastCheck int `json:"still_valid_at_last_check"`
+
+	// Revoked counts sessions observed being refused after having worked.
+	Revoked int `json:"revoked"`
+
+	// BlockedOnFirstAttempt counts sessions refused on the very first
+	// replay, before any recheck. These never worked for the attacker at
+	// all.
+	BlockedOnFirstAttempt int `json:"blocked_on_first_attempt"`
+
+	// LongestObservedValidSeconds is the largest age at which any session
+	// was still accepted. It is a lower bound on the worst case, never the
+	// worst case itself.
+	LongestObservedValidSeconds int64 `json:"longest_observed_valid_seconds"`
+
+	// MedianTimeToRevocationSeconds covers only the Revoked population. As
+	// elsewhere in this package, the separate boolean distinguishes "no
+	// session was observed being revoked" from a genuine zero.
+	MedianTimeToRevocationSeconds int64 `json:"median_time_to_revocation_seconds"`
+	HasMedianTimeToRevocation     bool  `json:"has_median_time_to_revocation"`
+
+	// Scope is the caveat that must travel with every count above.
+	Scope string `json:"scope,omitempty"`
+}
+
 // RaceSummary answers whether the human layer beat the attacker.
 type RaceSummary struct {
 	// Delivered is the denominator: every RID with a delivery event. The
@@ -146,29 +260,54 @@ type RaceSummary struct {
 	HasMedianTimeToReport bool `json:"has_median_time_to_report"`
 }
 
-// Window bounds the unattributed (campaign_id = 0) cloak and verify events
-// folded into a campaign's report. Attributed rows need no bound: they are
-// already scoped by campaign_id. Cloak/verify events fire before lure
-// validation establishes a recipient, so they can never be attributed to a
-// campaign directly -- the window is the only correlation available, and it
-// is an approximation, not a guarantee: two campaigns running concurrently
-// on the same proxy install can still share a window.
-type Window struct {
+// Scope bounds the unattributed (campaign_id = 0) cloak, verify and webauthn
+// events folded into a campaign's report. Attributed rows need no bound:
+// they are already scoped by campaign_id. Those three stages fire before
+// lure validation establishes a recipient, so they can never carry one.
+//
+// Two dimensions bound them, and the difference between having one and
+// having both is the difference between an approximation and a fact:
+//
+//   - Start/End is the campaign's active period. On its own it is only an
+//     approximation, because two campaigns running concurrently on one
+//     install share a window and therefore share each other's unattributed
+//     traffic.
+//
+//   - Hosts is the campaign's own phishing hostname(s). Events carry the
+//     hostname they were serving (see telemetry.Event.Host), so campaigns
+//     on different hostnames no longer contaminate each other regardless of
+//     overlap in time. Campaigns sharing one hostname fall back to the
+//     window alone, which is honest: nothing in the data distinguishes them.
+//
+// Hosts may be empty, in which case only the window applies and the report
+// says so. Entries must be normalized with telemetry.NormalizeHost.
+type Scope struct {
 	Start time.Time
 	End   time.Time
+	Hosts []string
 }
 
 // Report is the full per-campaign resilience view.
 type Report struct {
-	CampaignID int64           `json:"campaign_id"`
-	Features   Features        `json:"features"`
-	Funnel     []FunnelStage   `json:"funnel"`
-	Friction   []FrictionEntry `json:"friction"`
-	Race       RaceSummary     `json:"race"`
+	CampaignID int64    `json:"campaign_id"`
+	Features   Features `json:"features"`
+	// FeaturesSource says whether Features was read from the proxy's own
+	// startup telemetry or fell back to the caller's configuration, and
+	// FeaturesScope is the caveat to render when it fell back. A reader
+	// deciding what "not measured" means for this campaign needs to know
+	// which of the two they are looking at.
+	FeaturesSource FeaturesSource  `json:"features_source"`
+	FeaturesScope  string          `json:"features_scope,omitempty"`
+	Funnel         []FunnelStage   `json:"funnel"`
+	Friction       []FrictionEntry `json:"friction"`
+	Race           RaceSummary     `json:"race"`
 	// Passkey is the passkey/WebAuthn defense measure -- see PasskeyDefense's
 	// doc comment for the denominator and "not measured" rules that govern
 	// how a consumer must render it.
 	Passkey PasskeyDefense `json:"passkey"`
+	// Tokens measures how long captured sessions stayed usable. See
+	// TokenLifetime for the censoring rules a consumer must respect.
+	Tokens TokenLifetime `json:"tokens"`
 	// UnattributedScoped is true when the unattributed cloak/verify events
 	// folded into Funnel and Friction were bounded to the campaign window.
 	// FrictionScope is the human-readable caveat the dashboard must render
@@ -176,13 +315,37 @@ type Report struct {
 	// traffic to the campaign's active period, but it cannot prove the
 	// traffic came from this campaign rather than another one running on
 	// the same install at the same time.
-	UnattributedScoped bool   `json:"unattributed_scoped"`
-	FrictionScope      string `json:"friction_scope"`
+	UnattributedScoped bool `json:"unattributed_scoped"`
+	// UnattributedHostScoped is true when those events were additionally
+	// narrowed to the campaign's own phishing hostnames, which turns the
+	// time-window approximation into an actual separation between campaigns
+	// running concurrently on one install.
+	UnattributedHostScoped bool   `json:"unattributed_host_scoped"`
+	FrictionScope          string `json:"friction_scope"`
 }
+
+// featuresScopeCaption travels with a report whose posture could not be read
+// from the proxy. It names the failure mode plainly rather than implying the
+// measured/unmeasured split is authoritative.
+const featuresScopeCaption = "No proxy startup record was found for this campaign's time range, " +
+	"so measured/not-measured below reflects the campaign service's configured telemetry settings " +
+	"rather than the flags olta-proxy was actually launched with. If the two disagree, this report " +
+	"does too."
 
 const frictionScopeCaption = "Cloak and verify counts include unattributed proxy traffic " +
 	"(no recipient was resolved yet) recorded during this campaign's time window. " +
 	"They may include traffic from other campaigns running concurrently on the same install."
+
+// frictionScopeHostCaption replaces the caption above once the unattributed
+// events have also been narrowed to the campaign's own hostnames. The claim
+// is genuinely stronger, so the caveat is genuinely smaller -- but it is not
+// absent: events recorded before hostnames were stamped carry none and are
+// still admitted on the time window alone.
+const frictionScopeHostCaption = "Cloak and verify counts include unattributed proxy traffic " +
+	"(no recipient was resolved yet) served on this campaign's own phishing hostnames during its " +
+	"time window, so traffic for campaigns running on other hostnames is excluded. Events recorded " +
+	"before hostnames were captured carry none and are still included on the time window alone; " +
+	"campaigns sharing a hostname cannot be separated at all."
 
 // passkeyScopeCaption is PasskeyDefense.Scope's default text: it holds
 // regardless of whether this campaign's data happens to show a correlation
@@ -193,6 +356,31 @@ const passkeyScopeCaption = "These counts only cover clients whose browser ran t
 	"client's pre-lure passkey check to its post-lure credential or session-capture activity by " +
 	"client IP address, so clients sharing an egress IP (for example, employees behind the same " +
 	"corporate NAT) may be counted as a single client."
+
+// passkeyScopeExactCaption replaces passkeyScopeCaption when every passkey
+// observation named a recipient. The denominator caveat still holds -- these
+// counts only cover clients whose browser ran the script -- but the
+// shared-IP conflation warning does not apply at all, and repeating it would
+// understate a number that is actually exact.
+const passkeyScopeExactCaption = "These counts only cover clients whose browser ran the injected " +
+	"verification script -- not every target in the campaign. Each client's pre-lure passkey check " +
+	"is linked to its own post-lure credential or session-capture activity by recipient ID, so " +
+	"clients sharing an egress IP are not conflated."
+
+// passkeyScopeMixedCaption covers a campaign where some observations named a
+// recipient and some did not, which is what an upgrade mid-engagement, or a
+// target who reached the proxy without a valid lure, produces.
+const passkeyScopeMixedCaption = "These counts only cover clients whose browser ran the injected " +
+	"verification script -- not every target in the campaign. Some clients were linked to their own " +
+	"later activity by recipient ID, which is exact; the rest were linked by client IP address, so " +
+	"those may count clients sharing an egress IP (for example, employees behind the same corporate " +
+	"NAT) as a single client."
+
+// passkeyScopeUnreliableSuffix is appended to the mixed caption when the
+// campaign's own rows show the IP-based half actually colliding.
+const passkeyScopeUnreliableSuffix = "This campaign's own data shows that collision happening: more " +
+	"than one target was observed behind the same IP address, so treat pushed-to-weaker-factor as an " +
+	"upper bound on distinct people affected, not an exact count."
 
 // passkeyScopeUnreliableCaption is used in place of passkeyScopeCaption when
 // CorrelationReliable is false: the campaign's own data shows the IP-based
@@ -237,6 +425,10 @@ type eventRow struct {
 	// primary key, and the row set here is already bounded to one
 	// campaign's window.
 	Detail string
+	// Host is selected so the scoping decision is visible in the row set
+	// itself, and so a future consumer can group by hostname without
+	// another query.
+	Host string
 }
 
 // Compute builds the report for one campaign.
@@ -248,19 +440,44 @@ type eventRow struct {
 // a pure query layer over telemetry_events: it does not query the
 // campaigns table itself. Every other stage is already campaign-scoped and
 // left unbounded by time.
-func Compute(db *gorm.DB, campaignID int64, window Window, enabled Features) (Report, error) {
+func Compute(db *gorm.DB, campaignID int64, scope Scope, configured Features) (Report, error) {
+	enabled, source, err := resolveFeatures(db, scope, configured)
+	if err != nil {
+		return Report{}, err
+	}
+
 	report := Report{
-		CampaignID:         campaignID,
-		Features:           enabled,
-		UnattributedScoped: true,
-		FrictionScope:      frictionScopeCaption,
+		CampaignID:             campaignID,
+		Features:               enabled,
+		FeaturesSource:         source,
+		UnattributedScoped:     true,
+		UnattributedHostScoped: len(scope.Hosts) > 0,
+		FrictionScope:          frictionScopeCaption,
+	}
+	if len(scope.Hosts) > 0 {
+		report.FrictionScope = frictionScopeHostCaption
+	}
+	if source == FeaturesSourceConfiguration {
+		report.FeaturesScope = featuresScopeCaption
 	}
 
 	var rows []eventRow
 	query := db.Table("telemetry_events").
-		Select("stage, outcome, rid, timestamp, actor, campaign_id, detail").
-		Where("campaign_id = ? OR (campaign_id = 0 AND timestamp >= ? AND timestamp <= ?)",
-			campaignID, window.Start, window.End)
+		Select("stage, outcome, rid, timestamp, actor, campaign_id, detail, host")
+	if len(scope.Hosts) == 0 {
+		query = query.Where("campaign_id = ? OR (campaign_id = 0 AND timestamp >= ? AND timestamp <= ?)",
+			campaignID, scope.Start, scope.End)
+	} else {
+		// An unattributed row is this campaign's when it was served on one
+		// of the campaign's own hostnames. Rows with no hostname are kept
+		// rather than dropped: every event recorded before host stamping
+		// existed has a null host, and excluding them would silently erase
+		// the history of any campaign that ran before the upgrade. The
+		// caption says as much.
+		query = query.Where(
+			"campaign_id = ? OR (campaign_id = 0 AND timestamp >= ? AND timestamp <= ? AND (host IN (?) OR host IS NULL OR host = ''))",
+			campaignID, scope.Start, scope.End, scope.Hosts)
+	}
 	if err := query.Scan(&rows).Error; err != nil {
 		return Report{}, err
 	}
@@ -269,7 +486,74 @@ func Compute(db *gorm.DB, campaignID int64, window Window, enabled Features) (Re
 	report.Friction = buildFriction(rows)
 	report.Race = buildRace(rows)
 	report.Passkey = buildPasskeyDefense(rows, enabled)
+	report.Tokens = buildTokenLifetime(rows, enabled)
 	return report, nil
+}
+
+// resolveFeatures determines the measurement posture actually in effect for
+// a campaign, preferring the proxy's own StageInitialization telemetry over
+// the caller's configuration.
+//
+// Why this exists: Features drives the measured/unmeasured split, and the
+// caller's value comes from a "telemetry" block in the campaign service's
+// config.json that an operator has to keep in step, by hand, with the flags
+// olta-proxy was launched with. When those disagree the report does not
+// merely lose detail -- it makes a false claim, reporting "not measured" for
+// a control that ran, or "measured, saw nothing" for one that was never on.
+// That is exactly the distinction this package exists to protect. The proxy
+// already records what it really started with (cmd/olta-proxy's
+// buildStartupEvent), so the report reads that instead.
+//
+// Which events count: a long-running proxy emits its initialization event
+// once at startup, typically long before any given campaign launches, so
+// bounding this to the campaign window alone would almost always find
+// nothing. Instead it takes the last initialization event *before* the
+// window -- the posture in effect when the campaign launched -- together
+// with every initialization event *inside* the window, which is how a
+// restart mid-campaign shows up.
+//
+// How several events combine: by OR, never by last-one-wins. If any proxy
+// serving during the window had the cloaker on, cloak events for that proxy
+// can exist in the row set, and reporting them as unmeasured would hide real
+// data. This mirrors the rule buildFunnel already applies, which upgrades a
+// stage to measured on proof and never downgrades it.
+//
+// Falling back is not a failure: a proxy predating startup telemetry, or one
+// whose events never reached this database, leaves nothing to read and the
+// configured values are used, with the source recorded so the reader knows.
+func resolveFeatures(db *gorm.DB, scope Scope, configured Features) (Features, FeaturesSource, error) {
+	var priorRows []eventRow
+	prior := db.Table("telemetry_events").
+		Select("stage, detail, timestamp").
+		Where("stage = ? AND timestamp < ?", string(telemetry.StageInitialization), scope.Start).
+		Order("timestamp desc").
+		Limit(1)
+	if err := prior.Scan(&priorRows).Error; err != nil {
+		return Features{}, "", err
+	}
+
+	var windowRows []eventRow
+	within := db.Table("telemetry_events").
+		Select("stage, detail, timestamp").
+		Where("stage = ? AND timestamp >= ? AND timestamp <= ?",
+			string(telemetry.StageInitialization), scope.Start, scope.End)
+	if err := within.Scan(&windowRows).Error; err != nil {
+		return Features{}, "", err
+	}
+
+	rows := append(priorRows, windowRows...)
+	if len(rows) == 0 {
+		return configured, FeaturesSourceConfiguration, nil
+	}
+
+	var observed Features
+	for _, row := range rows {
+		detail := parseDetail(row.Detail)
+		observed.Cloaker = observed.Cloaker || detailBool(detail, detailKeyCloakerEnabled)
+		observed.Verify = observed.Verify || detailBool(detail, detailKeyJSInspectEnabled)
+		observed.SessionValidator = observed.SessionValidator || detailBool(detail, detailKeySessionValidatorEnabled)
+	}
+	return observed, FeaturesSourceProxy, nil
 }
 
 // measured decides a stage's configured measured-state from Features alone.
@@ -517,22 +801,32 @@ func buildPasskeyDefense(rows []eventRow, enabled Features) PasskeyDefense {
 	}
 	defense.RanScriptTargets = len(byClient)
 
-	// reachedWeakerFactor keys by the same client identity as byClient
-	// (IP-first, see passkeyClientKey) so a client observed with passkey
-	// capability can be linked to a later credential/capture event even
-	// though StageWebAuthn fires before lure validation assigns an RID.
+	// reachedWeakerFactor keys by the same client identities passkeyClientKey
+	// produces, so a client observed with passkey capability links to its own
+	// later credential/capture event. Each row contributes both keys it can:
+	// a recipient-keyed webauthn client matches on the recipient, and a
+	// legacy IP-keyed one still matches on the IP.
 	reachedWeakerFactor := make(map[string]bool)
 	for _, row := range rows {
 		stage := telemetry.Stage(row.Stage)
 		if stage != telemetry.StageCredential && stage != telemetry.StageCapture {
 			continue
 		}
+		if row.RID != "" {
+			reachedWeakerFactor["rid:"+row.RID] = true
+		}
 		if ip := actorIP(row.Actor); ip != "" {
 			reachedWeakerFactor["ip:"+ip] = true
 		}
 	}
 
+	recipientKeyed, ipKeyed := 0, 0
 	for key, c := range byClient {
+		if strings.HasPrefix(key, "rid:") {
+			recipientKeyed++
+		} else {
+			ipKeyed++
+		}
 		if c.platformAvailable {
 			defense.PlatformAuthenticatorAvailable++
 		}
@@ -544,13 +838,153 @@ func buildPasskeyDefense(rows []eventRow, enabled Features) PasskeyDefense {
 		}
 	}
 
-	defense.CorrelationReliable = correlationReliable(rows)
-	if defense.CorrelationReliable {
+	// How the correlation was actually done decides both the method reported
+	// and how much of a caveat the counts need. Recipient-keyed clients are
+	// joined exactly and carry no conflation risk at all; IP-keyed ones are
+	// the old approximation and still do.
+	switch {
+	case ipKeyed == 0 && recipientKeyed > 0:
+		defense.CorrelationMethod = CorrelationRecipient
+		defense.CorrelationReliable = true
+		defense.Scope = passkeyScopeExactCaption
+	case recipientKeyed == 0:
+		defense.CorrelationMethod = CorrelationIP
+		defense.CorrelationReliable = correlationReliable(rows)
 		defense.Scope = passkeyScopeCaption
-	} else {
-		defense.Scope = passkeyScopeUnreliableCaption
+		if !defense.CorrelationReliable {
+			defense.Scope = passkeyScopeUnreliableCaption
+		}
+	default:
+		defense.CorrelationMethod = CorrelationMixed
+		defense.CorrelationReliable = correlationReliable(rows)
+		defense.Scope = passkeyScopeMixedCaption
+		if !defense.CorrelationReliable {
+			defense.Scope = passkeyScopeMixedCaption + " " + passkeyScopeUnreliableSuffix
+		}
 	}
 	return defense
+}
+
+const tokenLifetimeScopeCaption = "Token lifetime is measured by replaying each captured session " +
+	"from the proxy's own network. Sessions still valid at their last check had not been observed " +
+	"expiring, so their true lifetime is longer than shown and they are excluded from the median " +
+	"time to revocation, which covers only sessions actually seen being refused. A proxy restarted " +
+	"mid-engagement loses pending rechecks, which truncates a session's observed lifetime rather " +
+	"than extending it."
+
+// buildTokenLifetime folds the replay attempts for each captured session into
+// one observation per session. Attempts are grouped by the session_reference
+// detail -- a truncated digest of the session ID (see
+// validation.baseResult), never the session ID itself -- because a replay
+// event carries no RID: the validator works from the captured session, which
+// the proxy holds independently of any recipient.
+func buildTokenLifetime(rows []eventRow, enabled Features) TokenLifetime {
+	type observation struct {
+		lastValidAge   int64
+		firstBlockedAt int64
+		sawValid       bool
+		sawBlocked     bool
+		blockedFirst   bool
+	}
+	bySession := make(map[string]*observation)
+
+	for _, row := range rows {
+		if telemetry.Stage(row.Stage) != telemetry.StageReplay {
+			continue
+		}
+		detail := parseDetail(row.Detail)
+		reference := detailString(detail, "session_reference")
+		if reference == "" {
+			continue
+		}
+		obs := bySession[reference]
+		if obs == nil {
+			obs = &observation{}
+			bySession[reference] = obs
+		}
+		age := detailInt(detail, "age_seconds")
+		attempt := detailInt(detail, "attempt")
+
+		switch telemetry.Outcome(row.Outcome) {
+		case telemetry.OutcomeAllowed:
+			obs.sawValid = true
+			if age > obs.lastValidAge {
+				obs.lastValidAge = age
+			}
+		case telemetry.OutcomeBlocked:
+			// The first refusal is the one that dates the revocation; a
+			// later attempt cannot happen anyway, since the schedule stops
+			// there.
+			if !obs.sawBlocked || age < obs.firstBlockedAt {
+				obs.firstBlockedAt = age
+			}
+			obs.sawBlocked = true
+			// attempt is 1-based, and defaults to 0 for an event emitted
+			// before it existed -- which was always a single first attempt.
+			if attempt <= 1 {
+				obs.blockedFirst = true
+			}
+		}
+	}
+
+	// Self-correction, exactly like the funnel's optional stages: a stale
+	// configured false is corrected by rows that prove the validator ran, and
+	// a configured true is never downgraded by their absence.
+	measured := enabled.SessionValidator
+	if !measured && len(bySession) > 0 {
+		measured = true
+	}
+
+	lifetime := TokenLifetime{Measured: measured}
+	if !measured {
+		return lifetime
+	}
+
+	lifetime.Sessions = len(bySession)
+	revocations := make([]int64, 0, len(bySession))
+	for _, obs := range bySession {
+		switch {
+		case obs.sawBlocked && obs.blockedFirst && !obs.sawValid:
+			lifetime.BlockedOnFirstAttempt++
+		case obs.sawBlocked:
+			lifetime.Revoked++
+			revocations = append(revocations, obs.firstBlockedAt)
+		case obs.sawValid:
+			lifetime.StillValidAtLastCheck++
+		}
+		if obs.sawValid && obs.lastValidAge > lifetime.LongestObservedValidSeconds {
+			lifetime.LongestObservedValidSeconds = obs.lastValidAge
+		}
+	}
+	lifetime.MedianTimeToRevocationSeconds = median(revocations)
+	lifetime.HasMedianTimeToRevocation = len(revocations) > 0
+	if lifetime.Sessions > 0 {
+		lifetime.Scope = tokenLifetimeScopeCaption
+	}
+	return lifetime
+}
+
+// detailString reads a string detail field, defaulting to "" for a missing
+// key or a non-string value.
+func detailString(detail map[string]any, key string) string {
+	value, _ := detail[key].(string)
+	return value
+}
+
+// detailInt reads a numeric detail field. Details round-trip through JSON, so
+// every number arrives as a float64 regardless of the Go type that was
+// stored.
+func detailInt(detail map[string]any, key string) int64 {
+	switch value := detail[key].(type) {
+	case float64:
+		return int64(value)
+	case int64:
+		return value
+	case int:
+		return int64(value)
+	default:
+		return 0
+	}
 }
 
 // correlationReliable checks the same row set buildPasskeyDefense already
@@ -587,10 +1021,22 @@ func correlationReliable(rows []eventRow) bool {
 }
 
 // passkeyClientKey identifies the client a StageWebAuthn row belongs to.
-// It prefers actor IP specifically (rather than actorIdentity's RID-first
-// key) because IP is the only signal shared with the later, RID-attributed
-// credential/capture events buildPasskeyDefense correlates against.
+//
+// A recipient ID is preferred when the row carries one: jsinspect now hands
+// the injected script the session's recipient ID and the script reports it
+// back, so the observation names an actual target. That is an exact
+// identity, and it is what removes the shared-egress-IP conflation the
+// IP-based fallback below suffers from.
+//
+// Falling back to the actor IP covers rows produced before that existed, and
+// rows for a page that carried no session at all -- a target who reached the
+// proxy without a valid lure. Those keep the old, approximate behavior, and
+// the report says which of the two it used through
+// PasskeyDefense.CorrelationMethod.
 func passkeyClientKey(row eventRow) string {
+	if row.RID != "" {
+		return "rid:" + row.RID
+	}
 	if ip := actorIP(row.Actor); ip != "" {
 		return "ip:" + ip
 	}

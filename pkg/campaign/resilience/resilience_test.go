@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -54,8 +55,8 @@ func allFeatures() Features {
 
 // wideWindow returns a window comfortably covering base +/- a day, for
 // tests that seed unattributed events and don't care about window edges.
-func wideWindow(base time.Time) Window {
-	return Window{Start: base.Add(-24 * time.Hour), End: base.Add(24 * time.Hour)}
+func wideWindow(base time.Time) Scope {
+	return Scope{Start: base.Add(-24 * time.Hour), End: base.Add(24 * time.Hour)}
 }
 
 func TestFunnelCountsDistinctTargetsPerStage(t *testing.T) {
@@ -94,7 +95,7 @@ func TestFunnelCountsDistinctTargetsPerStage(t *testing.T) {
 func TestDisabledStageIsNotMeasuredRatherThanZero(t *testing.T) {
 	db := newDB(t)
 	now := time.Now()
-	window := Window{Start: now.Add(-time.Hour), End: now.Add(time.Hour)}
+	window := Scope{Start: now.Add(-time.Hour), End: now.Add(time.Hour)}
 	report, err := Compute(db, 1, window, Features{Cloaker: false, Verify: true, SessionValidator: true})
 	if err != nil {
 		t.Fatal(err)
@@ -198,7 +199,7 @@ func TestRaceClassifiesAllThreeOutcomes(t *testing.T) {
 func TestUnattributedEventsScopedToCampaignWindow(t *testing.T) {
 	db := newDB(t)
 	base := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
-	window := Window{Start: base, End: base.Add(time.Hour)}
+	window := Scope{Start: base, End: base.Add(time.Hour)}
 
 	// Campaign 1's own attributed delivery, inside the window.
 	seed(t, db, base, time.Minute, telemetry.StageDelivery, telemetry.OutcomeAllowed, "c1-target")
@@ -791,5 +792,626 @@ func TestPasskeyDefenseCorrelationReliableWithOneRIDPerIP(t *testing.T) {
 	}
 	if report.Passkey.Scope != passkeyScopeCaption {
 		t.Fatalf("Passkey.Scope = %q, want the plain (non-collision) caption", report.Passkey.Scope)
+	}
+}
+
+// seedStartup writes one StageInitialization event with the measurement
+// posture cmd/olta-proxy's buildStartupEvent records, at a fixed offset from
+// base.
+func seedStartup(t *testing.T, db *gorm.DB, base time.Time, offset time.Duration,
+	cloaker, jsInspect, sessionValidator bool) {
+	t.Helper()
+	event := telemetry.New(telemetry.StageInitialization, telemetry.OutcomeAllowed).
+		WithDetail("version", "1.0.0-Alpha").
+		WithDetail(detailKeyCloakerEnabled, cloaker).
+		WithDetail(detailKeyJSInspectEnabled, jsInspect).
+		WithDetail(detailKeySessionValidatorEnabled, sessionValidator)
+	event.Timestamp = base.Add(offset)
+	if err := campaigndb.New(db).Emit(nil, event); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestFeaturesFallBackToConfigurationWithNoStartupEvent covers the
+// compatibility path: a proxy predating startup telemetry, or one whose
+// events never reached this database, leaves nothing to read.
+func TestFeaturesFallBackToConfigurationWithNoStartupEvent(t *testing.T) {
+	db := newDB(t)
+	base := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+	seed(t, db, base, time.Minute, telemetry.StageDelivery, telemetry.OutcomeAllowed, "target-1")
+
+	report, err := Compute(db, 1, wideWindow(base), allFeatures())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if report.FeaturesSource != FeaturesSourceConfiguration {
+		t.Errorf("FeaturesSource = %q, want %q", report.FeaturesSource, FeaturesSourceConfiguration)
+	}
+	if report.Features != allFeatures() {
+		t.Errorf("Features = %+v, want the configured values %+v", report.Features, allFeatures())
+	}
+	if report.FeaturesScope == "" {
+		t.Error("FeaturesScope is empty; a report that fell back to configuration must say so")
+	}
+}
+
+// TestFeaturesReadFromStartupEventInsideWindow covers a proxy started during
+// the campaign, e.g. one brought up for the engagement.
+func TestFeaturesReadFromStartupEventInsideWindow(t *testing.T) {
+	db := newDB(t)
+	base := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+	seedStartup(t, db, base, 30*time.Second, true, false, true)
+
+	report, err := Compute(db, 1, wideWindow(base), Features{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if report.FeaturesSource != FeaturesSourceProxy {
+		t.Fatalf("FeaturesSource = %q, want %q", report.FeaturesSource, FeaturesSourceProxy)
+	}
+	want := Features{Cloaker: true, Verify: false, SessionValidator: true}
+	if report.Features != want {
+		t.Errorf("Features = %+v, want %+v (read from the proxy, not the empty configuration)", report.Features, want)
+	}
+	if report.FeaturesScope != "" {
+		t.Errorf("FeaturesScope = %q, want empty when the posture came from the proxy", report.FeaturesScope)
+	}
+}
+
+// TestFeaturesReadFromStartupEventBeforeWindow is the ordinary production
+// case and the reason this lookup is not bounded by the window on both
+// sides: a long-running proxy emits its startup event once, typically long
+// before any given campaign launches.
+func TestFeaturesReadFromStartupEventBeforeWindow(t *testing.T) {
+	db := newDB(t)
+	base := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+	window := Scope{Start: base, End: base.Add(2 * time.Hour)}
+
+	// Proxy started a week before this campaign launched.
+	seedStartup(t, db, base, -7*24*time.Hour, true, true, false)
+
+	report, err := Compute(db, 1, window, Features{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if report.FeaturesSource != FeaturesSourceProxy {
+		t.Fatalf("FeaturesSource = %q, want %q: a proxy that started before the campaign still describes it",
+			report.FeaturesSource, FeaturesSourceProxy)
+	}
+	want := Features{Cloaker: true, Verify: true, SessionValidator: false}
+	if report.Features != want {
+		t.Errorf("Features = %+v, want %+v", report.Features, want)
+	}
+}
+
+// TestFeaturesIgnoreStartupEventAfterWindow pins the other edge: a proxy
+// restarted after the campaign finished says nothing about how the campaign
+// was measured, so it must not be read.
+func TestFeaturesIgnoreStartupEventAfterWindow(t *testing.T) {
+	db := newDB(t)
+	base := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+	window := Scope{Start: base, End: base.Add(time.Hour)}
+
+	seedStartup(t, db, base, 2*time.Hour, true, true, true)
+
+	report, err := Compute(db, 1, window, Features{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if report.FeaturesSource != FeaturesSourceConfiguration {
+		t.Errorf("FeaturesSource = %q, want %q: an event after the window must be ignored",
+			report.FeaturesSource, FeaturesSourceConfiguration)
+	}
+	if report.Features != (Features{}) {
+		t.Errorf("Features = %+v, want the configured (empty) values", report.Features)
+	}
+}
+
+// TestFeaturesCombineAcrossRestarts covers a restart mid-campaign that turned
+// a control on. The combination is by OR and never last-one-wins: events from
+// the second proxy exist in the row set, and reporting the stage unmeasured
+// would hide real data. This mirrors buildFunnel's own upgrade-on-proof rule.
+func TestFeaturesCombineAcrossRestarts(t *testing.T) {
+	db := newDB(t)
+	base := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+	window := Scope{Start: base, End: base.Add(4 * time.Hour)}
+
+	seedStartup(t, db, base, -time.Hour, false, true, false) // before launch
+	seedStartup(t, db, base, time.Hour, true, false, false)  // restarted with the cloaker on
+	seedStartup(t, db, base, 2*time.Hour, false, false, true)
+
+	report, err := Compute(db, 1, window, Features{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := Features{Cloaker: true, Verify: true, SessionValidator: true}
+	if report.Features != want {
+		t.Errorf("Features = %+v, want %+v (the union across every proxy serving the window)", report.Features, want)
+	}
+}
+
+// TestProxyPostureOverridesStaleConfiguration is the point of the whole
+// change. The campaign service is configured as though the cloaker were on;
+// the proxy says it was not. The report must follow the proxy and render the
+// cloak stage as not measured, rather than reporting "measured, blocked
+// nobody" for a control that was never running.
+func TestProxyPostureOverridesStaleConfiguration(t *testing.T) {
+	db := newDB(t)
+	base := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+	window := wideWindow(base)
+
+	seedStartup(t, db, base, -time.Minute, false, false, false)
+	seed(t, db, base, time.Minute, telemetry.StageDelivery, telemetry.OutcomeAllowed, "target-1")
+
+	report, err := Compute(db, 1, window, allFeatures())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if report.Features.Cloaker {
+		t.Error("Features.Cloaker = true, want false: the proxy reported the cloaker off")
+	}
+	if got := funnelStage(t, report, telemetry.StageCloak); got.Measured {
+		t.Error("cloak stage reported measured; a control that never ran must read as not measured, not as zero")
+	}
+}
+
+// TestStaleConfigurationDoesNotSuppressARunningControl is the mirror: the
+// configuration says a control was off, the proxy says it was on. The
+// report must follow the proxy, or a control that genuinely ran gets
+// reported as never measured.
+func TestStaleConfigurationDoesNotSuppressARunningControl(t *testing.T) {
+	db := newDB(t)
+	base := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+	window := wideWindow(base)
+
+	seedStartup(t, db, base, -time.Minute, true, true, true)
+	seed(t, db, base, time.Minute, telemetry.StageDelivery, telemetry.OutcomeAllowed, "target-1")
+
+	report, err := Compute(db, 1, window, Features{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, stage := range []telemetry.Stage{telemetry.StageCloak, telemetry.StageVerify, telemetry.StageReplay} {
+		if got := funnelStage(t, report, stage); !got.Measured {
+			t.Errorf("%s stage reported not measured, but the proxy reported the control enabled", stage)
+		}
+	}
+}
+
+// seedUnattributedOnHost writes one unattributed cloak event served on the
+// given hostname, the way asncloak emits it: no campaign, no RID, an actor,
+// and the host it was serving.
+func seedUnattributedOnHost(t *testing.T, db *gorm.DB, base time.Time, offset time.Duration, host, ip string) {
+	t.Helper()
+	event := telemetry.New(telemetry.StageCloak, telemetry.OutcomeBlocked, telemetry.TechniqueProxy).
+		WithHost(host).
+		WithActor(telemetry.Actor{IP: ip, ASN: "AS15169", Organization: "Google LLC"})
+	event.Timestamp = base.Add(offset)
+	if err := campaigndb.New(db).Emit(nil, event); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestUnattributedEventsScopedToCampaignHosts is the separation this scoping
+// exists for. Two campaigns run on one install at the same time on different
+// phishing hostnames; the time window cannot tell them apart, and before host
+// scoping each absorbed the other's cloaker traffic.
+func TestUnattributedEventsScopedToCampaignHosts(t *testing.T) {
+	db := newDB(t)
+	base := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+
+	seedUnattributedOnHost(t, db, base, time.Minute, "login.acme-corp.example", "198.51.100.10")
+	seedUnattributedOnHost(t, db, base, 2*time.Minute, "login.acme-corp.example", "198.51.100.11")
+	// A concurrent campaign on a different hostname.
+	seedUnattributedOnHost(t, db, base, 3*time.Minute, "sso.other-client.example", "203.0.113.5")
+
+	scope := wideWindow(base)
+	scope.Hosts = []string{"login.acme-corp.example"}
+
+	report, err := Compute(db, 1, scope, allFeatures())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !report.UnattributedHostScoped {
+		t.Error("UnattributedHostScoped = false, want true when hosts were supplied")
+	}
+	cloak := funnelStage(t, report, telemetry.StageCloak)
+	if cloak.Targets != 2 {
+		t.Errorf("cloak targets = %d, want 2: the third event belongs to a campaign on another hostname", cloak.Targets)
+	}
+	total := 0
+	for _, entry := range report.Friction {
+		total += entry.Count
+	}
+	if total != 2 {
+		t.Errorf("friction total = %d, want 2", total)
+	}
+}
+
+// TestUnattributedEventsWithoutHostsFallBackToWindow keeps the old behavior
+// available: a campaign whose URL yields no hostname is scoped by time alone,
+// exactly as before, and the report says so through both the flag and the
+// caption.
+func TestUnattributedEventsWithoutHostsFallBackToWindow(t *testing.T) {
+	db := newDB(t)
+	base := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+
+	seedUnattributedOnHost(t, db, base, time.Minute, "login.acme-corp.example", "198.51.100.10")
+	seedUnattributedOnHost(t, db, base, 2*time.Minute, "sso.other-client.example", "203.0.113.5")
+
+	report, err := Compute(db, 1, wideWindow(base), allFeatures())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if report.UnattributedHostScoped {
+		t.Error("UnattributedHostScoped = true, want false when no hosts were supplied")
+	}
+	if cloak := funnelStage(t, report, telemetry.StageCloak); cloak.Targets != 2 {
+		t.Errorf("cloak targets = %d, want 2: without hosts every unattributed event in the window counts", cloak.Targets)
+	}
+	if report.FrictionScope != frictionScopeCaption {
+		t.Error("FrictionScope should be the time-window caption when no hosts were supplied")
+	}
+}
+
+// TestUnattributedEventsWithoutAHostAreKept covers rows recorded before
+// hostnames were captured. Dropping them would silently erase the history of
+// every campaign that ran before the upgrade, so they are admitted on the
+// time window alone -- and the host-scoped caption says exactly that.
+func TestUnattributedEventsWithoutAHostAreKept(t *testing.T) {
+	db := newDB(t)
+	base := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+
+	seedUnattributedOnHost(t, db, base, time.Minute, "login.acme-corp.example", "198.51.100.10")
+	// A pre-upgrade event: no host at all.
+	seedUnattributedOnHost(t, db, base, 2*time.Minute, "", "198.51.100.11")
+	seedUnattributedOnHost(t, db, base, 3*time.Minute, "sso.other-client.example", "203.0.113.5")
+
+	scope := wideWindow(base)
+	scope.Hosts = []string{"login.acme-corp.example"}
+
+	report, err := Compute(db, 1, scope, allFeatures())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if cloak := funnelStage(t, report, telemetry.StageCloak); cloak.Targets != 2 {
+		t.Errorf("cloak targets = %d, want 2 (the matching host plus the host-less legacy row)", cloak.Targets)
+	}
+	if report.FrictionScope != frictionScopeHostCaption {
+		t.Error("FrictionScope should be the host-scoped caption, which is what discloses that host-less rows are still included")
+	}
+}
+
+// TestAttributedEventsIgnoreHostScope pins that host scoping only ever
+// narrows unattributed rows. An event already tied to this campaign by RID
+// belongs to it no matter which hostname served it -- a campaign whose URL
+// changed mid-engagement must not lose its own captures.
+func TestAttributedEventsIgnoreHostScope(t *testing.T) {
+	db := newDB(t)
+	base := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+
+	seed(t, db, base, time.Minute, telemetry.StageDelivery, telemetry.OutcomeAllowed, "target-1")
+	seed(t, db, base, 2*time.Minute, telemetry.StageCapture, telemetry.OutcomeCaptured, "target-1")
+
+	scope := wideWindow(base)
+	scope.Hosts = []string{"login.acme-corp.example"}
+
+	report, err := Compute(db, 1, scope, allFeatures())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if capture := funnelStage(t, report, telemetry.StageCapture); capture.Targets != 1 {
+		t.Errorf("capture targets = %d, want 1: attributed events are scoped by campaign_id, never by host", capture.Targets)
+	}
+}
+
+// webauthnEventForRecipient emits a StageWebAuthn observation that names a
+// recipient, the way jsinspect emits it once the injected script has been
+// handed the session's recipient ID.
+func webauthnEventForRecipient(t *testing.T, db *gorm.DB, base time.Time, offset time.Duration,
+	rid, ip string, platformAvailable, ceremonyObserved bool) {
+	t.Helper()
+	event := telemetry.New(telemetry.StageWebAuthn, telemetry.OutcomeAllowed).
+		WithRecipient(rid).
+		WithActor(telemetry.Actor{IP: ip}).
+		WithDetail("platform_authenticator_available", platformAvailable).
+		WithDetail("webauthn_ceremony_observed", ceremonyObserved)
+	event.Timestamp = base.Add(offset)
+	if err := campaigndb.New(db).Emit(nil, event); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestPasskeyCorrelationByRecipientSurvivesSharedNAT is the whole point of
+// attributing the observation. Two different people behind one corporate NAT
+// egress: both passkey-capable, only one goes on to submit credentials. The
+// IP-based join counted them as a single client and reported that client as
+// pushed to a weaker factor; the recipient-based join separates them.
+func TestPasskeyCorrelationByRecipientSurvivesSharedNAT(t *testing.T) {
+	db := newDB(t)
+	base := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+	const sharedIP = "203.0.113.50"
+
+	webauthnEventForRecipient(t, db, base, time.Minute, "target-a", sharedIP, true, false)
+	webauthnEventForRecipient(t, db, base, 2*time.Minute, "target-b", sharedIP, true, false)
+	// Only target-b goes on to submit credentials.
+	credentialEvent(t, db, base, 3*time.Minute, telemetry.StageCredential, "target-b", sharedIP)
+
+	report, err := Compute(db, 1, wideWindow(base), allFeatures())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	passkey := report.Passkey
+	if passkey.RanScriptTargets != 2 {
+		t.Errorf("RanScriptTargets = %d, want 2: two distinct recipients behind one IP are two clients",
+			passkey.RanScriptTargets)
+	}
+	if passkey.PlatformAuthenticatorAvailable != 2 {
+		t.Errorf("PlatformAuthenticatorAvailable = %d, want 2", passkey.PlatformAuthenticatorAvailable)
+	}
+	if passkey.PushedToWeakerFactor != 1 {
+		t.Errorf("PushedToWeakerFactor = %d, want 1: only one of the two submitted credentials",
+			passkey.PushedToWeakerFactor)
+	}
+	if passkey.CorrelationMethod != CorrelationRecipient {
+		t.Errorf("CorrelationMethod = %q, want %q", passkey.CorrelationMethod, CorrelationRecipient)
+	}
+	if !passkey.CorrelationReliable {
+		t.Error("CorrelationReliable = false, want true: a recipient-keyed join cannot conflate clients")
+	}
+	if passkey.Scope != passkeyScopeExactCaption {
+		t.Error("Scope should be the exact caption; repeating the shared-IP warning would understate an exact number")
+	}
+}
+
+// TestPasskeyCorrelationByIPStillConflates records what the old behavior
+// actually was, so the improvement above is not asserted against a straw man:
+// the same two people, with no recipient on their observations, still collapse
+// into one client.
+func TestPasskeyCorrelationByIPStillConflates(t *testing.T) {
+	db := newDB(t)
+	base := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+	const sharedIP = "203.0.113.50"
+
+	webauthnEvent(t, db, base, time.Minute, sharedIP, true, false)
+	webauthnEvent(t, db, base, 2*time.Minute, sharedIP, true, false)
+	credentialEvent(t, db, base, 3*time.Minute, telemetry.StageCredential, "target-b", sharedIP)
+
+	report, err := Compute(db, 1, wideWindow(base), allFeatures())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if report.Passkey.RanScriptTargets != 1 {
+		t.Errorf("RanScriptTargets = %d, want 1: without a recipient, one IP is one client", report.Passkey.RanScriptTargets)
+	}
+	if report.Passkey.CorrelationMethod != CorrelationIP {
+		t.Errorf("CorrelationMethod = %q, want %q", report.Passkey.CorrelationMethod, CorrelationIP)
+	}
+}
+
+// TestPasskeyCorrelationMixedIsDisclosed covers an upgrade landing
+// mid-engagement, or a target reaching the proxy without a valid lure: some
+// observations name a recipient and some do not. The count is then exact for
+// part of the population and approximate for the rest, and the report has to
+// say so rather than claiming either one.
+func TestPasskeyCorrelationMixedIsDisclosed(t *testing.T) {
+	db := newDB(t)
+	base := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+
+	webauthnEventForRecipient(t, db, base, time.Minute, "target-a", "203.0.113.50", true, false)
+	webauthnEvent(t, db, base, 2*time.Minute, "203.0.113.77", true, false)
+
+	report, err := Compute(db, 1, wideWindow(base), allFeatures())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if report.Passkey.CorrelationMethod != CorrelationMixed {
+		t.Errorf("CorrelationMethod = %q, want %q", report.Passkey.CorrelationMethod, CorrelationMixed)
+	}
+	if report.Passkey.RanScriptTargets != 2 {
+		t.Errorf("RanScriptTargets = %d, want 2", report.Passkey.RanScriptTargets)
+	}
+	if !strings.Contains(report.Passkey.Scope, "recipient ID") || !strings.Contains(report.Passkey.Scope, "IP address") {
+		t.Errorf("Scope must disclose both join methods, got: %s", report.Passkey.Scope)
+	}
+}
+
+// TestPasskeyUnmeasuredCarriesNoCorrelationMethod keeps the existing rule
+// that an unmeasured metric never carries a caveat or a method implying a
+// measurement was attempted.
+func TestPasskeyUnmeasuredCarriesNoCorrelationMethod(t *testing.T) {
+	db := newDB(t)
+	base := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+	seed(t, db, base, time.Minute, telemetry.StageDelivery, telemetry.OutcomeAllowed, "target-a")
+
+	report, err := Compute(db, 1, wideWindow(base), Features{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if report.Passkey.Measured {
+		t.Fatal("Passkey.Measured = true with verification disabled and no webauthn events")
+	}
+	if report.Passkey.CorrelationMethod != "" {
+		t.Errorf("CorrelationMethod = %q, want empty for an unmeasured metric", report.Passkey.CorrelationMethod)
+	}
+	if report.Passkey.Scope != "" {
+		t.Errorf("Scope = %q, want empty for an unmeasured metric", report.Passkey.Scope)
+	}
+}
+
+// replayEvent emits one replay attempt for a captured session, the way the
+// validation worker emits it.
+func replayEvent(t *testing.T, db *gorm.DB, base time.Time, offset time.Duration,
+	reference string, attempt int, ageSeconds int64, outcome telemetry.Outcome) {
+	t.Helper()
+	event := telemetry.New(telemetry.StageReplay, outcome, telemetry.TechniqueWebSessionCookie).
+		WithDetail("session_reference", reference).
+		WithDetail("attempt", attempt).
+		WithDetail("age_seconds", ageSeconds)
+	event.Timestamp = base.Add(offset)
+	if err := campaigndb.New(db).Emit(nil, event); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestTokenLifetimeSeparatesCensoredFromRevoked is the measurement's central
+// honesty rule. A session still valid at its last check has an unknown
+// lifetime, so it must not be folded into a median that would then describe
+// how long the measurement ran rather than how long tokens live.
+func TestTokenLifetimeSeparatesCensoredFromRevoked(t *testing.T) {
+	db := newDB(t)
+	base := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+
+	// Revoked after an hour.
+	replayEvent(t, db, base, time.Minute, "aaa111", 1, 0, telemetry.OutcomeAllowed)
+	replayEvent(t, db, base, time.Hour, "aaa111", 2, 3600, telemetry.OutcomeBlocked)
+	// Revoked after three hours.
+	replayEvent(t, db, base, time.Minute, "bbb222", 1, 0, telemetry.OutcomeAllowed)
+	replayEvent(t, db, base, 3*time.Hour, "bbb222", 2, 10800, telemetry.OutcomeBlocked)
+	// Still valid eight hours in: censored, no upper bound known.
+	replayEvent(t, db, base, time.Minute, "ccc333", 1, 0, telemetry.OutcomeAllowed)
+	replayEvent(t, db, base, 8*time.Hour, "ccc333", 2, 28800, telemetry.OutcomeAllowed)
+
+	report, err := Compute(db, 1, wideWindow(base), allFeatures())
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokens := report.Tokens
+
+	if !tokens.Measured {
+		t.Fatal("Measured = false, want true")
+	}
+	if tokens.Sessions != 3 {
+		t.Errorf("Sessions = %d, want 3", tokens.Sessions)
+	}
+	if tokens.Revoked != 2 {
+		t.Errorf("Revoked = %d, want 2", tokens.Revoked)
+	}
+	if tokens.StillValidAtLastCheck != 1 {
+		t.Errorf("StillValidAtLastCheck = %d, want 1", tokens.StillValidAtLastCheck)
+	}
+	if !tokens.HasMedianTimeToRevocation {
+		t.Fatal("HasMedianTimeToRevocation = false, want true")
+	}
+	// Median over the two revoked sessions only: (3600 + 10800) / 2.
+	if tokens.MedianTimeToRevocationSeconds != 7200 {
+		t.Errorf("MedianTimeToRevocationSeconds = %d, want 7200 (the censored session must not drag it down)",
+			tokens.MedianTimeToRevocationSeconds)
+	}
+	if tokens.LongestObservedValidSeconds != 28800 {
+		t.Errorf("LongestObservedValidSeconds = %d, want 28800", tokens.LongestObservedValidSeconds)
+	}
+	if tokens.Scope == "" {
+		t.Error("Scope is empty; the censoring rule must travel with the counts")
+	}
+}
+
+// TestTokenLifetimeCountsFirstAttemptBlocks separates a session that never
+// worked at all from one that worked and was later revoked. The validator
+// replays from the proxy's own network, so a refusal on the first attempt is
+// evidence the target's controls rejected a stolen session outright.
+func TestTokenLifetimeCountsFirstAttemptBlocks(t *testing.T) {
+	db := newDB(t)
+	base := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+
+	replayEvent(t, db, base, time.Minute, "aaa111", 1, 0, telemetry.OutcomeBlocked)
+	replayEvent(t, db, base, time.Minute, "bbb222", 1, 0, telemetry.OutcomeAllowed)
+	replayEvent(t, db, base, time.Hour, "bbb222", 2, 3600, telemetry.OutcomeBlocked)
+
+	report, err := Compute(db, 1, wideWindow(base), allFeatures())
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokens := report.Tokens
+
+	if tokens.BlockedOnFirstAttempt != 1 {
+		t.Errorf("BlockedOnFirstAttempt = %d, want 1", tokens.BlockedOnFirstAttempt)
+	}
+	if tokens.Revoked != 1 {
+		t.Errorf("Revoked = %d, want 1: a session refused before it ever worked is not a revocation", tokens.Revoked)
+	}
+	if tokens.Sessions != 2 {
+		t.Errorf("Sessions = %d, want 2", tokens.Sessions)
+	}
+}
+
+// TestTokenLifetimeNotMeasuredWithValidatorOff keeps the measured/unmeasured
+// rule: zeros from a validator that never ran must read as "not measured".
+func TestTokenLifetimeNotMeasuredWithValidatorOff(t *testing.T) {
+	db := newDB(t)
+	base := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+	seed(t, db, base, time.Minute, telemetry.StageCapture, telemetry.OutcomeCaptured, "target-1")
+
+	report, err := Compute(db, 1, wideWindow(base), Features{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if report.Tokens.Measured {
+		t.Error("Measured = true with the validator off and no replay events")
+	}
+	if report.Tokens.Scope != "" {
+		t.Errorf("Scope = %q, want empty for an unmeasured metric", report.Tokens.Scope)
+	}
+}
+
+// TestTokenLifetimeMeasuredUpgradesFromEvents mirrors the funnel's
+// self-correction: replay rows are proof the validator ran, whatever the
+// configuration claimed.
+func TestTokenLifetimeMeasuredUpgradesFromEvents(t *testing.T) {
+	db := newDB(t)
+	base := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+	replayEvent(t, db, base, time.Minute, "aaa111", 1, 0, telemetry.OutcomeAllowed)
+
+	report, err := Compute(db, 1, wideWindow(base), Features{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !report.Tokens.Measured {
+		t.Error("Measured = false despite replay events proving the validator ran")
+	}
+	if report.Tokens.StillValidAtLastCheck != 1 {
+		t.Errorf("StillValidAtLastCheck = %d, want 1", report.Tokens.StillValidAtLastCheck)
+	}
+}
+
+// TestTokenLifetimeIgnoresLegacyReplayEventsWithoutAReference covers replay
+// rows written before this measurement existed. They carry a session
+// reference, so they group correctly, but one without any reference at all
+// cannot be attributed to a session and must be skipped rather than pooled
+// into a phantom session.
+func TestTokenLifetimeIgnoresLegacyReplayEventsWithoutAReference(t *testing.T) {
+	db := newDB(t)
+	base := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+
+	event := telemetry.New(telemetry.StageReplay, telemetry.OutcomeAllowed, telemetry.TechniqueWebSessionCookie)
+	event.Timestamp = base.Add(time.Minute)
+	if err := campaigndb.New(db).Emit(nil, event); err != nil {
+		t.Fatal(err)
+	}
+	replayEvent(t, db, base, 2*time.Minute, "aaa111", 1, 0, telemetry.OutcomeAllowed)
+
+	report, err := Compute(db, 1, wideWindow(base), allFeatures())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Tokens.Sessions != 1 {
+		t.Errorf("Sessions = %d, want 1: an attempt with no session reference is not a session", report.Tokens.Sessions)
 	}
 }

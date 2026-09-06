@@ -298,3 +298,46 @@ func TestWithDetailAdmitsNamedScalarTypes(t *testing.T) {
 		t.Fatalf("stage_name = %#v", event.Detail["stage_name"])
 	}
 }
+
+func TestNormalizeHost(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"login.example.com", "login.example.com"},
+		{"Login.Example.COM", "login.example.com"},
+		{"login.example.com:443", "login.example.com"},
+		{"login.example.com.", "login.example.com"},
+		{"  login.example.com  ", "login.example.com"},
+		{"[2001:db8::1]:8443", "2001:db8::1"},
+		{"192.0.2.10:8080", "192.0.2.10"},
+		{"", ""},
+	}
+	for _, testCase := range cases {
+		if got := NormalizeHost(testCase.in); got != testCase.want {
+			t.Errorf("NormalizeHost(%q) = %q, want %q", testCase.in, got, testCase.want)
+		}
+	}
+}
+
+// TestWithHostNormalizes pins that normalization happens at the single point
+// of entry. A report matches events to a campaign by comparing this field for
+// equality, so a caller passing a raw Host header must not produce a value
+// that silently matches nothing.
+func TestWithHostNormalizes(t *testing.T) {
+	event := New(StageCloak, OutcomeBlocked).WithHost("Login.Example.COM:8443")
+	if event.Host != "login.example.com" {
+		t.Errorf("Host = %q, want the normalized form", event.Host)
+	}
+}
+
+// TestHostAndInstanceOmittedWhenEmpty keeps the wire format unchanged for
+// events that carry neither, which is every event the campaign service emits.
+func TestHostAndInstanceOmittedWhenEmpty(t *testing.T) {
+	encoded, err := json.Marshal(New(StageDelivery, OutcomeAllowed))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"host", "instance_id"} {
+		if strings.Contains(string(encoded), key) {
+			t.Errorf("marshalled event contains %q for an event that has none: %s", key, encoded)
+		}
+	}
+}

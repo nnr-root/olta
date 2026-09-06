@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/s4l1hs/olta/pkg/campaign/models"
 )
@@ -163,5 +164,89 @@ func TestNavigatorLayerAggregatesSharedTechniques(t *testing.T) {
 		if !strings.Contains(comment, stage) {
 			t.Fatalf("T1566.002 comment = %q, want it to mention stage %q", comment, stage)
 		}
+	}
+}
+
+// TestCampaignHostsParsesTheLureURL covers the translation that makes host
+// scoping work. A campaign's URL is operator-entered, so the shapes it
+// actually arrives in -- with or without a scheme, port, path or trailing
+// dot -- all have to reduce to the same hostname the proxy stamped on its
+// events, or the scoping silently matches nothing.
+func TestCampaignHostsParsesTheLureURL(t *testing.T) {
+	cases := []struct {
+		name string
+		url  string
+		want []string
+	}{
+		{"https url", "https://login.example.com/account", []string{"login.example.com"}},
+		{"http url with port", "http://login.example.com:8080/", []string{"login.example.com"}},
+		{"mixed case", "https://Login.Example.COM/", []string{"login.example.com"}},
+		{"no scheme", "login.example.com/account", []string{"login.example.com"}},
+		{"bare hostname", "login.example.com", []string{"login.example.com"}},
+		{"trailing dot", "https://login.example.com./", []string{"login.example.com"}},
+		{"surrounding space", "  https://login.example.com/  ", []string{"login.example.com"}},
+		{"empty", "", nil},
+		{"whitespace only", "   ", nil},
+	}
+
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			got := campaignHosts(models.Campaign{URL: testCase.url})
+			if len(got) != len(testCase.want) {
+				t.Fatalf("campaignHosts(%q) = %v, want %v", testCase.url, got, testCase.want)
+			}
+			for i := range got {
+				if got[i] != testCase.want[i] {
+					t.Errorf("campaignHosts(%q)[%d] = %q, want %q", testCase.url, i, got[i], testCase.want[i])
+				}
+			}
+		})
+	}
+}
+
+// TestCampaignHostsNeverReturnsAnEmptyEntry is the hazard test. An
+// empty-string entry would reach the report's "host IN (?) OR host = ”"
+// clause and match every event whose host was never recorded, quietly
+// undoing the scoping for every campaign with an unusable URL.
+func TestCampaignHostsNeverReturnsAnEmptyEntry(t *testing.T) {
+	for _, raw := range []string{"", "   ", "://", "http://", "/just/a/path"} {
+		for _, host := range campaignHosts(models.Campaign{URL: raw}) {
+			if host == "" {
+				t.Errorf("campaignHosts(%q) returned an empty hostname entry", raw)
+			}
+		}
+	}
+}
+
+// TestCampaignScopeUsesNowForAnInFlightCampaign pins the upper bound: a
+// campaign that has not completed has a zero CompletedDate, and using it
+// unconditionally would put the window's end in year 1 and exclude every
+// unattributed event ever recorded.
+func TestCampaignScopeUsesNowForAnInFlightCampaign(t *testing.T) {
+	launch := time.Now().Add(-time.Hour)
+	scope := campaignScope(models.Campaign{LaunchDate: launch, URL: "https://login.example.com/"})
+
+	if !scope.Start.Equal(launch) {
+		t.Errorf("Start = %v, want the launch date %v", scope.Start, launch)
+	}
+	if scope.End.Before(launch) {
+		t.Errorf("End = %v, want a bound after the launch date for an in-flight campaign", scope.End)
+	}
+	if len(scope.Hosts) != 1 || scope.Hosts[0] != "login.example.com" {
+		t.Errorf("Hosts = %v, want the campaign's own hostname", scope.Hosts)
+	}
+}
+
+// TestCampaignScopeUsesCompletedDateWhenFinished is the complement.
+func TestCampaignScopeUsesCompletedDateWhenFinished(t *testing.T) {
+	launch := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+	completed := launch.Add(2 * time.Hour)
+	scope := campaignScope(models.Campaign{LaunchDate: launch, CompletedDate: completed})
+
+	if !scope.End.Equal(completed) {
+		t.Errorf("End = %v, want the completed date %v", scope.End, completed)
+	}
+	if scope.Hosts != nil {
+		t.Errorf("Hosts = %v, want nil for a campaign with no URL", scope.Hosts)
 	}
 }

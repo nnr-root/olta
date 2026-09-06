@@ -1,8 +1,11 @@
 package telemetry
 
 import (
+	"bytes"
 	"context"
+	"log"
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -30,6 +33,15 @@ func (s *recordingSink) Close() error {
 	defer s.mu.Unlock()
 	s.closed = true
 	return nil
+}
+
+// snapshot returns a copy of every event this sink received.
+func (s *recordingSink) snapshot() []Event {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]Event, len(s.events))
+	copy(out, s.events)
+	return out
 }
 
 func (s *recordingSink) count() int {
@@ -101,6 +113,46 @@ func TestBusEmitNeverBlocksOnStalledSink(t *testing.T) {
 
 	if bus.Dropped() == 0 {
 		t.Fatal("Dropped() = 0, want overflow to be counted")
+	}
+}
+
+// TestBusLogsFirstDropOnce covers the one signal an operator gets while an
+// engagement is still running. Emit runs on the victim-facing request path,
+// so it cannot log per drop; it logs the first one and nothing after it, and
+// this asserts both halves -- that the warning appears at all, and that a
+// hundred further drops add nothing to the log.
+//
+// It captures the standard logger's output because that is what the bus
+// writes to, and restores it afterwards. Not parallel, for that reason.
+func TestBusLogsFirstDropOnce(t *testing.T) {
+	var captured bytes.Buffer
+	previousOutput := log.Writer()
+	previousFlags := log.Flags()
+	log.SetOutput(&captured)
+	log.SetFlags(0)
+	t.Cleanup(func() {
+		log.SetOutput(previousOutput)
+		log.SetFlags(previousFlags)
+	})
+
+	release := make(chan struct{})
+	sink := &recordingSink{block: release}
+	bus := NewBus(2, sink)
+	defer func() { close(release); _ = bus.Close() }()
+
+	for i := 0; i < 100; i++ {
+		bus.Emit(New(StageCloak, OutcomeBlocked, TechniqueProxy))
+	}
+
+	if bus.Dropped() == 0 {
+		t.Fatal("Dropped() = 0, want overflow to be counted")
+	}
+	if got := strings.Count(captured.String(), "event queue full"); got != 1 {
+		t.Errorf("queue-full log lines = %d, want exactly 1 for %d drops:\n%s",
+			got, bus.Dropped(), captured.String())
+	}
+	if !strings.Contains(captured.String(), "size 2") {
+		t.Errorf("log does not name the queue size, which is what the operator has to change:\n%s", captured.String())
 	}
 }
 
@@ -294,5 +346,71 @@ func TestBusCloseReturnsWhenSinkIgnoresContext(t *testing.T) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("Close() blocked on a sink that ignores its context")
+	}
+}
+
+// TestBusStampsInstanceID covers why stamping lives on the bus rather than at
+// each call site: every event from one process carries the identity, with no
+// way for a new emitter to forget it.
+func TestBusStampsInstanceID(t *testing.T) {
+	sink := &recordingSink{}
+	bus := NewBusForInstance("instance-under-test", 8, sink)
+
+	bus.Emit(New(StageCloak, OutcomeBlocked, TechniqueProxy))
+	bus.Emit(New(StageVerify, OutcomeAllowed))
+	if err := bus.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	events := sink.snapshot()
+	if len(events) != 2 {
+		t.Fatalf("sink saw %d events, want 2", len(events))
+	}
+	for _, event := range events {
+		if event.InstanceID != "instance-under-test" {
+			t.Errorf("%s event InstanceID = %q, want the bus's instance", event.Stage, event.InstanceID)
+		}
+	}
+}
+
+// TestBusKeepsAnExplicitInstanceID lets an event that already carries an
+// identity keep it, so a relayed or replayed event is not re-attributed to
+// whichever process happened to forward it.
+func TestBusKeepsAnExplicitInstanceID(t *testing.T) {
+	sink := &recordingSink{}
+	bus := NewBusForInstance("forwarding-process", 8, sink)
+
+	event := New(StageCloak, OutcomeBlocked)
+	event.InstanceID = "originating-process"
+	bus.Emit(event)
+	if err := bus.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	events := sink.snapshot()
+	if len(events) != 1 {
+		t.Fatalf("sink saw %d events, want 1", len(events))
+	}
+	if events[0].InstanceID != "originating-process" {
+		t.Errorf("InstanceID = %q, want the identity the event arrived with", events[0].InstanceID)
+	}
+}
+
+// TestNewBusLeavesInstanceEmpty keeps the plain constructor's behavior
+// unchanged for the campaign service, which has no instance identity.
+func TestNewBusLeavesInstanceEmpty(t *testing.T) {
+	sink := &recordingSink{}
+	bus := NewBus(8, sink)
+	bus.Emit(New(StageDelivery, OutcomeAllowed))
+	if err := bus.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	events := sink.snapshot()
+	if len(events) != 1 {
+		t.Fatalf("sink saw %d events, want 1", len(events))
+	}
+	if events[0].InstanceID != "" {
+		t.Errorf("InstanceID = %q, want empty", events[0].InstanceID)
 	}
 }

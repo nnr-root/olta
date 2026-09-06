@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -29,6 +30,26 @@ type WorkerConfig struct {
 	QueueSize         int
 	ValidationTimeout time.Duration
 	Validator         Validator
+	// RecheckSchedule is the series of delays, measured from capture, at
+	// which a session that is still valid is checked again. It covers
+	// rechecks only -- the first check happens immediately on capture -- so
+	// {5m, 30m, 2h} means four attempts in total. Empty means one check and
+	// no more, which is the original behavior.
+	//
+	// Rechecking is what turns "the token worked once" into "the token
+	// stayed usable for at least N hours", which is the number a defender
+	// acts on: it is the window during which a stolen session was live, and
+	// it is the only direct measurement of whether revocation actually
+	// happened. Entries must be increasing; they are sorted if they are not.
+	//
+	// Schedules live only in memory. A proxy restarted mid-engagement loses
+	// every pending recheck, so a session's observed lifetime is truncated
+	// at the restart rather than continued. It is not persisted because a
+	// resumed schedule would silently re-check sessions the operator may
+	// have finished with; the report's censoring already handles a
+	// truncated observation correctly.
+	RecheckSchedule []time.Duration
+
 	// SeenCapacity bounds how many session IDs the deduplication set
 	// remembers at once. Once full, the oldest tracked ID is forgotten to
 	// make room for the newest, so a session queued long enough ago can be
@@ -62,6 +83,14 @@ type Worker struct {
 	shutdown  chan struct{}
 	wg        sync.WaitGroup
 	closeOnce sync.Once
+
+	// timers holds the pending recheck timers so Close can stop them.
+	// time.AfterFunc costs no goroutine until it fires, so one timer per
+	// outstanding session is cheap; what it does need is cancellation, or a
+	// shutdown would be held open by a recheck scheduled hours out.
+	timerMu     sync.Mutex
+	timers      map[int64]*time.Timer
+	nextTimerID int64
 }
 
 // NewWorker starts a validation worker pool.
@@ -87,6 +116,16 @@ func NewWorker(config WorkerConfig) (*Worker, error) {
 	if config.SeenCapacity < 1 {
 		return nil, fmt.Errorf("session validator seen capacity must be positive")
 	}
+	for _, delay := range config.RecheckSchedule {
+		if delay <= 0 {
+			return nil, fmt.Errorf("session validator recheck delays must be positive")
+		}
+	}
+	if len(config.RecheckSchedule) > 1 {
+		schedule := append([]time.Duration(nil), config.RecheckSchedule...)
+		sort.Slice(schedule, func(i, j int) bool { return schedule[i] < schedule[j] })
+		config.RecheckSchedule = schedule
+	}
 	if config.Validator == nil {
 		config.Validator = NewHTTPValidator(nil)
 	}
@@ -98,6 +137,7 @@ func NewWorker(config WorkerConfig) (*Worker, error) {
 		seenOrder: make([]string, 0, config.SeenCapacity),
 		seenCap:   config.SeenCapacity,
 		shutdown:  make(chan struct{}),
+		timers:    make(map[int64]*time.Timer),
 	}
 	worker.wg.Add(config.Workers)
 	for range config.Workers {
@@ -175,7 +215,81 @@ func (worker *Worker) process(event Event) {
 	if worker.config.OnResult != nil {
 		worker.config.OnResult(result)
 	}
-	worker.emitReplay(result)
+	worker.emitReplay(result, event)
+	worker.scheduleRecheck(event, result)
+}
+
+// scheduleRecheck arms the next attempt for a session that is still usable.
+//
+// Only a still-valid session is followed: once a token is refused there is
+// nothing left to measure, and continuing to replay a dead session would be
+// noise on the target's own authentication logs for no gain. A status of
+// error or unknown also stops the schedule -- the attempt proved nothing, and
+// retrying through an outage would record an arbitrary "lifetime" that
+// reflects the network rather than the token.
+func (worker *Worker) scheduleRecheck(event Event, result Result) {
+	if result.Status != StatusValid {
+		return
+	}
+	// The schedule covers rechecks only: attempt 0 is the immediate check on
+	// capture, so attempt N takes its delay from schedule[N-1], and the
+	// attempt just finished (event.Attempt) indexes the next one.
+	if event.Attempt >= len(worker.config.RecheckSchedule) {
+		return
+	}
+
+	// Delays are measured from capture, not from the previous attempt, so a
+	// slow validation cannot drift the whole schedule later.
+	delay := time.Until(event.CapturedAt.Add(worker.config.RecheckSchedule[event.Attempt]))
+	if delay < 0 {
+		delay = 0
+	}
+
+	event.Attempt++
+
+	// The timer is created and registered under the same lock the callback
+	// takes, so a delay short enough to fire immediately blocks in the
+	// callback until registration finishes rather than racing it. The
+	// callback closes over an id rather than the timer itself for the same
+	// reason: assigning the timer to a variable the callback reads is the
+	// classic version of this race.
+	worker.timerMu.Lock()
+	defer worker.timerMu.Unlock()
+	if worker.timers == nil {
+		// Close already ran; there is nothing left to schedule onto.
+		return
+	}
+	id := worker.nextTimerID
+	worker.nextTimerID++
+	worker.timers[id] = time.AfterFunc(delay, func() {
+		worker.forgetTimer(id)
+		worker.requeue(event)
+	})
+}
+
+func (worker *Worker) forgetTimer(id int64) {
+	worker.timerMu.Lock()
+	defer worker.timerMu.Unlock()
+	delete(worker.timers, id)
+}
+
+// requeue puts a recheck back on the queue. It bypasses Enqueue on purpose:
+// Enqueue's deduplication set exists to stop the same capture being validated
+// twice, and a scheduled recheck is exactly the case that must be allowed
+// through. A full queue drops the recheck rather than blocking -- the
+// session's observed lifetime is then simply shorter than reality, which the
+// report already treats as a lower bound.
+func (worker *Worker) requeue(event Event) {
+	worker.acceptMu.Lock()
+	accepting := worker.accepting
+	worker.acceptMu.Unlock()
+	if !accepting {
+		return
+	}
+	select {
+	case worker.queue <- event:
+	default:
+	}
 }
 
 func normalizeResult(result Result, event Event) Result {
@@ -229,9 +343,18 @@ func replayOutcome(status Status) telemetry.Outcome {
 // to carry. Identity.Username and TenantID are deliberately excluded: they
 // are recipient identity, allowlisted for the webhook payload but not
 // needed by the resilience report.
-func (worker *Worker) emitReplay(result Result) {
+func (worker *Worker) emitReplay(result Result, event Event) {
 	if worker.config.Emitter == nil {
 		return
+	}
+	// age_seconds is how long after capture this attempt was made, which is
+	// what turns a series of attempts into a measured token lifetime. attempt
+	// is 1-based so a reader can tell the first replay -- the one that says
+	// whether the target's own controls refused a stolen session outright --
+	// from a later one.
+	age := int64(result.Timestamp.Sub(event.CapturedAt).Seconds())
+	if age < 0 {
+		age = 0
 	}
 	worker.config.Emitter.Emit(
 		telemetry.New(telemetry.StageReplay, replayOutcome(result.Status), telemetry.TechniqueWebSessionCookie).
@@ -239,7 +362,9 @@ func (worker *Worker) emitReplay(result Result) {
 			WithDetail("session_reference", result.SessionReference).
 			WithDetail("phishlet", result.Phishlet).
 			WithDetail("target_host", result.TargetHost).
-			WithDetail("http_status", result.HTTPStatus),
+			WithDetail("http_status", result.HTTPStatus).
+			WithDetail("attempt", event.Attempt+1).
+			WithDetail("age_seconds", age),
 	)
 }
 
@@ -255,6 +380,19 @@ func (worker *Worker) Close() {
 		worker.acceptMu.Lock()
 		worker.accepting = false
 		worker.acceptMu.Unlock()
+
+		// Stop pending rechecks before waiting: a schedule reaching hours
+		// out would otherwise keep firing into a queue nobody drains, and
+		// setting timers to nil tells scheduleRecheck it is too late to arm
+		// another one.
+		worker.timerMu.Lock()
+		pending := worker.timers
+		worker.timers = nil
+		worker.timerMu.Unlock()
+		for _, timer := range pending {
+			timer.Stop()
+		}
+
 		close(worker.shutdown)
 		worker.wg.Wait()
 	})

@@ -21,10 +21,24 @@ import (
 	"github.com/s4l1hs/olta/pkg/campaign/models"
 )
 
-// Pattern for GoPhish emails e.g ?rid=AbC1234
-// We include the optional quoted-printable 3D at the front, just in case decoding fails. e.g ?rid=3DAbC1234
-// We also include alternative URL encoded representations of '=' and '?' to handle Microsoft ATP URLs e.g %3Frid%3DAbC1234
-var goPhishRegex = regexp.MustCompile("((\\?|%3F)rid(=|%3D)(3D)?([A-Za-z0-9]{7}))")
+// Pattern for reported campaign emails e.g ?rid=AbC12345
+// We include the optional quoted-printable 3D at the front, just in case decoding fails. e.g ?rid=3DAbC12345
+// We also include alternative URL encoded representations of '=' and '?' to handle Microsoft ATP URLs e.g %3Frid%3DAbC12345
+//
+// The {8,32} length range must stay in step with models.generateResultId,
+// which produces a random length between 8 and 32 (see
+// pkg/campaign/models/result.go). This pattern was inherited from Gophish,
+// whose recipient IDs were a fixed 7 characters; against Olta's longer IDs a
+// {7} quantifier silently captured only the first 7 characters of every rid,
+// so models.GetResult could never find the result and no reported email was
+// ever recorded. See TestMatchEmailAcceptsEveryGeneratedRIDLength.
+//
+// The optional 3D group is a heuristic, and an ambiguous one: a genuine rid
+// that both starts with the literal characters "3D" and is at least 10
+// characters long parses as quoted-printable, and loses those two
+// characters. That is inherent to guessing at undecoded quoted-printable
+// text and is left as-is; it affects roughly 1 rid in 3,800.
+var goPhishRegex = regexp.MustCompile("((\\?|%3F)rid(=|%3D)(3D)?([A-Za-z0-9]{8,32}))")
 
 // Monitor is a worker that monitors IMAP servers for reported campaign emails
 type Monitor struct {

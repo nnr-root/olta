@@ -41,6 +41,12 @@ type Event struct {
 	Identity   Identity                                    `json:"-"`
 	Cookies    map[string]map[string]*database.CookieToken `json:"-"`
 	CapturedAt time.Time                                   `json:"-"`
+
+	// Attempt is the zero-based index into WorkerConfig.RecheckSchedule that
+	// this job represents. It is set by the worker when it re-arms a
+	// session, never by a caller: an event handed to Enqueue is always
+	// attempt 0.
+	Attempt int `json:"-"`
 }
 
 // Result is the sanitized value delivered to telemetry dispatchers.

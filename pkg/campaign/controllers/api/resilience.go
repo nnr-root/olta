@@ -2,6 +2,7 @@ package api
 
 import (
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -10,6 +11,7 @@ import (
 	ctx "github.com/s4l1hs/olta/pkg/campaign/context"
 	"github.com/s4l1hs/olta/pkg/campaign/models"
 	"github.com/s4l1hs/olta/pkg/campaign/resilience"
+	"github.com/s4l1hs/olta/pkg/telemetry"
 )
 
 // Resilience returns the purple-team report for one campaign.
@@ -148,7 +150,7 @@ func (as *Server) resilienceReport(w http.ResponseWriter, r *http.Request) (resi
 		return resilience.Report{}, false
 	}
 
-	report, err := resilience.Compute(models.DB(), campaignID, campaignWindow(campaign), as.telemetryFeatures)
+	report, err := resilience.Compute(models.DB(), campaignID, campaignScope(campaign), as.telemetryFeatures)
 	if err != nil {
 		JSONResponse(w, models.Response{Success: false, Message: err.Error()}, http.StatusInternalServerError)
 		return resilience.Report{}, false
@@ -156,14 +158,14 @@ func (as *Server) resilienceReport(w http.ResponseWriter, r *http.Request) (resi
 	return report, true
 }
 
-// campaignWindow derives the active period used to bound unattributed
-// (campaign_id = 0) cloak/verify events: the resilience package is a pure
-// query layer over telemetry_events and does not read the campaigns table
-// itself, so this is the one place that translates a campaign row into a
-// resilience.Window.
+// campaignScope derives the bounds used to fold unattributed (campaign_id =
+// 0) cloak/verify/webauthn events into this campaign's report. The
+// resilience package is a pure query layer over telemetry_events and does
+// not read the campaigns table itself, so this is the one place that
+// translates a campaign row into a resilience.Scope.
 //
-// Start is the campaign's launch date. LaunchDate defaults to CreatedDate
-// at creation time (see PostCampaign) whenever no explicit launch date was
+// Start is the campaign's launch date. LaunchDate defaults to CreatedDate at
+// creation time (see PostCampaign) whenever no explicit launch date was
 // given, so it is never zero for a campaign that has actually been posted.
 //
 // End is the campaign's completed date when the campaign has finished, or
@@ -172,10 +174,50 @@ func (as *Server) resilienceReport(w http.ResponseWriter, r *http.Request) (resi
 // in-flight campaign an upper bound in year 1 -- silently excluding every
 // unattributed event ever recorded, rather than the intended "everything up
 // to now".
-func campaignWindow(campaign models.Campaign) resilience.Window {
+//
+// Hosts is the campaign's own phishing hostname, taken from its URL. This is
+// what separates concurrent campaigns: unattributed events carry the
+// hostname they were served on, so a campaign no longer absorbs the cloaker
+// traffic of another campaign that merely overlapped it in time. A campaign
+// whose URL is missing or unparseable contributes no hostname, and the
+// report falls back to the time window alone and says so.
+func campaignScope(campaign models.Campaign) resilience.Scope {
 	end := campaign.CompletedDate
 	if end.IsZero() {
 		end = time.Now()
 	}
-	return resilience.Window{Start: campaign.LaunchDate, End: end}
+	return resilience.Scope{
+		Start: campaign.LaunchDate,
+		End:   end,
+		Hosts: campaignHosts(campaign),
+	}
+}
+
+// campaignHosts extracts the normalized hostname a campaign's lure URL
+// points at. It returns nil rather than an empty-string entry for a campaign
+// with no usable URL, because an empty entry would match every event whose
+// host was never recorded and quietly undo the scoping.
+func campaignHosts(campaign models.Campaign) []string {
+	raw := strings.TrimSpace(campaign.URL)
+	if raw == "" {
+		return nil
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return nil
+	}
+	// A URL stored without a scheme ("login.example.com/path") parses with
+	// an empty Host and the whole value in Path, so fall back to that.
+	candidate := parsed.Host
+	if candidate == "" {
+		candidate = parsed.Path
+		if index := strings.IndexByte(candidate, '/'); index >= 0 {
+			candidate = candidate[:index]
+		}
+	}
+	host := telemetry.NormalizeHost(candidate)
+	if host == "" {
+		return nil
+	}
+	return []string{host}
 }
