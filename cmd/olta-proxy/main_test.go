@@ -56,6 +56,8 @@ func representativeConfig() startupTelemetryConfig {
 		SessionValidatorEnabled:  true,
 		FeedEnabled:              true,
 		SecretsEncryptionEnabled: true,
+		SIEMConfigured:           true,
+		SIEMSchema:               "ecs",
 		Turnstile:                "0x4AAAAAAA_publickeyXYZ:0x4AAAAAAA_SECRETprivatekeyDONOTLEAK",
 		WebhookURL:               "https://hooks.slack.com/services/T000/B000/SUPERSECRETBEARERTOKEN123",
 		CampaignDBDriver:         "mysql",
@@ -99,6 +101,8 @@ func TestBuildStartupEvent_Shape(t *testing.T) {
 		"session_validator_enabled":     true,
 		"feed_enabled":                  true,
 		"secrets_encryption_enabled":    true,
+		"siem_configured":               true,
+		"siem_schema":                   "ecs",
 		"turnstile_enabled":             true,
 		"webhook_configured":            true,
 		"campaign_db_driver":            "mysql",
@@ -134,6 +138,18 @@ func TestBuildStartupEvent_ReportsEncryptionDisabled(t *testing.T) {
 	}
 	if got != false {
 		t.Errorf(`Detail["secrets_encryption_enabled"] = %v, want false`, got)
+	}
+}
+
+// TestSIEMSchemaForTelemetry pins that a schema is never reported for a sink
+// that does not exist: a report showing "ocsf" for a proxy with no SIEM
+// destination would describe a delivery path that was never configured.
+func TestSIEMSchemaForTelemetry(t *testing.T) {
+	if got := siemSchemaForTelemetry(false, "ocsf"); got != "" {
+		t.Errorf("siemSchemaForTelemetry(false, ...) = %q, want empty", got)
+	}
+	if got := siemSchemaForTelemetry(true, "  OCSF "); got != "ocsf" {
+		t.Errorf("siemSchemaForTelemetry(true, ...) = %q, want the normalized schema", got)
 	}
 }
 

