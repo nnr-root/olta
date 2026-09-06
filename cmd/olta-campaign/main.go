@@ -177,6 +177,10 @@ func main() {
 		}
 		adminOptions = append(adminOptions, controllers.WithWorker(campaignWorker))
 	}
+	// These configured values are the resilience report's fallback, not its
+	// primary source: the report prefers the posture olta-proxy recorded in
+	// its own StageInitialization event and uses these only when no such
+	// record covers the campaign. See resilience.resolveFeatures.
 	adminOptions = append(adminOptions, controllers.WithTelemetryFeatures(resilience.Features{
 		Cloaker:          conf.Telemetry.Cloaker,
 		Verify:           conf.Telemetry.Verify,

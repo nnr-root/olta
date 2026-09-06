@@ -793,3 +793,193 @@ func TestPasskeyDefenseCorrelationReliableWithOneRIDPerIP(t *testing.T) {
 		t.Fatalf("Passkey.Scope = %q, want the plain (non-collision) caption", report.Passkey.Scope)
 	}
 }
+
+// seedStartup writes one StageInitialization event with the measurement
+// posture cmd/olta-proxy's buildStartupEvent records, at a fixed offset from
+// base.
+func seedStartup(t *testing.T, db *gorm.DB, base time.Time, offset time.Duration,
+	cloaker, jsInspect, sessionValidator bool) {
+	t.Helper()
+	event := telemetry.New(telemetry.StageInitialization, telemetry.OutcomeAllowed).
+		WithDetail("version", "1.0.0-Alpha").
+		WithDetail(detailKeyCloakerEnabled, cloaker).
+		WithDetail(detailKeyJSInspectEnabled, jsInspect).
+		WithDetail(detailKeySessionValidatorEnabled, sessionValidator)
+	event.Timestamp = base.Add(offset)
+	if err := campaigndb.New(db).Emit(nil, event); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestFeaturesFallBackToConfigurationWithNoStartupEvent covers the
+// compatibility path: a proxy predating startup telemetry, or one whose
+// events never reached this database, leaves nothing to read.
+func TestFeaturesFallBackToConfigurationWithNoStartupEvent(t *testing.T) {
+	db := newDB(t)
+	base := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+	seed(t, db, base, time.Minute, telemetry.StageDelivery, telemetry.OutcomeAllowed, "target-1")
+
+	report, err := Compute(db, 1, wideWindow(base), allFeatures())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if report.FeaturesSource != FeaturesSourceConfiguration {
+		t.Errorf("FeaturesSource = %q, want %q", report.FeaturesSource, FeaturesSourceConfiguration)
+	}
+	if report.Features != allFeatures() {
+		t.Errorf("Features = %+v, want the configured values %+v", report.Features, allFeatures())
+	}
+	if report.FeaturesScope == "" {
+		t.Error("FeaturesScope is empty; a report that fell back to configuration must say so")
+	}
+}
+
+// TestFeaturesReadFromStartupEventInsideWindow covers a proxy started during
+// the campaign, e.g. one brought up for the engagement.
+func TestFeaturesReadFromStartupEventInsideWindow(t *testing.T) {
+	db := newDB(t)
+	base := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+	seedStartup(t, db, base, 30*time.Second, true, false, true)
+
+	report, err := Compute(db, 1, wideWindow(base), Features{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if report.FeaturesSource != FeaturesSourceProxy {
+		t.Fatalf("FeaturesSource = %q, want %q", report.FeaturesSource, FeaturesSourceProxy)
+	}
+	want := Features{Cloaker: true, Verify: false, SessionValidator: true}
+	if report.Features != want {
+		t.Errorf("Features = %+v, want %+v (read from the proxy, not the empty configuration)", report.Features, want)
+	}
+	if report.FeaturesScope != "" {
+		t.Errorf("FeaturesScope = %q, want empty when the posture came from the proxy", report.FeaturesScope)
+	}
+}
+
+// TestFeaturesReadFromStartupEventBeforeWindow is the ordinary production
+// case and the reason this lookup is not bounded by the window on both
+// sides: a long-running proxy emits its startup event once, typically long
+// before any given campaign launches.
+func TestFeaturesReadFromStartupEventBeforeWindow(t *testing.T) {
+	db := newDB(t)
+	base := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+	window := Window{Start: base, End: base.Add(2 * time.Hour)}
+
+	// Proxy started a week before this campaign launched.
+	seedStartup(t, db, base, -7*24*time.Hour, true, true, false)
+
+	report, err := Compute(db, 1, window, Features{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if report.FeaturesSource != FeaturesSourceProxy {
+		t.Fatalf("FeaturesSource = %q, want %q: a proxy that started before the campaign still describes it",
+			report.FeaturesSource, FeaturesSourceProxy)
+	}
+	want := Features{Cloaker: true, Verify: true, SessionValidator: false}
+	if report.Features != want {
+		t.Errorf("Features = %+v, want %+v", report.Features, want)
+	}
+}
+
+// TestFeaturesIgnoreStartupEventAfterWindow pins the other edge: a proxy
+// restarted after the campaign finished says nothing about how the campaign
+// was measured, so it must not be read.
+func TestFeaturesIgnoreStartupEventAfterWindow(t *testing.T) {
+	db := newDB(t)
+	base := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+	window := Window{Start: base, End: base.Add(time.Hour)}
+
+	seedStartup(t, db, base, 2*time.Hour, true, true, true)
+
+	report, err := Compute(db, 1, window, Features{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if report.FeaturesSource != FeaturesSourceConfiguration {
+		t.Errorf("FeaturesSource = %q, want %q: an event after the window must be ignored",
+			report.FeaturesSource, FeaturesSourceConfiguration)
+	}
+	if report.Features != (Features{}) {
+		t.Errorf("Features = %+v, want the configured (empty) values", report.Features)
+	}
+}
+
+// TestFeaturesCombineAcrossRestarts covers a restart mid-campaign that turned
+// a control on. The combination is by OR and never last-one-wins: events from
+// the second proxy exist in the row set, and reporting the stage unmeasured
+// would hide real data. This mirrors buildFunnel's own upgrade-on-proof rule.
+func TestFeaturesCombineAcrossRestarts(t *testing.T) {
+	db := newDB(t)
+	base := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+	window := Window{Start: base, End: base.Add(4 * time.Hour)}
+
+	seedStartup(t, db, base, -time.Hour, false, true, false) // before launch
+	seedStartup(t, db, base, time.Hour, true, false, false)  // restarted with the cloaker on
+	seedStartup(t, db, base, 2*time.Hour, false, false, true)
+
+	report, err := Compute(db, 1, window, Features{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := Features{Cloaker: true, Verify: true, SessionValidator: true}
+	if report.Features != want {
+		t.Errorf("Features = %+v, want %+v (the union across every proxy serving the window)", report.Features, want)
+	}
+}
+
+// TestProxyPostureOverridesStaleConfiguration is the point of the whole
+// change. The campaign service is configured as though the cloaker were on;
+// the proxy says it was not. The report must follow the proxy and render the
+// cloak stage as not measured, rather than reporting "measured, blocked
+// nobody" for a control that was never running.
+func TestProxyPostureOverridesStaleConfiguration(t *testing.T) {
+	db := newDB(t)
+	base := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+	window := wideWindow(base)
+
+	seedStartup(t, db, base, -time.Minute, false, false, false)
+	seed(t, db, base, time.Minute, telemetry.StageDelivery, telemetry.OutcomeAllowed, "target-1")
+
+	report, err := Compute(db, 1, window, allFeatures())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if report.Features.Cloaker {
+		t.Error("Features.Cloaker = true, want false: the proxy reported the cloaker off")
+	}
+	if got := funnelStage(t, report, telemetry.StageCloak); got.Measured {
+		t.Error("cloak stage reported measured; a control that never ran must read as not measured, not as zero")
+	}
+}
+
+// TestStaleConfigurationDoesNotSuppressARunningControl is the mirror: the
+// configuration says a control was off, the proxy says it was on. The
+// report must follow the proxy, or a control that genuinely ran gets
+// reported as never measured.
+func TestStaleConfigurationDoesNotSuppressARunningControl(t *testing.T) {
+	db := newDB(t)
+	base := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+	window := wideWindow(base)
+
+	seedStartup(t, db, base, -time.Minute, true, true, true)
+	seed(t, db, base, time.Minute, telemetry.StageDelivery, telemetry.OutcomeAllowed, "target-1")
+
+	report, err := Compute(db, 1, window, Features{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, stage := range []telemetry.Stage{telemetry.StageCloak, telemetry.StageVerify, telemetry.StageReplay} {
+		if got := funnelStage(t, report, stage); !got.Measured {
+			t.Errorf("%s stage reported not measured, but the proxy reported the control enabled", stage)
+		}
+	}
+}

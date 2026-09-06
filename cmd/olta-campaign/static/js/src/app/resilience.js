@@ -56,6 +56,24 @@ function renderFunnel(funnel) {
         '<tbody>' + rows + '</tbody></table>'
 }
 
+// renderFeaturesScope builds the caption that must sit above the kill chain
+// whenever the measured/not-measured split came from the campaign service's
+// configuration rather than from the proxy's own startup record. The split is
+// the strongest claim this report makes, so a reader has to be told when it
+// rests on a hand-maintained value that may disagree with how olta-proxy was
+// actually launched. Nothing is rendered when the posture came from the
+// proxy: that is the ordinary case and needs no caveat.
+//
+// featuresScope is server-authored plain text (see
+// pkg/campaign/resilience.featuresScopeCaption) but is still escaped like any
+// other interpolated value.
+function renderFeaturesScope(featuresScope) {
+    if (!featuresScope) {
+        return ""
+    }
+    return '<div class="alert alert-warning"><small>' + escapeHtml(featuresScope) + '</small></div>'
+}
+
 // renderFrictionScope builds the caption required under Defensive Friction:
 // cloak/verify events are unattributed by design (they fire before lure
 // validation resolves a recipient), so the server can only bound them to
@@ -175,6 +193,7 @@ function loadResilience(campaignId) {
         .success(function (report) {
             report = report || {}
             $("#resilience-panel").html(
+                renderFeaturesScope(report.features_scope) +
                 renderFunnel(report.funnel) +
                 renderFriction(report.friction, report.friction_scope) +
                 renderRace(report.race) +

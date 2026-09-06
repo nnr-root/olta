@@ -38,30 +38,36 @@ type PhishServer struct {
 // enabled for this engagement, so the campaign resilience report knows
 // which kill-chain stages actually had a watcher.
 //
-// These three booleans SHOULD match how olta-proxy was launched
-// (-enable-cloaker, -enable-js-inspect, -enable-session-validator
-// respectively), but they are a floor, not the final word: the resilience
-// report (pkg/campaign/resilience) treats a false here as a claim that can
-// be corrected by observed evidence, not a fact taken on faith. asncloak,
-// jsinspect, and the session validation worker only ever emit an event for
-// their stage when the corresponding proxy feature is actually running, so
-// even one such event in the report's row set is hard proof the feature was
-// on. If that happens while the matching field here is false, the stage is
-// upgraded to measured automatically -- a stale false self-corrects.
+// These three booleans are now a FALLBACK, not the primary source. olta-proxy
+// records the configuration it actually started with as a
+// StageInitialization telemetry event, and the resilience report reads its
+// posture from there (see pkg/campaign/resilience.resolveFeatures), because
+// what the proxy was really launched with beats what someone wrote in a
+// config file. These values are used only when no proxy startup record
+// covering the campaign's time range exists -- a proxy predating startup
+// telemetry, or one whose events never reached this database -- and the
+// report says which of the two it used in its features_source field.
 //
-// A stale true does NOT self-correct: absence of events proves nothing (an
-// enabled feature can simply never match anything), so a field left true
-// after olta-proxy was actually launched without that flag will make the
-// report claim a stage was measured and clean when nothing was watching it.
-// That direction remains the operator's responsibility -- keep these three
-// booleans set to true only when the matching -enable-* flag is actually
-// passed to olta-proxy.
+// Where they are used, the same self-correction as before still applies: a
+// false here is a claim that can be corrected by observed evidence, not a
+// fact taken on faith. asncloak, jsinspect, and the session validation worker
+// only ever emit an event for their stage when the corresponding proxy
+// feature is actually running, so even one such event in the report's row set
+// is hard proof the feature was on, and the stage is upgraded to measured
+// automatically.
+//
+// A stale true still does not self-correct on that path, because absence of
+// events proves nothing -- an enabled feature can simply never match
+// anything. That was the hazard these fields carried on their own; reading
+// the proxy's own startup record removes it in the ordinary case, since the
+// proxy reports a disabled feature as disabled rather than staying silent.
 type TelemetryFeatures struct {
-	// Cloaker must match olta-proxy's -enable-cloaker flag.
+	// Cloaker is the fallback for olta-proxy's -enable-cloaker flag.
 	Cloaker bool `json:"cloaker"`
-	// Verify must match olta-proxy's -enable-js-inspect flag.
+	// Verify is the fallback for olta-proxy's -enable-js-inspect flag.
 	Verify bool `json:"verify"`
-	// SessionValidator must match olta-proxy's -enable-session-validator flag.
+	// SessionValidator is the fallback for olta-proxy's
+	// -enable-session-validator flag.
 	SessionValidator bool `json:"session_validator"`
 }
 

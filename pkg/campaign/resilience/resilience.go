@@ -21,6 +21,36 @@ type Features struct {
 	SessionValidator bool `json:"session_validator"`
 }
 
+// FeaturesSource records where a report's Features actually came from. The
+// distinction is load-bearing, not cosmetic: Features drives the
+// measured/unmeasured split, which is the single claim this report is most
+// careful about, and a hand-maintained configuration value can silently
+// disagree with how the proxy was really launched.
+type FeaturesSource string
+
+const (
+	// FeaturesSourceProxy means the posture was read from the proxy's own
+	// StageInitialization telemetry -- what the process was actually
+	// launched with, not what someone wrote in a config file.
+	FeaturesSourceProxy FeaturesSource = "proxy"
+
+	// FeaturesSourceConfiguration means no initialization event covering
+	// this campaign was found, so the caller's configured values were used.
+	// That happens with a proxy predating startup telemetry, or one whose
+	// events never reached this database.
+	FeaturesSourceConfiguration FeaturesSource = "configuration"
+)
+
+// Detail keys on a StageInitialization event that carry the proxy's
+// measurement posture. They are written by cmd/olta-proxy's
+// buildStartupEvent; changing either side without the other silently
+// returns the report to trusting configuration.
+const (
+	detailKeyCloakerEnabled          = "cloaker_enabled"
+	detailKeyJSInspectEnabled        = "js_inspect_enabled"
+	detailKeySessionValidatorEnabled = "session_validator_enabled"
+)
+
 // FunnelStage is one step of the kill chain.
 type FunnelStage struct {
 	Stage      telemetry.Stage       `json:"stage"`
@@ -160,11 +190,18 @@ type Window struct {
 
 // Report is the full per-campaign resilience view.
 type Report struct {
-	CampaignID int64           `json:"campaign_id"`
-	Features   Features        `json:"features"`
-	Funnel     []FunnelStage   `json:"funnel"`
-	Friction   []FrictionEntry `json:"friction"`
-	Race       RaceSummary     `json:"race"`
+	CampaignID int64    `json:"campaign_id"`
+	Features   Features `json:"features"`
+	// FeaturesSource says whether Features was read from the proxy's own
+	// startup telemetry or fell back to the caller's configuration, and
+	// FeaturesScope is the caveat to render when it fell back. A reader
+	// deciding what "not measured" means for this campaign needs to know
+	// which of the two they are looking at.
+	FeaturesSource FeaturesSource  `json:"features_source"`
+	FeaturesScope  string          `json:"features_scope,omitempty"`
+	Funnel         []FunnelStage   `json:"funnel"`
+	Friction       []FrictionEntry `json:"friction"`
+	Race           RaceSummary     `json:"race"`
 	// Passkey is the passkey/WebAuthn defense measure -- see PasskeyDefense's
 	// doc comment for the denominator and "not measured" rules that govern
 	// how a consumer must render it.
@@ -179,6 +216,14 @@ type Report struct {
 	UnattributedScoped bool   `json:"unattributed_scoped"`
 	FrictionScope      string `json:"friction_scope"`
 }
+
+// featuresScopeCaption travels with a report whose posture could not be read
+// from the proxy. It names the failure mode plainly rather than implying the
+// measured/unmeasured split is authoritative.
+const featuresScopeCaption = "No proxy startup record was found for this campaign's time range, " +
+	"so measured/not-measured below reflects the campaign service's configured telemetry settings " +
+	"rather than the flags olta-proxy was actually launched with. If the two disagree, this report " +
+	"does too."
 
 const frictionScopeCaption = "Cloak and verify counts include unattributed proxy traffic " +
 	"(no recipient was resolved yet) recorded during this campaign's time window. " +
@@ -248,12 +293,21 @@ type eventRow struct {
 // a pure query layer over telemetry_events: it does not query the
 // campaigns table itself. Every other stage is already campaign-scoped and
 // left unbounded by time.
-func Compute(db *gorm.DB, campaignID int64, window Window, enabled Features) (Report, error) {
+func Compute(db *gorm.DB, campaignID int64, window Window, configured Features) (Report, error) {
+	enabled, source, err := resolveFeatures(db, window, configured)
+	if err != nil {
+		return Report{}, err
+	}
+
 	report := Report{
 		CampaignID:         campaignID,
 		Features:           enabled,
+		FeaturesSource:     source,
 		UnattributedScoped: true,
 		FrictionScope:      frictionScopeCaption,
+	}
+	if source == FeaturesSourceConfiguration {
+		report.FeaturesScope = featuresScopeCaption
 	}
 
 	var rows []eventRow
@@ -270,6 +324,72 @@ func Compute(db *gorm.DB, campaignID int64, window Window, enabled Features) (Re
 	report.Race = buildRace(rows)
 	report.Passkey = buildPasskeyDefense(rows, enabled)
 	return report, nil
+}
+
+// resolveFeatures determines the measurement posture actually in effect for
+// a campaign, preferring the proxy's own StageInitialization telemetry over
+// the caller's configuration.
+//
+// Why this exists: Features drives the measured/unmeasured split, and the
+// caller's value comes from a "telemetry" block in the campaign service's
+// config.json that an operator has to keep in step, by hand, with the flags
+// olta-proxy was launched with. When those disagree the report does not
+// merely lose detail -- it makes a false claim, reporting "not measured" for
+// a control that ran, or "measured, saw nothing" for one that was never on.
+// That is exactly the distinction this package exists to protect. The proxy
+// already records what it really started with (cmd/olta-proxy's
+// buildStartupEvent), so the report reads that instead.
+//
+// Which events count: a long-running proxy emits its initialization event
+// once at startup, typically long before any given campaign launches, so
+// bounding this to the campaign window alone would almost always find
+// nothing. Instead it takes the last initialization event *before* the
+// window -- the posture in effect when the campaign launched -- together
+// with every initialization event *inside* the window, which is how a
+// restart mid-campaign shows up.
+//
+// How several events combine: by OR, never by last-one-wins. If any proxy
+// serving during the window had the cloaker on, cloak events for that proxy
+// can exist in the row set, and reporting them as unmeasured would hide real
+// data. This mirrors the rule buildFunnel already applies, which upgrades a
+// stage to measured on proof and never downgrades it.
+//
+// Falling back is not a failure: a proxy predating startup telemetry, or one
+// whose events never reached this database, leaves nothing to read and the
+// configured values are used, with the source recorded so the reader knows.
+func resolveFeatures(db *gorm.DB, window Window, configured Features) (Features, FeaturesSource, error) {
+	var priorRows []eventRow
+	prior := db.Table("telemetry_events").
+		Select("stage, detail, timestamp").
+		Where("stage = ? AND timestamp < ?", string(telemetry.StageInitialization), window.Start).
+		Order("timestamp desc").
+		Limit(1)
+	if err := prior.Scan(&priorRows).Error; err != nil {
+		return Features{}, "", err
+	}
+
+	var windowRows []eventRow
+	within := db.Table("telemetry_events").
+		Select("stage, detail, timestamp").
+		Where("stage = ? AND timestamp >= ? AND timestamp <= ?",
+			string(telemetry.StageInitialization), window.Start, window.End)
+	if err := within.Scan(&windowRows).Error; err != nil {
+		return Features{}, "", err
+	}
+
+	rows := append(priorRows, windowRows...)
+	if len(rows) == 0 {
+		return configured, FeaturesSourceConfiguration, nil
+	}
+
+	var observed Features
+	for _, row := range rows {
+		detail := parseDetail(row.Detail)
+		observed.Cloaker = observed.Cloaker || detailBool(detail, detailKeyCloakerEnabled)
+		observed.Verify = observed.Verify || detailBool(detail, detailKeyJSInspectEnabled)
+		observed.SessionValidator = observed.SessionValidator || detailBool(detail, detailKeySessionValidatorEnabled)
+	}
+	return observed, FeaturesSourceProxy, nil
 }
 
 // measured decides a stage's configured measured-state from Features alone.
