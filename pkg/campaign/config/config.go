@@ -84,6 +84,18 @@ type Config struct {
 	FeedEnabled    bool              `json:"feed_enabled"`
 	FeedURL        string            `json:"feed_url"`
 	Telemetry      TelemetryFeatures `json:"telemetry"`
+
+	// TelemetryRetentionDays bounds how long telemetry events are kept.
+	// Zero or negative keeps everything, which is the default and the
+	// behavior before retention existed -- an install that has been
+	// collecting for a year should not lose that history the moment it
+	// upgrades.
+	//
+	// Only telemetry_events is affected. Campaign results, events and
+	// delivery logs are the engagement's record and are never time-expired;
+	// removing personal data from those is a separate, explicitly requested
+	// purge (see pkg/campaign/retention).
+	TelemetryRetentionDays int `json:"telemetry_retention_days"`
 }
 
 // Version contains the current Olta Campaign version.

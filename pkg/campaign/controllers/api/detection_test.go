@@ -99,15 +99,7 @@ func TestDetectionsEndpointRequiresOwnership(t *testing.T) {
 	ctx := setupTest(t)
 	createTestData(t)
 
-	unauthorizedUser := models.User{
-		Username: "detection-houdini",
-		Hash:     "$2a$10$IYkPp0.QsyQIQZpZBsNsPuJKFY9LhtSy0d1sQrK9K7NNn3vFCJcSy",
-		ApiKey:   "detection-api-key",
-		Role:     models.Role{Slug: "user"},
-	}
-	if err := models.PutUser(&unauthorizedUser); err != nil {
-		t.Fatal(err)
-	}
+	unauthorizedUser := createUnpriviledgedUser(t, models.RoleUser)
 
 	for _, path := range []string{"/api/campaigns/1/detections", "/api/campaigns/1/detections/sigma"} {
 		request := httptest.NewRequest(http.MethodGet, path, nil)

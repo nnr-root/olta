@@ -113,6 +113,7 @@ func (as *Server) registerRoutes() {
 	router.HandleFunc("/campaigns/{id:[0-9]+}/resilience/navigator", as.ResilienceNavigator).Methods("GET")
 	router.HandleFunc("/campaigns/{id:[0-9]+}/detections", as.Detections).Methods("GET")
 	router.HandleFunc("/campaigns/{id:[0-9]+}/detections/sigma", as.DetectionsSigma).Methods("GET")
+	router.HandleFunc("/campaigns/{id:[0-9]+}/purge", as.CampaignPurge).Methods(http.MethodPost)
 	router.HandleFunc("/groups/", as.Groups)
 	router.HandleFunc("/groups/summary", as.GroupsSummary)
 	router.HandleFunc("/groups/{id:[0-9]+}", as.Group)

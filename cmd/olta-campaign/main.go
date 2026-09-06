@@ -26,12 +26,14 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 */
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"gopkg.in/alecthomas/kingpin.v2"
 
@@ -43,6 +45,7 @@ import (
 	"github.com/s4l1hs/olta/pkg/campaign/middleware"
 	"github.com/s4l1hs/olta/pkg/campaign/models"
 	"github.com/s4l1hs/olta/pkg/campaign/resilience"
+	"github.com/s4l1hs/olta/pkg/campaign/retention"
 	"github.com/s4l1hs/olta/pkg/campaign/webhook"
 	"github.com/s4l1hs/olta/pkg/campaign/worker"
 	"github.com/s4l1hs/olta/pkg/runtimepath"
@@ -68,6 +71,54 @@ var (
 	mode               = kingpin.Flag("mode", fmt.Sprintf("Run the binary in one of the modes (%s, %s or %s)", modeAll, modeAdmin, modePhish)).
 				Default("all").Enum(modeAll, modeAdmin, modePhish)
 )
+
+// retentionInterval is how often the pruner runs. Daily is deliberate: the
+// retention period is configured in days, so checking more often would delete
+// the same rows repeatedly for no benefit, and checking less often would let
+// an install drift past its own policy for longer than the policy allows.
+const retentionInterval = 24 * time.Hour
+
+// pruneTelemetryPeriodically enforces the configured telemetry retention
+// period. It returns immediately when retention is disabled, which is the
+// default -- an install that has been collecting for a year must not lose
+// that history just because it upgraded.
+//
+// The first prune runs at startup rather than after the first interval, so a
+// freshly configured retention period takes effect immediately instead of a
+// day later.
+func pruneTelemetryPeriodically(ctx context.Context, retentionDays int) {
+	if _, enabled := retention.CutoffFor(time.Now(), retentionDays); !enabled {
+		return
+	}
+	log.Infof("Telemetry retention enabled: events older than %d days will be pruned daily", retentionDays)
+
+	ticker := time.NewTicker(retentionInterval)
+	defer ticker.Stop()
+	for {
+		pruneTelemetryOnce(retentionDays)
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func pruneTelemetryOnce(retentionDays int) {
+	cutoff, enabled := retention.CutoffFor(time.Now(), retentionDays)
+	if !enabled {
+		return
+	}
+	summary, err := retention.PruneTelemetry(models.DB(), cutoff)
+	if err != nil {
+		log.Errorf("telemetry retention: %v", err)
+		return
+	}
+	if summary.TelemetryEvents > 0 {
+		log.Infof("Telemetry retention: pruned %d event(s) recorded before %s",
+			summary.TelemetryEvents, summary.Cutoff.Format(time.RFC3339))
+	}
+}
 
 func main() {
 	// Load the version
@@ -195,9 +246,12 @@ func main() {
 	phishServer := controllers.NewPhishingServer(phishConfig)
 
 	imapMonitor := imap.NewMonitor()
+	retentionCtx, stopRetention := context.WithCancel(context.Background())
+	defer stopRetention()
 	if *mode == "admin" || *mode == "all" {
 		go adminServer.Start()
 		go imapMonitor.Start()
+		go pruneTelemetryPeriodically(retentionCtx, conf.TelemetryRetentionDays)
 	}
 	if *mode == "phish" || *mode == "all" {
 		go phishServer.Start()
@@ -212,6 +266,7 @@ func main() {
 	if *mode == modeAdmin || *mode == modeAll {
 		adminServer.Shutdown()
 		imapMonitor.Shutdown()
+		stopRetention()
 	}
 	if *mode == modePhish || *mode == modeAll {
 		phishServer.Shutdown()
