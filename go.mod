@@ -95,4 +95,7 @@ require (
 	gopkg.in/square/go-jose.v2 v2.3.1 // indirect
 )
 
-replace github.com/elazarl/goproxy => github.com/kgretzky/goproxy v0.0.0-20220622134552-7d0e0c658440
+// Olta carries a patched copy of the goproxy fork so it can correct the
+// response framing handleHttps forces on MITM'd HTTPS traffic, which is not
+// reachable from outside the package. See third_party/goproxy/OLTA-PATCHES.md.
+replace github.com/elazarl/goproxy => ./third_party/goproxy
