@@ -35,6 +35,15 @@ func (s *recordingSink) Close() error {
 	return nil
 }
 
+// snapshot returns a copy of every event this sink received.
+func (s *recordingSink) snapshot() []Event {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]Event, len(s.events))
+	copy(out, s.events)
+	return out
+}
+
 func (s *recordingSink) count() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -337,5 +346,71 @@ func TestBusCloseReturnsWhenSinkIgnoresContext(t *testing.T) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("Close() blocked on a sink that ignores its context")
+	}
+}
+
+// TestBusStampsInstanceID covers why stamping lives on the bus rather than at
+// each call site: every event from one process carries the identity, with no
+// way for a new emitter to forget it.
+func TestBusStampsInstanceID(t *testing.T) {
+	sink := &recordingSink{}
+	bus := NewBusForInstance("instance-under-test", 8, sink)
+
+	bus.Emit(New(StageCloak, OutcomeBlocked, TechniqueProxy))
+	bus.Emit(New(StageVerify, OutcomeAllowed))
+	if err := bus.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	events := sink.snapshot()
+	if len(events) != 2 {
+		t.Fatalf("sink saw %d events, want 2", len(events))
+	}
+	for _, event := range events {
+		if event.InstanceID != "instance-under-test" {
+			t.Errorf("%s event InstanceID = %q, want the bus's instance", event.Stage, event.InstanceID)
+		}
+	}
+}
+
+// TestBusKeepsAnExplicitInstanceID lets an event that already carries an
+// identity keep it, so a relayed or replayed event is not re-attributed to
+// whichever process happened to forward it.
+func TestBusKeepsAnExplicitInstanceID(t *testing.T) {
+	sink := &recordingSink{}
+	bus := NewBusForInstance("forwarding-process", 8, sink)
+
+	event := New(StageCloak, OutcomeBlocked)
+	event.InstanceID = "originating-process"
+	bus.Emit(event)
+	if err := bus.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	events := sink.snapshot()
+	if len(events) != 1 {
+		t.Fatalf("sink saw %d events, want 1", len(events))
+	}
+	if events[0].InstanceID != "originating-process" {
+		t.Errorf("InstanceID = %q, want the identity the event arrived with", events[0].InstanceID)
+	}
+}
+
+// TestNewBusLeavesInstanceEmpty keeps the plain constructor's behavior
+// unchanged for the campaign service, which has no instance identity.
+func TestNewBusLeavesInstanceEmpty(t *testing.T) {
+	sink := &recordingSink{}
+	bus := NewBus(8, sink)
+	bus.Emit(New(StageDelivery, OutcomeAllowed))
+	if err := bus.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	events := sink.snapshot()
+	if len(events) != 1 {
+		t.Fatalf("sink saw %d events, want 1", len(events))
+	}
+	if events[0].InstanceID != "" {
+		t.Errorf("InstanceID = %q, want empty", events[0].InstanceID)
 	}
 }

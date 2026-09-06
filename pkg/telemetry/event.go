@@ -19,6 +19,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"net"
 	"reflect"
 	"strings"
 	"time"
@@ -97,15 +98,38 @@ type Actor struct {
 // and verify events fire before lure validation establishes a recipient
 // identity, so they carry neither.
 type Event struct {
-	ID         string         `json:"id"`
-	Timestamp  time.Time      `json:"timestamp"`
-	Stage      Stage          `json:"stage"`
-	Outcome    Outcome        `json:"outcome"`
-	Techniques []Technique    `json:"techniques,omitempty"`
-	CampaignID int64          `json:"campaign_id,omitempty"`
-	RID        string         `json:"rid,omitempty"`
-	Actor      Actor          `json:"actor"`
-	Detail     map[string]any `json:"detail,omitempty"`
+	ID         string      `json:"id"`
+	Timestamp  time.Time   `json:"timestamp"`
+	Stage      Stage       `json:"stage"`
+	Outcome    Outcome     `json:"outcome"`
+	Techniques []Technique `json:"techniques,omitempty"`
+	CampaignID int64       `json:"campaign_id,omitempty"`
+	RID        string      `json:"rid,omitempty"`
+
+	// InstanceID identifies the proxy process that produced the event. It is
+	// stamped by the bus rather than by each call site, so every event from
+	// one process carries the same value, and it is empty for events
+	// produced by the campaign service or by a bus with no instance set.
+	//
+	// It answers "which proxy served this" when several proxies write to one
+	// campaign database. It does NOT separate campaigns: two campaigns run
+	// through the same proxy share an instance. Host is what separates
+	// those.
+	InstanceID string `json:"instance_id,omitempty"`
+
+	// Host is the request hostname the event was produced serving, set on
+	// the stages that fire before lure validation resolves a recipient
+	// (cloak, verify, webauthn) and empty elsewhere. Those stages carry no
+	// CampaignID by construction, so the hostname is the only attribute
+	// tying them to the campaign whose lure they were reaching for -- which
+	// is what lets a report scope them to a campaign rather than to a time
+	// window shared with every other campaign on the install.
+	//
+	// It is the operator's own phishing hostname, not a victim attribute.
+	Host string `json:"host,omitempty"`
+
+	Actor  Actor          `json:"actor"`
+	Detail map[string]any `json:"detail,omitempty"`
 }
 
 // New builds an event with a fresh identity and the current UTC time.
@@ -124,6 +148,36 @@ func (e Event) WithCampaign(campaignID int64, rid string) Event {
 	e.CampaignID = campaignID
 	e.RID = rid
 	return e
+}
+
+// WithHost attaches the request hostname the event was produced serving.
+// See Event.Host for which stages set it and why.
+//
+// The value is normalized here rather than at the call site, because a
+// report matches events to a campaign by comparing this field for equality:
+// "Login.Example.com:443" and "login.example.com" have to be the same host
+// or the comparison silently finds nothing.
+func (e Event) WithHost(host string) Event {
+	e.Host = NormalizeHost(host)
+	return e
+}
+
+// NormalizeHost reduces a Host header or URL host to the form Event.Host
+// stores: lowercase, no port, no trailing root dot. A caller comparing its
+// own hostname against stored events must normalize it the same way, which
+// is why this is exported.
+func NormalizeHost(host string) string {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return ""
+	}
+	// An IPv6 literal keeps its brackets in a Host header ("[::1]:8443"),
+	// so only split on a colon that is not part of one.
+	if stripped, _, err := net.SplitHostPort(host); err == nil {
+		host = stripped
+	}
+	host = strings.TrimSuffix(host, ".")
+	return strings.ToLower(host)
 }
 
 // WithActor attaches request-source attributes.
@@ -273,6 +327,11 @@ func normalizeKey(key string) string {
 	}
 	return string(lowered)
 }
+
+// NewInstanceID returns an identity for one emitting process, in the same
+// 128-bit hex form as an event ID. Generate one per process at startup and
+// hand it to NewBusForInstance.
+func NewInstanceID() string { return newID() }
 
 func newID() string {
 	buffer := make([]byte, 16)

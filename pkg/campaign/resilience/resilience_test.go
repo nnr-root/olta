@@ -54,8 +54,8 @@ func allFeatures() Features {
 
 // wideWindow returns a window comfortably covering base +/- a day, for
 // tests that seed unattributed events and don't care about window edges.
-func wideWindow(base time.Time) Window {
-	return Window{Start: base.Add(-24 * time.Hour), End: base.Add(24 * time.Hour)}
+func wideWindow(base time.Time) Scope {
+	return Scope{Start: base.Add(-24 * time.Hour), End: base.Add(24 * time.Hour)}
 }
 
 func TestFunnelCountsDistinctTargetsPerStage(t *testing.T) {
@@ -94,7 +94,7 @@ func TestFunnelCountsDistinctTargetsPerStage(t *testing.T) {
 func TestDisabledStageIsNotMeasuredRatherThanZero(t *testing.T) {
 	db := newDB(t)
 	now := time.Now()
-	window := Window{Start: now.Add(-time.Hour), End: now.Add(time.Hour)}
+	window := Scope{Start: now.Add(-time.Hour), End: now.Add(time.Hour)}
 	report, err := Compute(db, 1, window, Features{Cloaker: false, Verify: true, SessionValidator: true})
 	if err != nil {
 		t.Fatal(err)
@@ -198,7 +198,7 @@ func TestRaceClassifiesAllThreeOutcomes(t *testing.T) {
 func TestUnattributedEventsScopedToCampaignWindow(t *testing.T) {
 	db := newDB(t)
 	base := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
-	window := Window{Start: base, End: base.Add(time.Hour)}
+	window := Scope{Start: base, End: base.Add(time.Hour)}
 
 	// Campaign 1's own attributed delivery, inside the window.
 	seed(t, db, base, time.Minute, telemetry.StageDelivery, telemetry.OutcomeAllowed, "c1-target")
@@ -866,7 +866,7 @@ func TestFeaturesReadFromStartupEventInsideWindow(t *testing.T) {
 func TestFeaturesReadFromStartupEventBeforeWindow(t *testing.T) {
 	db := newDB(t)
 	base := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
-	window := Window{Start: base, End: base.Add(2 * time.Hour)}
+	window := Scope{Start: base, End: base.Add(2 * time.Hour)}
 
 	// Proxy started a week before this campaign launched.
 	seedStartup(t, db, base, -7*24*time.Hour, true, true, false)
@@ -892,7 +892,7 @@ func TestFeaturesReadFromStartupEventBeforeWindow(t *testing.T) {
 func TestFeaturesIgnoreStartupEventAfterWindow(t *testing.T) {
 	db := newDB(t)
 	base := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
-	window := Window{Start: base, End: base.Add(time.Hour)}
+	window := Scope{Start: base, End: base.Add(time.Hour)}
 
 	seedStartup(t, db, base, 2*time.Hour, true, true, true)
 
@@ -917,7 +917,7 @@ func TestFeaturesIgnoreStartupEventAfterWindow(t *testing.T) {
 func TestFeaturesCombineAcrossRestarts(t *testing.T) {
 	db := newDB(t)
 	base := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
-	window := Window{Start: base, End: base.Add(4 * time.Hour)}
+	window := Scope{Start: base, End: base.Add(4 * time.Hour)}
 
 	seedStartup(t, db, base, -time.Hour, false, true, false) // before launch
 	seedStartup(t, db, base, time.Hour, true, false, false)  // restarted with the cloaker on
@@ -981,5 +981,136 @@ func TestStaleConfigurationDoesNotSuppressARunningControl(t *testing.T) {
 		if got := funnelStage(t, report, stage); !got.Measured {
 			t.Errorf("%s stage reported not measured, but the proxy reported the control enabled", stage)
 		}
+	}
+}
+
+// seedUnattributedOnHost writes one unattributed cloak event served on the
+// given hostname, the way asncloak emits it: no campaign, no RID, an actor,
+// and the host it was serving.
+func seedUnattributedOnHost(t *testing.T, db *gorm.DB, base time.Time, offset time.Duration, host, ip string) {
+	t.Helper()
+	event := telemetry.New(telemetry.StageCloak, telemetry.OutcomeBlocked, telemetry.TechniqueProxy).
+		WithHost(host).
+		WithActor(telemetry.Actor{IP: ip, ASN: "AS15169", Organization: "Google LLC"})
+	event.Timestamp = base.Add(offset)
+	if err := campaigndb.New(db).Emit(nil, event); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestUnattributedEventsScopedToCampaignHosts is the separation this scoping
+// exists for. Two campaigns run on one install at the same time on different
+// phishing hostnames; the time window cannot tell them apart, and before host
+// scoping each absorbed the other's cloaker traffic.
+func TestUnattributedEventsScopedToCampaignHosts(t *testing.T) {
+	db := newDB(t)
+	base := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+
+	seedUnattributedOnHost(t, db, base, time.Minute, "login.acme-corp.example", "198.51.100.10")
+	seedUnattributedOnHost(t, db, base, 2*time.Minute, "login.acme-corp.example", "198.51.100.11")
+	// A concurrent campaign on a different hostname.
+	seedUnattributedOnHost(t, db, base, 3*time.Minute, "sso.other-client.example", "203.0.113.5")
+
+	scope := wideWindow(base)
+	scope.Hosts = []string{"login.acme-corp.example"}
+
+	report, err := Compute(db, 1, scope, allFeatures())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !report.UnattributedHostScoped {
+		t.Error("UnattributedHostScoped = false, want true when hosts were supplied")
+	}
+	cloak := funnelStage(t, report, telemetry.StageCloak)
+	if cloak.Targets != 2 {
+		t.Errorf("cloak targets = %d, want 2: the third event belongs to a campaign on another hostname", cloak.Targets)
+	}
+	total := 0
+	for _, entry := range report.Friction {
+		total += entry.Count
+	}
+	if total != 2 {
+		t.Errorf("friction total = %d, want 2", total)
+	}
+}
+
+// TestUnattributedEventsWithoutHostsFallBackToWindow keeps the old behavior
+// available: a campaign whose URL yields no hostname is scoped by time alone,
+// exactly as before, and the report says so through both the flag and the
+// caption.
+func TestUnattributedEventsWithoutHostsFallBackToWindow(t *testing.T) {
+	db := newDB(t)
+	base := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+
+	seedUnattributedOnHost(t, db, base, time.Minute, "login.acme-corp.example", "198.51.100.10")
+	seedUnattributedOnHost(t, db, base, 2*time.Minute, "sso.other-client.example", "203.0.113.5")
+
+	report, err := Compute(db, 1, wideWindow(base), allFeatures())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if report.UnattributedHostScoped {
+		t.Error("UnattributedHostScoped = true, want false when no hosts were supplied")
+	}
+	if cloak := funnelStage(t, report, telemetry.StageCloak); cloak.Targets != 2 {
+		t.Errorf("cloak targets = %d, want 2: without hosts every unattributed event in the window counts", cloak.Targets)
+	}
+	if report.FrictionScope != frictionScopeCaption {
+		t.Error("FrictionScope should be the time-window caption when no hosts were supplied")
+	}
+}
+
+// TestUnattributedEventsWithoutAHostAreKept covers rows recorded before
+// hostnames were captured. Dropping them would silently erase the history of
+// every campaign that ran before the upgrade, so they are admitted on the
+// time window alone -- and the host-scoped caption says exactly that.
+func TestUnattributedEventsWithoutAHostAreKept(t *testing.T) {
+	db := newDB(t)
+	base := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+
+	seedUnattributedOnHost(t, db, base, time.Minute, "login.acme-corp.example", "198.51.100.10")
+	// A pre-upgrade event: no host at all.
+	seedUnattributedOnHost(t, db, base, 2*time.Minute, "", "198.51.100.11")
+	seedUnattributedOnHost(t, db, base, 3*time.Minute, "sso.other-client.example", "203.0.113.5")
+
+	scope := wideWindow(base)
+	scope.Hosts = []string{"login.acme-corp.example"}
+
+	report, err := Compute(db, 1, scope, allFeatures())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if cloak := funnelStage(t, report, telemetry.StageCloak); cloak.Targets != 2 {
+		t.Errorf("cloak targets = %d, want 2 (the matching host plus the host-less legacy row)", cloak.Targets)
+	}
+	if report.FrictionScope != frictionScopeHostCaption {
+		t.Error("FrictionScope should be the host-scoped caption, which is what discloses that host-less rows are still included")
+	}
+}
+
+// TestAttributedEventsIgnoreHostScope pins that host scoping only ever
+// narrows unattributed rows. An event already tied to this campaign by RID
+// belongs to it no matter which hostname served it -- a campaign whose URL
+// changed mid-engagement must not lose its own captures.
+func TestAttributedEventsIgnoreHostScope(t *testing.T) {
+	db := newDB(t)
+	base := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+
+	seed(t, db, base, time.Minute, telemetry.StageDelivery, telemetry.OutcomeAllowed, "target-1")
+	seed(t, db, base, 2*time.Minute, telemetry.StageCapture, telemetry.OutcomeCaptured, "target-1")
+
+	scope := wideWindow(base)
+	scope.Hosts = []string{"login.acme-corp.example"}
+
+	report, err := Compute(db, 1, scope, allFeatures())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if capture := funnelStage(t, report, telemetry.StageCapture); capture.Targets != 1 {
+		t.Errorf("capture targets = %d, want 1: attributed events are scoped by campaign_id, never by host", capture.Targets)
 	}
 }

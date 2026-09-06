@@ -267,10 +267,14 @@ CREATE TABLE IF NOT EXISTS `telemetry_events` (
     `rid` VARCHAR(255),
     `actor` TEXT,
     `detail` TEXT,
+    `instance_id` VARCHAR(32),
+    `host` VARCHAR(255),
     UNIQUE INDEX `idx_telemetry_events_event_id` (`event_id`),
     INDEX `idx_telemetry_events_campaign_id` (`campaign_id`),
     INDEX `idx_telemetry_events_rid` (`rid`),
-    INDEX `idx_telemetry_events_timestamp` (`timestamp`)
+    INDEX `idx_telemetry_events_timestamp` (`timestamp`),
+    INDEX `idx_telemetry_events_instance_id` (`instance_id`),
+    INDEX `idx_telemetry_events_host` (`host`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 INSERT IGNORE INTO `roles` (`slug`, `name`, `description`) VALUES

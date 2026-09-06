@@ -176,16 +176,31 @@ type RaceSummary struct {
 	HasMedianTimeToReport bool `json:"has_median_time_to_report"`
 }
 
-// Window bounds the unattributed (campaign_id = 0) cloak and verify events
-// folded into a campaign's report. Attributed rows need no bound: they are
-// already scoped by campaign_id. Cloak/verify events fire before lure
-// validation establishes a recipient, so they can never be attributed to a
-// campaign directly -- the window is the only correlation available, and it
-// is an approximation, not a guarantee: two campaigns running concurrently
-// on the same proxy install can still share a window.
-type Window struct {
+// Scope bounds the unattributed (campaign_id = 0) cloak, verify and webauthn
+// events folded into a campaign's report. Attributed rows need no bound:
+// they are already scoped by campaign_id. Those three stages fire before
+// lure validation establishes a recipient, so they can never carry one.
+//
+// Two dimensions bound them, and the difference between having one and
+// having both is the difference between an approximation and a fact:
+//
+//   - Start/End is the campaign's active period. On its own it is only an
+//     approximation, because two campaigns running concurrently on one
+//     install share a window and therefore share each other's unattributed
+//     traffic.
+//
+//   - Hosts is the campaign's own phishing hostname(s). Events carry the
+//     hostname they were serving (see telemetry.Event.Host), so campaigns
+//     on different hostnames no longer contaminate each other regardless of
+//     overlap in time. Campaigns sharing one hostname fall back to the
+//     window alone, which is honest: nothing in the data distinguishes them.
+//
+// Hosts may be empty, in which case only the window applies and the report
+// says so. Entries must be normalized with telemetry.NormalizeHost.
+type Scope struct {
 	Start time.Time
 	End   time.Time
+	Hosts []string
 }
 
 // Report is the full per-campaign resilience view.
@@ -213,8 +228,13 @@ type Report struct {
 	// traffic to the campaign's active period, but it cannot prove the
 	// traffic came from this campaign rather than another one running on
 	// the same install at the same time.
-	UnattributedScoped bool   `json:"unattributed_scoped"`
-	FrictionScope      string `json:"friction_scope"`
+	UnattributedScoped bool `json:"unattributed_scoped"`
+	// UnattributedHostScoped is true when those events were additionally
+	// narrowed to the campaign's own phishing hostnames, which turns the
+	// time-window approximation into an actual separation between campaigns
+	// running concurrently on one install.
+	UnattributedHostScoped bool   `json:"unattributed_host_scoped"`
+	FrictionScope          string `json:"friction_scope"`
 }
 
 // featuresScopeCaption travels with a report whose posture could not be read
@@ -228,6 +248,17 @@ const featuresScopeCaption = "No proxy startup record was found for this campaig
 const frictionScopeCaption = "Cloak and verify counts include unattributed proxy traffic " +
 	"(no recipient was resolved yet) recorded during this campaign's time window. " +
 	"They may include traffic from other campaigns running concurrently on the same install."
+
+// frictionScopeHostCaption replaces the caption above once the unattributed
+// events have also been narrowed to the campaign's own hostnames. The claim
+// is genuinely stronger, so the caveat is genuinely smaller -- but it is not
+// absent: events recorded before hostnames were stamped carry none and are
+// still admitted on the time window alone.
+const frictionScopeHostCaption = "Cloak and verify counts include unattributed proxy traffic " +
+	"(no recipient was resolved yet) served on this campaign's own phishing hostnames during its " +
+	"time window, so traffic for campaigns running on other hostnames is excluded. Events recorded " +
+	"before hostnames were captured carry none and are still included on the time window alone; " +
+	"campaigns sharing a hostname cannot be separated at all."
 
 // passkeyScopeCaption is PasskeyDefense.Scope's default text: it holds
 // regardless of whether this campaign's data happens to show a correlation
@@ -282,6 +313,10 @@ type eventRow struct {
 	// primary key, and the row set here is already bounded to one
 	// campaign's window.
 	Detail string
+	// Host is selected so the scoping decision is visible in the row set
+	// itself, and so a future consumer can group by hostname without
+	// another query.
+	Host string
 }
 
 // Compute builds the report for one campaign.
@@ -293,18 +328,22 @@ type eventRow struct {
 // a pure query layer over telemetry_events: it does not query the
 // campaigns table itself. Every other stage is already campaign-scoped and
 // left unbounded by time.
-func Compute(db *gorm.DB, campaignID int64, window Window, configured Features) (Report, error) {
-	enabled, source, err := resolveFeatures(db, window, configured)
+func Compute(db *gorm.DB, campaignID int64, scope Scope, configured Features) (Report, error) {
+	enabled, source, err := resolveFeatures(db, scope, configured)
 	if err != nil {
 		return Report{}, err
 	}
 
 	report := Report{
-		CampaignID:         campaignID,
-		Features:           enabled,
-		FeaturesSource:     source,
-		UnattributedScoped: true,
-		FrictionScope:      frictionScopeCaption,
+		CampaignID:             campaignID,
+		Features:               enabled,
+		FeaturesSource:         source,
+		UnattributedScoped:     true,
+		UnattributedHostScoped: len(scope.Hosts) > 0,
+		FrictionScope:          frictionScopeCaption,
+	}
+	if len(scope.Hosts) > 0 {
+		report.FrictionScope = frictionScopeHostCaption
 	}
 	if source == FeaturesSourceConfiguration {
 		report.FeaturesScope = featuresScopeCaption
@@ -312,9 +351,21 @@ func Compute(db *gorm.DB, campaignID int64, window Window, configured Features) 
 
 	var rows []eventRow
 	query := db.Table("telemetry_events").
-		Select("stage, outcome, rid, timestamp, actor, campaign_id, detail").
-		Where("campaign_id = ? OR (campaign_id = 0 AND timestamp >= ? AND timestamp <= ?)",
-			campaignID, window.Start, window.End)
+		Select("stage, outcome, rid, timestamp, actor, campaign_id, detail, host")
+	if len(scope.Hosts) == 0 {
+		query = query.Where("campaign_id = ? OR (campaign_id = 0 AND timestamp >= ? AND timestamp <= ?)",
+			campaignID, scope.Start, scope.End)
+	} else {
+		// An unattributed row is this campaign's when it was served on one
+		// of the campaign's own hostnames. Rows with no hostname are kept
+		// rather than dropped: every event recorded before host stamping
+		// existed has a null host, and excluding them would silently erase
+		// the history of any campaign that ran before the upgrade. The
+		// caption says as much.
+		query = query.Where(
+			"campaign_id = ? OR (campaign_id = 0 AND timestamp >= ? AND timestamp <= ? AND (host IN (?) OR host IS NULL OR host = ''))",
+			campaignID, scope.Start, scope.End, scope.Hosts)
+	}
 	if err := query.Scan(&rows).Error; err != nil {
 		return Report{}, err
 	}
@@ -357,11 +408,11 @@ func Compute(db *gorm.DB, campaignID int64, window Window, configured Features) 
 // Falling back is not a failure: a proxy predating startup telemetry, or one
 // whose events never reached this database, leaves nothing to read and the
 // configured values are used, with the source recorded so the reader knows.
-func resolveFeatures(db *gorm.DB, window Window, configured Features) (Features, FeaturesSource, error) {
+func resolveFeatures(db *gorm.DB, scope Scope, configured Features) (Features, FeaturesSource, error) {
 	var priorRows []eventRow
 	prior := db.Table("telemetry_events").
 		Select("stage, detail, timestamp").
-		Where("stage = ? AND timestamp < ?", string(telemetry.StageInitialization), window.Start).
+		Where("stage = ? AND timestamp < ?", string(telemetry.StageInitialization), scope.Start).
 		Order("timestamp desc").
 		Limit(1)
 	if err := prior.Scan(&priorRows).Error; err != nil {
@@ -372,7 +423,7 @@ func resolveFeatures(db *gorm.DB, window Window, configured Features) (Features,
 	within := db.Table("telemetry_events").
 		Select("stage, detail, timestamp").
 		Where("stage = ? AND timestamp >= ? AND timestamp <= ?",
-			string(telemetry.StageInitialization), window.Start, window.End)
+			string(telemetry.StageInitialization), scope.Start, scope.End)
 	if err := within.Scan(&windowRows).Error; err != nil {
 		return Features{}, "", err
 	}

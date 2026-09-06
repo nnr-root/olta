@@ -142,6 +142,7 @@ func (middleware *Middleware) emitCloak(request *http.Request, match Match) {
 
 	middleware.config.Emitter.Emit(
 		telemetry.New(telemetry.StageCloak, outcome, telemetry.TechniqueProxy).
+			WithHost(request.Host).
 			WithActor(actor).
 			WithDetail("rule", match.Rule).
 			WithDetail("match_detail", match.Detail),

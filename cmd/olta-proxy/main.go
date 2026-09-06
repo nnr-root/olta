@@ -347,7 +347,12 @@ func main() {
 		}
 		sinks = append(sinks, fileSink)
 	}
-	telemetryBus := telemetry.NewBus(1024, sinks...)
+	// One identity per proxy process, stamped by the bus onto every event.
+	// It says which proxy served an event when several write to one campaign
+	// database; it does not separate campaigns, which is what the hostname on
+	// each unattributed event is for.
+	instanceID := telemetry.NewInstanceID()
+	telemetryBus := telemetry.NewBusForInstance(instanceID, 1024, sinks...)
 	defer func() {
 		if err := telemetryBus.Close(); err != nil {
 			log.Error("telemetry bus shutdown: %v", err)

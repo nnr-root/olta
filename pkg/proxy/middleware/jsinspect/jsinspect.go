@@ -256,6 +256,7 @@ func (middleware *Middleware) emitVerify(request *http.Request, assertion Assert
 
 	middleware.config.Emitter.Emit(
 		telemetry.New(telemetry.StageVerify, outcome, telemetry.TechniqueSandboxEvasion).
+			WithHost(request.Host).
 			WithActor(telemetry.Actor{
 				IP:        clientIP(request),
 				UserAgent: request.UserAgent(),
@@ -280,6 +281,7 @@ func (middleware *Middleware) emitWebAuthn(request *http.Request, assertion Asse
 	}
 	middleware.config.Emitter.Emit(
 		telemetry.New(telemetry.StageWebAuthn, telemetry.OutcomeAllowed).
+			WithHost(request.Host).
 			WithActor(telemetry.Actor{
 				IP:        clientIP(request),
 				UserAgent: request.UserAgent(),

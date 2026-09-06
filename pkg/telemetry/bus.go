@@ -45,6 +45,13 @@ type Bus struct {
 	sinks []Sink
 	queue chan Event
 
+	// instanceID is stamped onto every event this bus accepts. It is set
+	// once at construction and never written again, so Emit can read it
+	// without synchronization -- which is why there is no setter: a setter
+	// would be written after the drain goroutine and the request goroutines
+	// already exist.
+	instanceID string
+
 	// mu makes the closed-check and the queue send atomic with respect to
 	// Close. Without it, Emit can pass its closed-check, Close can then
 	// close the queue, and Emit's send panics on a closed channel — an
@@ -100,12 +107,28 @@ type Bus struct {
 
 // NewBus starts the drain goroutine. A queueSize below 1 is raised to 1.
 // With no sinks the bus is a no-op that still satisfies Emitter.
+//
+// Events carry no instance identity; use NewBusForInstance when the emitting
+// process has one.
 func NewBus(queueSize int, sinks ...Sink) *Bus {
+	return NewBusForInstance("", queueSize, sinks...)
+}
+
+// NewBusForInstance is NewBus with an instance identity stamped onto every
+// event the bus accepts.
+//
+// Stamping happens here rather than at each call site for two reasons: every
+// event from one process is guaranteed to carry the same value, with no way
+// for a new emitter to forget it; and the identity is fixed at construction,
+// so Emit reads it without synchronization. See Event.InstanceID for what it
+// does and does not distinguish.
+func NewBusForInstance(instanceID string, queueSize int, sinks ...Sink) *Bus {
 	if queueSize < 1 {
 		queueSize = 1
 	}
 	bus := &Bus{
 		sinks:          sinks,
+		instanceID:     instanceID,
 		queue:          make(chan Event, queueSize),
 		abandon:        make(chan struct{}),
 		allSinksClosed: make(chan struct{}),
@@ -124,6 +147,9 @@ func NewBus(queueSize int, sinks ...Sink) *Bus {
 func (b *Bus) Emit(event Event) {
 	if b == nil {
 		return
+	}
+	if event.InstanceID == "" {
+		event.InstanceID = b.instanceID
 	}
 	b.mu.RLock()
 	defer b.mu.RUnlock()

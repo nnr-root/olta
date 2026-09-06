@@ -77,7 +77,7 @@ func TestApplyRejectsIncompleteLegacySchema(t *testing.T) {
 
 func TestApplyMigratesVersionOneSQLiteSchema(t *testing.T) {
 	db := openSQLiteTestDatabase(t)
-	legacySchema := schemaWithoutSessionTagging(sqliteSchema)
+	legacySchema := schemaBeforeSessionTagging(sqliteSchema)
 	legacySchema = schemaWithoutRecipientPersonalization(legacySchema)
 	legacySchema = schemaWithoutSecretStorage(legacySchema)
 	legacySchema = strings.Replace(legacySchema, ",\n    min_send_delay BIGINT NOT NULL DEFAULT 0,\n    max_send_delay BIGINT NOT NULL DEFAULT 0", "", 1)
@@ -140,7 +140,7 @@ func TestApplyMigratesVersionOneSQLiteSchema(t *testing.T) {
 
 func TestApplyMigratesVersionTwoSQLiteSchema(t *testing.T) {
 	db := openSQLiteTestDatabase(t)
-	versionTwoSchema := schemaWithoutSessionTagging(sqliteSchema)
+	versionTwoSchema := schemaBeforeSessionTagging(sqliteSchema)
 	versionTwoSchema = schemaWithoutRecipientPersonalization(versionTwoSchema)
 	versionTwoSchema = schemaWithoutSecretStorage(versionTwoSchema)
 	if err := executeSchema(db, versionTwoSchema); err != nil {
@@ -173,7 +173,7 @@ func TestApplyMigratesVersionTwoSQLiteSchema(t *testing.T) {
 
 func TestApplyMigratesVersionThreeSQLiteSchema(t *testing.T) {
 	db := openSQLiteTestDatabase(t)
-	versionThreeSchema := schemaWithoutSessionTagging(sqliteSchema)
+	versionThreeSchema := schemaBeforeSessionTagging(sqliteSchema)
 	versionThreeSchema = strings.ReplaceAll(versionThreeSchema, ",\n    language VARCHAR(32)", "")
 	versionThreeSchema = schemaWithoutSecretStorage(versionThreeSchema)
 	if err := executeSchema(db, versionThreeSchema); err != nil {
@@ -220,7 +220,7 @@ func schemaWithoutSecretStorage(schema string) string {
 
 func TestApplyMigratesVersionFourSQLiteSchema(t *testing.T) {
 	db := openSQLiteTestDatabase(t)
-	versionFourSchema := schemaWithoutSessionTagging(sqliteSchema)
+	versionFourSchema := schemaBeforeSessionTagging(sqliteSchema)
 	versionFourSchema = schemaWithoutSecretStorage(versionFourSchema)
 	if err := executeSchema(db, versionFourSchema); err != nil {
 		t.Fatal(err)
@@ -299,8 +299,8 @@ func TestTelemetryEventsTableExistsOnFreshInstall(t *testing.T) {
 	if version != CurrentVersion {
 		t.Fatalf("version = %d, want %d", version, CurrentVersion)
 	}
-	if CurrentVersion != 7 {
-		t.Fatalf("CurrentVersion = %d, want 7", CurrentVersion)
+	if CurrentVersion != 8 {
+		t.Fatalf("CurrentVersion = %d, want 8", CurrentVersion)
 	}
 
 	for _, column := range []string{
@@ -375,6 +375,26 @@ func schemaWithoutSessionTagging(schema string) string {
 	return schema
 }
 
+// schemaWithoutTelemetryScope strips the telemetry scope columns/indexes
+// migration 008 adds from the full unified schema, producing a
+// version-7-equivalent schema for upgrade testing. Mirrors
+// schemaWithoutSessionTagging above.
+func schemaWithoutTelemetryScope(schema string) string {
+	schema = strings.Replace(schema,
+		"    detail TEXT,\n    instance_id VARCHAR(32),\n    host VARCHAR(255)\n)",
+		"    detail TEXT\n)", 1)
+	schema = strings.ReplaceAll(schema, "CREATE INDEX IF NOT EXISTS idx_telemetry_events_instance_id ON telemetry_events(instance_id);", "")
+	schema = strings.ReplaceAll(schema, "CREATE INDEX IF NOT EXISTS idx_telemetry_events_host ON telemetry_events(host);", "")
+	return schema
+}
+
+// schemaBeforeSessionTagging produces a pre-007 schema: every later
+// migration's additions stripped, so an upgrade test starting at version 6
+// or earlier does not collide with a column the fresh schema already has.
+func schemaBeforeSessionTagging(schema string) string {
+	return schemaWithoutTelemetryScope(schemaWithoutSessionTagging(schema))
+}
+
 // TestSessionTaggingColumnsExistOnFreshInstall proves the fresh-install
 // schema (001) and the numbered migration (007) agree: a brand new
 // database gets the operator tagging columns on the results table without
@@ -416,7 +436,7 @@ func TestSessionTaggingColumnsExistOnFreshInstall(t *testing.T) {
 // gets from 001, including the same default.
 func TestSessionTaggingUpgradeFromVersionSix(t *testing.T) {
 	db := openSQLiteTestDatabase(t)
-	versionSixSchema := schemaWithoutSessionTagging(sqliteSchema)
+	versionSixSchema := schemaBeforeSessionTagging(sqliteSchema)
 	if err := executeSchema(db, versionSixSchema); err != nil {
 		t.Fatal(err)
 	}
@@ -448,5 +468,70 @@ func TestSessionTaggingUpgradeFromVersionSix(t *testing.T) {
 	}
 	if status != "untriaged" {
 		t.Fatalf("session_status for pre-existing row = %q, want untriaged", status)
+	}
+}
+
+// TestTelemetryScopeColumnsExistOnFreshInstall proves the fresh-install
+// schema (001) and the numbered migration (008) agree: a brand new database
+// gets the scope columns on telemetry_events without replaying migrations.
+func TestTelemetryScopeColumnsExistOnFreshInstall(t *testing.T) {
+	db := openSQLiteTestDatabase(t)
+	if err := Apply(db, "sqlite3"); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, column := range []string{"instance_id", "host"} {
+		var count int
+		query := `SELECT COUNT(*) FROM pragma_table_info('telemetry_events') WHERE name = ?`
+		if err := db.QueryRow(query, column).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 1 {
+			t.Fatalf("fresh install is missing telemetry_events.%s", column)
+		}
+	}
+}
+
+// TestTelemetryScopeUpgradeFromVersionSeven proves migration 008 brings an
+// existing database up to the same shape a fresh install gets from 001, and
+// that rows written before the upgrade survive it with the new columns empty
+// rather than the upgrade failing or inventing a value for them.
+func TestTelemetryScopeUpgradeFromVersionSeven(t *testing.T) {
+	db := openSQLiteTestDatabase(t)
+	versionSevenSchema := schemaWithoutTelemetryScope(sqliteSchema)
+	if err := executeSchema(db, versionSevenSchema); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureVersionTable(db, "sqlite3"); err != nil {
+		t.Fatal(err)
+	}
+	if err := recordVersion(db, 7); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO telemetry_events (event_id, timestamp, stage, outcome)
+		VALUES ('legacyevent0000000000000000000', '2026-08-01 00:00:00', 'cloak', 'blocked')`); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Apply(db, "sqlite3"); err != nil {
+		t.Fatalf("upgrade v7 to current: %v", err)
+	}
+
+	version, err := currentVersion(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if version != CurrentVersion {
+		t.Fatalf("version after upgrade = %d, want %d", version, CurrentVersion)
+	}
+
+	var instanceID, host sql.NullString
+	query := `SELECT instance_id, host FROM telemetry_events WHERE event_id='legacyevent0000000000000000000'`
+	if err := db.QueryRow(query).Scan(&instanceID, &host); err != nil {
+		t.Fatal(err)
+	}
+	if instanceID.Valid || host.Valid {
+		t.Fatalf("pre-existing row got instance_id=%v host=%v, want both null: the upgrade must not invent a scope for events recorded before it",
+			instanceID, host)
 	}
 }

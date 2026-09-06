@@ -242,7 +242,9 @@ CREATE TABLE IF NOT EXISTS telemetry_events (
     campaign_id BIGINT,
     rid VARCHAR(255),
     actor TEXT,
-    detail TEXT
+    detail TEXT,
+    instance_id VARCHAR(32),
+    host VARCHAR(255)
 );
 
 CREATE INDEX IF NOT EXISTS idx_templates_user_id ON templates(user_id);
@@ -270,6 +272,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_telemetry_events_event_id ON telemetry_eve
 CREATE INDEX IF NOT EXISTS idx_telemetry_events_campaign_id ON telemetry_events(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_telemetry_events_rid ON telemetry_events(rid);
 CREATE INDEX IF NOT EXISTS idx_telemetry_events_timestamp ON telemetry_events(timestamp);
+CREATE INDEX IF NOT EXISTS idx_telemetry_events_instance_id ON telemetry_events(instance_id);
+CREATE INDEX IF NOT EXISTS idx_telemetry_events_host ON telemetry_events(host);
 
 INSERT OR IGNORE INTO roles(slug, name, description) VALUES
     ('admin', 'Admin', 'Olta system administrator with full permissions'),
