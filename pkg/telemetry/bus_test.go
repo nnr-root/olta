@@ -1,8 +1,11 @@
 package telemetry
 
 import (
+	"bytes"
 	"context"
+	"log"
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -101,6 +104,46 @@ func TestBusEmitNeverBlocksOnStalledSink(t *testing.T) {
 
 	if bus.Dropped() == 0 {
 		t.Fatal("Dropped() = 0, want overflow to be counted")
+	}
+}
+
+// TestBusLogsFirstDropOnce covers the one signal an operator gets while an
+// engagement is still running. Emit runs on the victim-facing request path,
+// so it cannot log per drop; it logs the first one and nothing after it, and
+// this asserts both halves -- that the warning appears at all, and that a
+// hundred further drops add nothing to the log.
+//
+// It captures the standard logger's output because that is what the bus
+// writes to, and restores it afterwards. Not parallel, for that reason.
+func TestBusLogsFirstDropOnce(t *testing.T) {
+	var captured bytes.Buffer
+	previousOutput := log.Writer()
+	previousFlags := log.Flags()
+	log.SetOutput(&captured)
+	log.SetFlags(0)
+	t.Cleanup(func() {
+		log.SetOutput(previousOutput)
+		log.SetFlags(previousFlags)
+	})
+
+	release := make(chan struct{})
+	sink := &recordingSink{block: release}
+	bus := NewBus(2, sink)
+	defer func() { close(release); _ = bus.Close() }()
+
+	for i := 0; i < 100; i++ {
+		bus.Emit(New(StageCloak, OutcomeBlocked, TechniqueProxy))
+	}
+
+	if bus.Dropped() == 0 {
+		t.Fatal("Dropped() = 0, want overflow to be counted")
+	}
+	if got := strings.Count(captured.String(), "event queue full"); got != 1 {
+		t.Errorf("queue-full log lines = %d, want exactly 1 for %d drops:\n%s",
+			got, bus.Dropped(), captured.String())
+	}
+	if !strings.Contains(captured.String(), "size 2") {
+		t.Errorf("log does not name the queue size, which is what the operator has to change:\n%s", captured.String())
 	}
 }
 

@@ -57,6 +57,17 @@ type Bus struct {
 	once sync.Once
 	wg   sync.WaitGroup
 
+	// dropOnce logs the first queue overflow and nothing after it. A sink
+	// failure already logs per event (see deliver), but a queue overflow
+	// happens on Emit, which runs on the victim-facing request path and
+	// must never pay for I/O -- so a per-drop log is not an option, and
+	// the counter alone meant the operator learned about an undersized
+	// queue only by reading Dropped() at shutdown, long after the events
+	// were gone. One log on the first drop costs the hot path a single
+	// atomic-guarded call for the process lifetime and tells the operator
+	// while the engagement is still running.
+	dropOnce sync.Once
+
 	// dropped counts events the queue had no room for; failed counts events
 	// a sink rejected or timed out on; undelivered counts events Close gave
 	// up on entirely because the overall shutdown deadline passed before
@@ -123,6 +134,10 @@ func (b *Bus) Emit(event Event) {
 	case b.queue <- event:
 	default:
 		b.dropped.Add(1)
+		b.dropOnce.Do(func() {
+			log.Printf("telemetry: event queue full (size %d); dropping events to keep the request path fast. "+
+				"Further drops are counted in Dropped() and not logged.", cap(b.queue))
+		})
 	}
 }
 

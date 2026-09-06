@@ -352,6 +352,19 @@ func main() {
 		if err := telemetryBus.Close(); err != nil {
 			log.Error("telemetry bus shutdown: %v", err)
 		}
+		// The bus separates three different losses on purpose; report them
+		// separately too, because each one points at a different fix. An
+		// engagement report is computed from telemetry_events alone, so
+		// any of these being non-zero means the report a defender reads is
+		// missing data with nothing in it to say so -- this line is the
+		// only place that fact surfaces.
+		dropped, failed, undelivered := telemetryBus.Dropped(), telemetryBus.Failed(), telemetryBus.Undelivered()
+		if dropped == 0 && failed == 0 && undelivered == 0 {
+			log.Debug("telemetry: no events lost")
+			return
+		}
+		log.Warning("telemetry: %d event(s) lost -- %d dropped (queue too small), %d failed (a sink rejected or timed out), %d undelivered (shutdown deadline passed). The engagement report is incomplete by that many events.",
+			dropped+failed+undelivered, dropped, failed, undelivered)
 	}()
 	campaignEvents.SetEmitter(telemetryBus)
 
